@@ -3,8 +3,10 @@
 > **Module id:** `platform` (module 1 of 14 in [CAPABILITY-MAP.md](CAPABILITY-MAP.md))
 > **Depends on:** nothing. **Every other module depends on this one.**
 > **Status:** APPROVED 2026-11-17 · Plan: [tasks/plan.md](tasks/plan.md) · Tasks: [tasks/todo.md](tasks/todo.md)
-> **Stories:** NFR-4 (dashboards and alerts, baseline only), NFR-6 (independent deploys, build only)
-> **Resolves:** C2 (Kafka only), C4 (no cross-schema FKs; enforcement mechanism), C6 (outbox per transaction)
+> **Stories:** NFR-4 (dashboards and alerts, baseline only). NFR-6 is deferred to the shipping phase (map C18).
+> **Resolves:** C2 (Kafka only), C4 (no cross-schema FKs; enforcement), C6 (outbox, revised),
+> C12 (app containers), C13 (OpenAPI + generated types), C14 (per-IP rate limit), C15 (topic keys),
+> C16 (Kafka-only cross-module consumption, replayable topics)
 
 ## Objective
 
@@ -26,14 +28,16 @@ build, infra, eventing, or error-handling plumbing.**
 | Area | Deliverable |
 |---|---|
 | Monorepo | Layout from Arch §9, root build, version catalog, formatting, `.editorconfig`, `.gitignore`, `README.md` |
-| `shared-kernel` | Typed ids, `Money`, clock abstraction, `DomainEvent` envelope, `ProblemCode` error model, consumer-side idempotency helper |
+| `shared-kernel` | Typed ids, `Money`, time (`TimeRange` with overlap check, test clocks), `DomainEvent` envelope, `Topics` (name, key, partitions), `ProblemCode` error model (Arch §7: "ids, money, time") |
 | Backend apps (empty) | `core-app` (Spring Modulith, no feature modules yet), `registration-service`, `notification-service`, `gateway`. Each starts, reports health, and exposes metrics |
 | Persistence | PostgreSQL with one schema per module. Flyway per app. Each extracted service uses a DB user limited to its own schema |
-| Eventing | Transactional outbox → Kafka relay. Event envelope. Topic declaration convention. Idempotent-consumer support. Trace context in Kafka headers |
+| Eventing | Transactional outbox → Kafka. Event envelope. Per-topic message keys (Arch §6). Cross-module consumption only from Kafka, even inside `core-app`. Event topics with unlimited retention, plus a replay procedure. Idempotent-consumer support. Trace context in Kafka headers |
 | Errors | RFC 7807 problem JSON with `code` and `traceId`, the same in all apps |
-| Gateway | Spring Cloud Gateway routing only: `/api/v1/registration/**` → registration-service, `/api/v1/notification/**` and `/ws/**` → notification-service, all other `/api/v1/**` → core-app |
-| Web app (empty) | Vite + React + TS app in `frontend/web` that builds, lints, tests, and proxies `/api` to the gateway in dev |
-| Local infra | `infra/docker-compose.yml`: Postgres, Redis, Kafka (KRaft), Keycloak (empty), OpenSearch, MinIO, Mailpit. An `observability` profile adds OTel Collector, Tempo, Prometheus, Loki, Grafana |
+| API docs | springdoc OpenAPI 3 in every app, one group per Modulith module in `core-app` (Arch §7). OpenAPI JSON exported to `docs/api/` by a test and committed. `openapi-typescript` generates frontend types from it |
+| Gateway | Spring Cloud Gateway: `/api/v1/registration/**` → registration-service, `/api/v1/notification/**` and `/ws/**` → notification-service, all other `/api/v1/**` → core-app. **Per-IP rate limiting** (Redis), returning 429 with `Retry-After` and problem JSON (Arch §7) |
+| Container images | One shared Dockerfile (layered Spring Boot jar, pinned JRE 21 base, non-root, healthcheck) used for all 4 apps. A Compose `apps` profile runs them (Arch §8 dev column) |
+| Web app (empty) | Vite + React + TS app in `frontend/web` that builds, lints, tests, proxies `/api` to the gateway in dev, and uses the generated API types |
+| Local infra | `infra/docker-compose.yml`: Postgres, Redis, Kafka (KRaft), Keycloak (empty), OpenSearch, MinIO, Mailpit. Profile `apps` adds the 4 backend apps. Profile `observability` adds OTel Collector, Tempo, Prometheus, Loki, Grafana |
 | Observability | OTel Java agent in every app, Micrometer → Prometheus, JSON logs with `traceId`, one provisioned "Platform overview" Grafana dashboard |
 | CI | GitHub Actions: backend build + unit + Modulith `verify()` + Testcontainers ITs; frontend lint + test + build; Trivy and OWASP Dependency-Check |
 
@@ -41,10 +45,10 @@ build, infra, eventing, or error-handling plumbing.**
 
 - Keycloak realm, roles, JWT validation, `@PreAuthorize` → `identity`
 - Module manifests, `GET /api/v1/modules`, disabled-module 404 filter, React shell/menu, i18n → `shell`
-- Rate limiting, waiting room, Redis seat scripts, k6 → `registration`
+- Per-user rate limiting, waiting room, Redis seat scripts, k6 → `registration`
 - WebSocket/STOMP endpoint → `notification`. The gateway route exists, but nothing serves it yet
 - Any domain table, endpoint, or UI screen
-- Kubernetes, Helm, CDN, image registry push, production deploy → a later shipping phase (map assumption 2)
+- Kubernetes, Helm, CDN, image registry push, zero-downtime deploys (NFR-6), production deploy → a later shipping phase (map assumption 2, C18)
 
 ## Tech Stack
 
@@ -60,7 +64,9 @@ versions (`latest`, `+`, `^` on majors) anywhere, including Docker image tags.
 | Migrations | Flyway | One history table per schema |
 | Messaging | Apache Kafka (KRaft), Spring for Apache Kafka | C2 |
 | Event outbox | Spring Modulith Event Publication Registry (JDBC) + Kafka externalization | See Design decisions D1 |
-| Testing | JUnit 5, AssertJ, Spring Modulith test, Testcontainers (Postgres, Kafka, Redis) | |
+| Testing | JUnit 5, AssertJ, Spring Modulith test, Testcontainers (Postgres, Kafka, Redis), ArchUnit | |
+| API docs | springdoc-openapi (Boot 4 compatible line), `openapi-typescript` (web) | C13 |
+| Images | Dockerfile using Spring Boot layered jar on a pinned Eclipse Temurin 21 JRE base | C12. Buildpacks rejected: harder to add the OTel agent and to read |
 | Formatting | Spotless + palantir-java-format (Java), ESLint + Prettier (TS) | |
 | Web | Node 24 LTS, npm, Vite, React, TypeScript (strict), Vitest + Testing Library | Already installed: Node 24.22, npm 11.19 |
 | Containers | Docker Compose v2 | Already installed: Docker 29.9, Compose 5.6 |
@@ -87,12 +93,24 @@ docker compose -f infra/docker-compose.yml down -v                  # wipe all l
 ./gradlew :backend:notification-service:bootRun   # port 8083
 ./gradlew :backend:gateway:bootRun                # port 8080 (single entry point)
 
+# Apps as containers (Arch §8 dev setup). Stop any bootRun apps first: same ports
+./gradlew bootJar
+docker compose -f infra/docker-compose.yml --profile apps up -d --build --wait
+
+# API docs
+./gradlew exportOpenApi                           # refreshes docs/api/*.json (commit the diff)
+#   live: http://localhost:8081/swagger-ui.html (core-app; one group per module)
+
 # Frontend
 npm --prefix frontend/web ci
+npm --prefix frontend/web run gen:api             # docs/api/*.json → src/shared/api/generated/
 npm --prefix frontend/web run dev                 # http://localhost:5173, /api proxied to :8080
 npm --prefix frontend/web run lint
 npm --prefix frontend/web run test                # vitest run
 npm --prefix frontend/web run build
+
+# Replay a read model (dev): drop its state, reset its consumer group, restart it
+./infra/replay.sh <consumer-group> <schema>.<table>[,…]
 
 # Smoke check (all apps running)
 curl -s localhost:8080/api/v1/platform/ping       # → core-app via gateway
@@ -112,7 +130,7 @@ smart-campus/                          (repo root = C:\Smart Campus)
 ├── settings.gradle.kts  build.gradle.kts  gradle/libs.versions.toml  gradlew(.bat)
 ├── build-logic/                        convention plugins: java-conventions, spring-app, integration-test
 ├── backend/
-│   ├── shared-kernel/                  plain Java library, no Spring Boot app. Ids, Money, events, errors
+│   ├── shared-kernel/                  plain Java library, no Spring Boot app. Ids, Money, time, events, topics, errors
 │   │   └── src/main/java/edu/campus/kernel/{id,money,time,event,error}/
 │   ├── platform-starter/               Spring auto-config shared by all 4 apps: problem handler,
 │   │                                   outbox/externalization defaults, idempotent consumer, logging
@@ -123,13 +141,16 @@ smart-campus/                          (repo root = C:\Smart Campus)
 │   ├── registration-service/           edu.campus.registration (empty + ping)
 │   ├── notification-service/           edu.campus.notification (empty + ping)
 │   └── gateway/                        edu.campus.gateway (routes only)
-├── frontend/web/                       Vite app; src/{shell,modules,shared}/ folders exist, mostly empty
+├── frontend/web/                       Vite app; src/{shell,modules,shared}/, shared/api/generated/ (do not edit)
 ├── infra/
-│   ├── docker-compose.yml
+│   ├── docker-compose.yml              profiles: (default) infra · apps · observability
+│   ├── docker/spring-app.Dockerfile    one image recipe for all 4 apps
 │   ├── postgres/init/                  creates schemas + per-service DB users
 │   ├── otel/  prometheus/  grafana/{provisioning,dashboards}/
+│   ├── smoke.sh  replay.sh
 ├── docs/                               source PDFs
-│   └── adr/                            ADR-0001… (Arch decisions 1–8 copied in + D1–D4 below)
+│   ├── api/                            exported OpenAPI JSON per app/group (committed)
+│   └── adr/                            ADR-0001… (Arch decisions 1–8 copied in + D1–D6 + Boot 4)
 └── .github/workflows/ci.yml
 ```
 
@@ -152,7 +173,7 @@ public record DomainEvent<P>(
         String type,            // "EnrollmentConfirmed": past tense, PascalCase
         int schemaVersion,      // bump on breaking payload change (see Q4)
         Instant occurredAt,
-        String aggregateId,     // "section-1234"; also the Kafka key unless a topic says otherwise
+        String aggregateId,     // "section-1234". NOT automatically the Kafka key: see Topics (D6)
         P payload) {
 
     public DomainEvent {
@@ -194,8 +215,15 @@ Rules:
 | D2 | **Consumers deduplicate by `eventId`.** Each consuming module has a `<schema>.processed_events(event_id PK, processed_at)` row, inserted in the same transaction as the side effect. A duplicate key means skip. | Kafka delivers at least once. This makes delivery effectively once per consumer. | Kafka exactly-once transactions (do not cover DB side effects). |
 | D3 | **Schema isolation is enforced twice.** (a) Modulith `verify()` + an ArchUnit rule ban cross-module JPA/JDBC access in `core-app`. (b) `registration-service` and `notification-service` connect as DB users with privileges only on their own schema. | A schema violation fails the build in core-app and fails at runtime in the extracted services. | Separate DB users per core-app module (one datasource makes this impractical). |
 | D4 | **Event envelope adds `schemaVersion`** to the Arch §6 envelope. The W3C `traceparent` travels in Kafka headers, not in the payload. | Allows payloads to evolve. Tracing stays out of the business data. | Version encoded in the type name (`EnrollmentConfirmedV2`). |
+| D5 | **Cross-module events are consumed only from Kafka**, even between modules inside `core-app`. In-process listeners (`@ApplicationModuleListener`, `@EventListener`, `@TransactionalEventListener`) may only handle the module's *own* events, and an ArchUnit rule enforces this. Event topics use `retention.ms=-1`. **Replay** = delete the consumer's derived tables and its `processed_events`, reset the consumer group to the earliest offset, restart. Only read-model consumers can be replayed. Consumers with external side effects (email, push) are registered as non-replayable, and `replay.sh` refuses them. | Arch §3 (all cross-module changes via Kafka) and Arch §4 (read models can be dropped and replayed). In-process delivery cannot be replayed. | In-process Modulith listeners inside `core-app` (faster, but no replay and two delivery paths). Compacted topics (lose history per key). |
+| D6 | **The message key is defined per topic** in `shared-kernel` `Topics`, as in the Arch §6 table: `registration.requests` → sectionId, `registration.events` → studentId, `course.events` → sectionId, `grade.events` → studentId, `campus.events` → aggregateId. The publisher must supply the key, and a missing key fails publication. | Ordering is guaranteed per key, and Arch §6 chose these keys for that reason (e.g. waitlist ordering per section). | Always keying by `aggregateId` (wrong for `registration.events` and `grade.events`). |
 
-**D1 must be verified in task 2.** If any outbox success criterion (O1–O4) cannot be met with the
+**D1 storage note (map C6, revised):** with the Modulith registry, each app has *one*
+`event_publication` table, owned by `platform` (in `core-app`, in schema `platform`; in each
+extracted service, in its own schema). It is written in the same transaction as the business row,
+because each app has one datasource.
+
+**D1 must be verified in task 7.** If any outbox success criterion (O1–O4) cannot be met with the
 Modulith registry, fall back to the hand-written outbox and update D1 before going further.
 
 ## Testing Strategy
@@ -203,10 +231,10 @@ Modulith registry, fall back to the hand-written outbox and update D1 before goi
 | Level | Tool | Lives in | Covers | Runs |
 |---|---|---|---|---|
 | Unit | JUnit 5 + AssertJ | `src/test/java` | `shared-kernel` value objects, problem mapping, envelope serialization | `./gradlew test`, every commit |
-| Architecture | Spring Modulith `ApplicationModules.verify()` + ArchUnit | `core-app/src/test` | Module boundaries, no `internal` leaks, no cross-schema repository access | `./gradlew test` |
-| Integration | Testcontainers (Postgres, Kafka) + `@SpringBootTest` / `@ApplicationModuleTest` | `src/integrationTest/java` | Outbox O1–O4, Flyway per schema, DB-user isolation (D3), problem JSON end to end, gateway routing | `./gradlew integrationTest`, CI |
-| Smoke | `curl` script | `infra/smoke.sh` | All apps reachable through the gateway with Compose infra | Manual, before closing the module |
-| Frontend | Vitest + Testing Library | `frontend/web/src/**/*.test.tsx` | App renders; API client sets `Accept`/problem parsing | `npm run test` |
+| Architecture | Spring Modulith `ApplicationModules.verify()` + ArchUnit | `core-app/src/test` | Module boundaries, no `internal` leaks, no cross-schema repository access, no in-process listeners on other modules' events (D5) | `./gradlew test` |
+| Integration | Testcontainers (Postgres, Kafka, Redis) + `@SpringBootTest` / `@ApplicationModuleTest` | `src/integrationTest/java` | Outbox O1–O6, Flyway per schema, DB-user isolation (D3), problem JSON end to end, gateway routing and rate limit, OpenAPI export | `./gradlew integrationTest`, CI |
+| Smoke | `curl` script | `infra/smoke.sh` | All apps reachable through the gateway, run against both `bootRun` apps and the `apps` Compose profile | Manual, before closing the module |
+| Frontend | Vitest + Testing Library | `frontend/web/src/**/*.test.tsx` | App renders. API client parses problem JSON. Generated types are up to date (CI `git diff --exit-code`) | `npm run test` |
 
 Coverage: JaCoCo report on every build. **`shared-kernel` ≥ 90% line coverage, enforced.** Other
 platform code has no gate yet, because each module spec sets its own. Flaky tests are fixed or
@@ -233,7 +261,7 @@ quarantined with an issue link. They are never silently deleted.
 
 **Eventing (outbox)**
 - [ ] O1. A test event saved in the same transaction as a business row appears on Kafka with the
-  full envelope (D4) and `aggregateId` as the key.
+  full envelope (D4) and the key defined for its topic (D6).
 - [ ] O2. If that transaction rolls back, nothing is published, after waiting at least 2× the relay
   interval.
 - [ ] O3. If the app is killed after commit but before Kafka acknowledges, the event is published
@@ -241,7 +269,25 @@ quarantined with an issue link. They are never silently deleted.
 - [ ] O4. Delivering the same event twice to a consumer causes the side effect exactly once (D2).
 - [ ] O5. The topics from Arch §6 (`registration.requests` 12 partitions, `registration.events` 6,
   `course.events` 3, `grade.events` 3, `campus.events` 3) are declared in code by their producing
-  app and exist after startup.
+  app and exist after startup with `retention.ms=-1`. The broker does not auto-create topics.
+  Publishing to a topic without the key required by D6 fails.
+- [ ] O6. Replay: after 10 probe events, running `infra/replay.sh` on the probe consumer rebuilds
+  exactly the same 10 rows. A `core-app` class with an in-process listener on another module's
+  event fails `./gradlew test` (D5).
+
+**API docs**
+- [ ] A1. Each app serves `/v3/api-docs`. `core-app` has one OpenAPI group per Modulith module.
+  `./gradlew exportOpenApi` writes `docs/api/*.json`, and `npm run gen:api` turns it into TS types
+  that the web app compiles against.
+
+**Gateway rate limiting**
+- [ ] R1. Exceeding the per-IP limit (default 20 req/s, burst 40, set in config) on any `/api/v1/**`
+  route returns 429 problem JSON (`code: RATE_LIMITED`) with a `Retry-After` header. Requests under
+  the limit are unaffected. The limiter state lives in Redis, so it is shared across gateway replicas.
+
+**Containers**
+- [ ] K1. `./gradlew bootJar` followed by `docker compose … --profile apps up -d --build --wait`
+  brings all 4 apps up healthy, and `infra/smoke.sh` passes against them. Images run as non-root.
 
 **Errors and API**
 - [ ] E1. An unhandled exception, a validation failure, a `CampusProblem`, and an unknown route
@@ -259,14 +305,14 @@ quarantined with an issue link. They are never silently deleted.
   alert rules (lag > 30 s, 5xx > 1%) exist in Prometheus. The seat-sync alert is added by `registration`.
 
 **CI**
-- [ ] C1. `.github/workflows/ci.yml` runs P1, P2, Trivy (filesystem + images), and OWASP
+- [ ] C1. `.github/workflows/ci.yml` runs P1, P2, a check that generated API types are up to date, Trivy (filesystem + the 4 app images), and OWASP
   Dependency-Check on every push and PR. Any HIGH/CRITICAL finding fails the job unless it is
   listed in a reviewed suppression file. *Verifiable once the repo is pushed to GitHub (Q3).*
 
 **Handover**
 - [ ] H1. `README.md` gets a new developer from clone to the I3 state using only the Commands
   section.
-- [ ] H2. `docs/adr/` contains Arch ADR-1…8 and D1–D4.
+- [ ] H2. `docs/adr/` contains Arch ADR-1…8, D1–D6, and the Boot 4 decision (15 ADRs).
 
 ## Boundaries
 
@@ -280,7 +326,7 @@ quarantined with an issue link. They are never silently deleted.
 
 **Ask first**
 - Adding a dependency that is not in the Tech Stack table.
-- Changing a Design decision (D1–D4), the event envelope, topic names, or partition counts.
+- Changing a Design decision (D1–D6), the event envelope, topic names, keys, partition counts, or retention.
 - Changing a port, schema name, or DB user.
 - Adding infrastructure containers beyond those listed.
 - Lowering a coverage gate, adding a Trivy/Dependency-Check suppression, or disabling a check.
