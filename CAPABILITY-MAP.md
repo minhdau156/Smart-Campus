@@ -113,12 +113,32 @@ Second review against both PDFs (2026-11-17, all approved):
 4. **External systems are stubbed.** SIS uses a CSV fixture, the payment gateway uses sandbox or a
    mock webhook, FCM and SMTP use Mailpit plus a fake push sender.
 5. **MVP = every "Must" story.** "Should" and "Could" stories are scoped per module spec.
-6. **Stack** is fixed by the docs: Java 21, Spring Boot 3, Spring Modulith, Spring Cloud Gateway,
-   React + TS + Vite + TanStack Query. The build tool (Gradle or Maven) is chosen in `SPEC-platform.md`.
+6. **Stack** is fixed by the docs: Java 21, Spring Modulith, Spring Cloud Gateway, React + TS +
+   Vite + TanStack Query. Decided in `SPEC-platform.md` (Q1, Q2): **Spring Boot 4.x** (instead of
+   the docs' Boot 3) and **Gradle**.
 
-## Spec index
+## Spec index (the roadmap: one row per module, in build order)
 
-| Module id | Spec | Status |
-|---|---|---|
-| `platform` | [SPEC-platform.md](SPEC-platform.md) | Approved; plan approved, implementing ([tasks/todo.md](tasks/todo.md)) |
-| all others | — | Not started |
+The 21 tasks in `tasks/platform/` cover **module 1 only**. Every other module goes through the same
+cycle when its turn comes: write `SPEC-<id>.md` → human approval → write `tasks/plan.md` and
+`tasks/<id>/task<N>.md` → human approval → build one subtask per `/agent-skills:build` run. Start
+the next module's spec only after the previous module's final checkpoint is signed off, and archive
+the finished module's `tasks/` files to `tasks/archive/<id>/`.
+
+| # | Module id | Spec | Tasks | Status |
+|---|---|---|---|---|
+| 1 | `platform` | [SPEC-platform.md](SPEC-platform.md) | [tasks/platform/](tasks/platform/) (21 tasks, 141 subtasks) | Spec + plan approved, ready to build |
+| 2 | `identity` | `SPEC-identity.md` | `tasks/identity/` | Not started (next, after platform's Checkpoint E) |
+| 3 | `shell` | `SPEC-shell.md` | `tasks/shell/` | Not started |
+| 4 | `course` | `SPEC-course.md` | `tasks/course/` | Not started |
+| 5 | `registration` | `SPEC-registration.md` | `tasks/registration/` | Not started |
+| 6 | `timetable` | `SPEC-timetable.md` | `tasks/timetable/` | Not started |
+| 7 | `grade` | `SPEC-grade.md` | `tasks/grade/` | Not started |
+| 8 | `notification` | `SPEC-notification.md` | `tasks/notification/` | Not started (can start in parallel after `identity`) |
+| 9 | `announcement` | `SPEC-announcement.md` | `tasks/announcement/` | Not started |
+| 10 | `payment` | `SPEC-payment.md` | `tasks/payment/` | Not started |
+| 11 | `club` | `SPEC-club.md` | `tasks/club/` | Not started |
+| 12 | `marketplace` | `SPEC-marketplace.md` | `tasks/marketplace/` | Not started |
+| 13 | `lostfound` | `SPEC-lostfound.md` | `tasks/lostfound/` | Not started |
+| 14 | `search` | `SPEC-search.md` | `tasks/search/` | Not started |
+| — | shipping phase | Kubernetes, Helm, deploy, NFR-6 | — | Deferred (after all 14 modules) |
