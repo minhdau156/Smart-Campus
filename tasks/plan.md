@@ -64,7 +64,7 @@ T3 Compose infra (parallel) ─────────────────�
 ## Task list (details, acceptance criteria and verification in [`tasks/platform/`](platform/))
 
 ### Phase 1: Foundation
-- [ ] T1 Gradle root, wrapper, version catalog (pinned Boot 4 line)
+- [x] T1 Gradle root, wrapper, version catalog (pinned Boot 4 line)
 - [ ] T2 Build conventions: Spotless, JaCoCo, `integrationTest` source set
 - [ ] T3 Compose core infra + schemas + per-service DB users *(parallel with T1–T2)*
 - [ ] T4 `shared-kernel`: typed ids, `Money`, time (`TimeRange`), `ProblemCode`

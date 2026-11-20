@@ -25,7 +25,7 @@ ids that the task closes are ticked.
 ## Progress
 
 ### Phase 1: Foundation
-- [ ] [T1](platform/task1.md): Gradle root, wrapper, version catalog (8 subtasks)
+- [x] [T1](platform/task1.md): Gradle root, wrapper, version catalog (8 subtasks)
 - [ ] [T2](platform/task2.md): Build conventions (6)
 - [ ] [T3](platform/task3.md): Compose core infra, schemas, DB users (8) · closes I1, I2 (infra) · *parallel with T1–T2*
 - [ ] [T4](platform/task4.md): `shared-kernel`: ids, money, time, problem codes (6)
