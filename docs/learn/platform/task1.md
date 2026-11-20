@@ -1,245 +1,256 @@
-# Task 1: Gradle root, wrapper, version catalog - learning note
+# Task 1: Maven parent pom, wrapper, pinned versions - learning note
 
-> Task: [task1.md](../../../tasks/platform/task1.md) · Commit: `7b8c84e` · Date: 2026-11-20
-
-> **Outdated (2026-11-20):** this note explains the first, Gradle version of this task. The project
-> switched to Maven (spec Q2), and this note will be rewritten when the task is redone.
+> Task: [task1.md](../../../tasks/platform/task1.md) · Commit: `cf968b5` · Date: 2026-11-20
+>
+> This task was first done with Gradle (commit `7b8c84e`). The project then switched to Maven
+> because Maven's config is easier to read (spec decision Q2). This note explains the Maven version.
 
 ## In one minute
 
-Task 1 turned an empty folder into a **Gradle multi-project build**. A multi-project build is one
-big project that holds several smaller projects (Maven calls them "modules"). It now has one small
-project, `backend/shared-kernel`, and it builds with one command: `./gradlew build`. We also wrote
-down, **in one file only**, the exact version of every main library (Spring Boot, Spring Cloud,
-and others). Every later task adds code on top of this base, so it has to come first.
+Task 1 turned the folder into a **Maven multi-module project**: one parent project that holds
+smaller projects called **modules**. Right now there is one module, `backend/shared-kernel`, and the
+whole project builds with one command: `./mvnw verify`. We wrote down, **in one file** (the root
+`pom.xml`), the exact version of every main library: Spring Boot, Spring Cloud, Modulith, and
+others. Every later task adds code on top of this base, so it has to come first.
 
 ## The files
 
-### `settings.gradle.kts`
-- **What it does:** tells Gradle the project name, which sub-projects exist, and where to download
-  libraries from.
-- **Why it exists:** Gradle reads this file **first**. Without it, Gradle does not see the folder as
-  a project. We saw this: making the wrapper failed with "Directory does not contain a Gradle
-  build" until this file existed.
+### `pom.xml` (root, the "parent pom")
+- **What it does:** describes the whole project. It is the parent of every module.
+- **Why it exists:** without it, each module would need its own copy of every version and rule.
+  The copies would drift apart, and upgrading would mean editing many files.
+- **Key parts:**
+
+  1. **Spring Boot as the parent's parent**
+     ```xml
+     <parent>
+         <groupId>org.springframework.boot</groupId>
+         <artifactId>spring-boot-starter-parent</artifactId>
+         <version>4.1.3</version>
+         <relativePath/>
+     </parent>
+     ```
+     So the chain is: `spring-boot-starter-parent` → our root `pom.xml` → `shared-kernel/pom.xml`.
+     From Spring Boot's parent we get, for free:
+     - the versions of hundreds of libraries (JUnit, AssertJ, Testcontainers, Jackson…);
+     - the versions of the Maven plugins (compiler, surefire, failsafe, jar…);
+     - good default settings: UTF-8, Java version from `java.version`, and `-parameters`.
+
+     `<relativePath/>` (empty) means: "don't look for this parent in a folder; download it".
+
+  2. **The module list**
+     ```xml
+     <packaging>pom</packaging>
+     <modules>
+         <module>backend/shared-kernel</module>
+     </modules>
+     ```
+     `packaging pom` means this project makes no jar itself; it only groups modules. Maven builds
+     the modules in the right order. Later tasks add `core-app`, `gateway` and the others here.
+
+  3. **Versions in `<properties>`**
+     ```xml
+     <properties>
+         <java.version>21</java.version>
+         <spring-cloud.version>2025.1.5</spring-cloud.version>
+         <springdoc.version>3.2.0</springdoc.version>
+         ...
+     </properties>
+     ```
+     A property is a named value, used elsewhere as `${spring-cloud.version}`. `java.version` is a
+     special name: Spring Boot's parent reads it to set the Java version (21). The big comment above
+     it holds the **source link for every version**, so anyone can check where each number came from.
+
+  4. **`<dependencyManagement>`: a version list, not a download list**
+     ```xml
+     <dependency>
+         <groupId>org.springframework.cloud</groupId>
+         <artifactId>spring-cloud-dependencies</artifactId>
+         <version>${spring-cloud.version}</version>
+         <type>pom</type>
+         <scope>import</scope>
+     </dependency>
+     ```
+     Things listed here are **not** added to any module. They only say "if a module uses this
+     library, use this version". `<scope>import</scope>` with `<type>pom</type>` imports a whole
+     **BOM** (a list of versions tested together). Spring Cloud's BOM sets the versions of the
+     gateway and the other Cloud libraries. Modulith's BOM does the same for Modulith.
+
+  5. **`<dependencies>`: test libraries for every module**
+     ```xml
+     <dependency>
+         <groupId>org.junit.jupiter</groupId>
+         <artifactId>junit-jupiter</artifactId>
+         <scope>test</scope>
+     </dependency>
+     ```
+     Unlike `<dependencyManagement>`, things in `<dependencies>` in a parent **are** added to every
+     module. `scope test` means "only for tests"; it never goes into the real jar. There is no
+     `<version>`: it comes from the Spring Boot parent.
+
+### `backend/shared-kernel/pom.xml`
+- **What it does:** describes the `shared-kernel` module: a plain Java library (`jar`).
+- **Why it exists:** every module needs its own pom. `shared-kernel` will hold the types that all 4
+  apps share: ids, `Money`, time, the Kafka event envelope (Tasks 4 and 5).
 - **Key lines:**
-  ```kotlin
-  rootProject.name = "smart-campus"
-  dependencyResolutionManagement {
-      repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
-      repositories { mavenCentral() }
-  }
-  include("backend:shared-kernel")
+  ```xml
+  <parent>
+      <groupId>edu.campus</groupId>
+      <artifactId>smart-campus</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+      <relativePath>../../pom.xml</relativePath>
+  </parent>
+  <artifactId>shared-kernel</artifactId>
+  <packaging>jar</packaging>
   ```
-  - `include("backend:shared-kernel")` adds the folder `backend/shared-kernel` as a sub-project.
-    The `:` stands for a folder level.
-  - `mavenCentral()` means "download libraries from Maven Central". It is set here once, for all
-    sub-projects.
-  - `FAIL_ON_PROJECT_REPOS` makes the build fail if a sub-project adds its own download place. This
-    keeps all downloads in one known, trusted place.
-- **Like in Maven:** the `<artifactId>`, `<modules>` and `<repositories>` parts of a parent `pom.xml`.
+  - The `<parent>` block points to our root pom (two folders up). From it, the module gets Java 21,
+    the test libraries, and all versions.
+  - This is the **only** place a version is written in a child pom. Maven needs it to find the parent.
+  - There is no Spring dependency: `shared-kernel` must stay framework-free.
+- **`0.1.0-SNAPSHOT`:** the version of **our** project. `SNAPSHOT` means "work in progress, not a release".
 
-### `build.gradle.kts` (root)
-- **What it does:** says which plugins the project uses and their versions, but does not turn them on.
-- **Why it exists:** a plugin should be loaded once, at the top, and then shared by all
-  sub-projects. Each sub-project turns on only the plugins it needs.
-- **Key lines:**
-  ```kotlin
-  plugins {
-      alias(libs.plugins.spring.boot) apply false
-      alias(libs.plugins.spring.dependency.management) apply false
-      alias(libs.plugins.spotless) apply false
-  }
-  ```
-  - `alias(libs.plugins.spring.boot)` takes the plugin and its version from the version catalog
-    (below). No version number is written here.
-  - `apply false` means: download the plugin, but do not use it in the root. The root has no Java
-    code. `shared-kernel` is a library, not an app, so it will never use the Spring Boot plugin.
-    `core-app` (Task 6) will.
-- **Like in Maven:** `<pluginManagement>` in a parent pom. It sets the version but does not run
-  the plugin.
-
-### `gradle/libs.versions.toml` (the version catalog)
-- **What it does:** lists every library and plugin version in one place.
-- **Why it exists:** if versions were written in many build files, they would drift apart, and
-  upgrading would mean editing many files. Here, upgrading Spring Boot is a **one-line change**.
-  The spec says versions live here and nowhere else.
-- **Key lines:**
-  ```toml
-  [versions]
-  spring-boot = "4.1.3"
-
-  [libraries]
-  spring-boot-dependencies = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
-
-  [plugins]
-  spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
-  ```
-  - `[versions]` holds the numbers. `[libraries]` and `[plugins]` point at those numbers with
-    `version.ref`.
-  - In build files, Gradle turns the names into code: `spring-boot` becomes `libs.plugins.spring.boot`.
-  - The comment at the top of the file holds the **source link for every version**, so anyone can
-    check where each number came from.
-- **Like in Maven:** `<properties>` with version numbers, plus `<dependencyManagement>` in a parent pom.
-
-### `backend/shared-kernel/build.gradle.kts`
-- **What it does:** says that `shared-kernel` is a Java library built with Java 21.
-- **Why it exists:** every sub-project needs its own build file. `shared-kernel` will hold the types
-  that all 4 apps share: ids, `Money`, time, the Kafka event envelope (Tasks 4 and 5).
-- **Key lines:**
-  ```kotlin
-  plugins { `java-library` }
-  java { toolchain { languageVersion = JavaLanguageVersion.of(libs.versions.java.get()) } }
-  ```
-  - `java-library` is Gradle's built-in plugin for a Java library: a jar that other projects use,
-    not an app you run.
-  - `toolchain` pins the Java version. The `21` comes from the catalog, so there is no number here.
-- **Like in Maven:** a module `pom.xml` with `<packaging>jar</packaging>` and `maven.compiler.release`.
-
-### `backend/shared-kernel/src/main/java/edu/campus/kernel/package-info.java`
-- **What it does:** creates the Java package `edu.campus.kernel` and describes it.
-- **Why it exists:** the project needs at least one Java file, so the build has something to
-  compile. This proves Java compiling works before we write real code. A `package-info.java` is
-  where Java keeps the comment (Javadoc) for a whole package.
-
-### `gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`, `gradle/wrapper/gradle-wrapper.properties` (the Gradle wrapper)
-- **What it does:** a small starter program. When you run `./gradlew build`, it downloads the
-  exact Gradle version the project needs (once), then runs it.
-- **Why it exists:** nobody has to install Gradle by hand, and everyone, including CI, uses the
-  **same** Gradle version. This computer has no Gradle installed, and the build still works.
-- **Key lines** (`gradle-wrapper.properties`):
+### `mvnw`, `mvnw.cmd`, `.mvn/wrapper/maven-wrapper.properties` (the Maven Wrapper)
+- **What it does:** a small script. When you run `./mvnw verify`, it downloads the exact Maven
+  version the project needs (once, into `~/.m2/wrapper/`), then runs it.
+- **Why it exists:** nobody has to install Maven by hand, and everyone, including CI, uses the
+  **same** Maven version. This computer has no Maven installed, and the build still works.
+- **Key lines** (`maven-wrapper.properties`):
   ```properties
-  distributionUrl=https\://services.gradle.org/distributions/gradle-9.9.2-bin.zip
-  distributionSha256Sum=971fcd7150ca4ba04852c0b2ca0d2d0ab9468e14b03473eab19528809914c76b
+  wrapperVersion=3.3.4
+  distributionType=only-script
+  distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.16/apache-maven-3.9.16-bin.zip
+  distributionSha256Sum=5af3b743dd8b876b5c45da33b676251e5f1687712644abb4ee519ca56e1d89ce
   ```
-  - `distributionUrl` is the exact Gradle version (9.9.2).
+  - `distributionUrl` is the exact Maven version (3.9.16).
   - `distributionSha256Sum` is a fingerprint of the download. If the file was changed or damaged,
-    the fingerprint does not match, and the wrapper refuses to run it. This is a security check.
-- `gradlew` is for Git Bash, Linux and macOS. `gradlew.bat` is for Windows PowerShell or cmd.
-- **Like in Maven:** `mvnw`, `mvnw.cmd` and `.mvn/wrapper/`.
+    the fingerprint does not match, and `mvnw` refuses to run it. We tested this (see below).
+  - `only-script` means the wrapper is just the two scripts: no `.jar` file in the repo.
+- `mvnw` is for Git Bash, Linux and macOS. `mvnw.cmd` is for Windows PowerShell or cmd.
 
-### `.gitignore`
-- **What it does:** lists files that git must not save.
-- **Why it exists:** build output (`build/`, `.gradle/`), IDE settings, `node_modules/` and secrets
-  (`infra/.env`) do not belong in the repo. Build output is created again by every build, and
-  secrets must never be pushed to GitHub.
-- **Key line:** `!gradle/wrapper/gradle-wrapper.jar`. The `!` means "except this one". Jar files
-  are usually build output, but the wrapper jar **must** be saved.
+### `.gitignore` (changed)
+- **What changed:** the Gradle folders are gone. Now it ignores `target/` (Maven's build output folder).
+- **Why:** build output is made again by every build, so it does not belong in git.
 
-### `.editorconfig`
-- **What it does:** tells every editor (VS Code, IntelliJ) how to format text: UTF-8, LF line
-  endings, 4 spaces for Java/Kotlin, 2 spaces for TS/JSON/YAML.
-- **Why it exists:** without it, each person's editor uses its own settings, and every commit fills
-  up with spacing-only changes.
+### `.editorconfig` (changed)
+- **What changed:** `[*.{java,kt,kts}]` became `[*.{java,xml}]`: Java and XML (the pom files) use 4 spaces.
 
-### `.gitattributes`
-- **What it does:** tells git which line endings to use in each kind of file.
-- **Why it exists:** on this Windows computer, git is set to switch files to Windows line endings
-  (CRLF). A shell script with CRLF fails in Git Bash and Linux. So `gradlew` must stay LF, and
-  `gradlew.bat` must stay CRLF.
-- **Key lines:**
-  ```
-  * text=auto eol=lf
-  *.bat text eol=crlf
-  ```
-- This file was not in the task list. It was added because the wrapper needs it.
+### `.gitattributes` (changed)
+- **What changed:** only the comment (it now says `mvnw`).
+- **Why it matters:** on this Windows computer, git switches files to Windows line endings (CRLF).
+  A shell script with CRLF fails in Git Bash and Linux. This file keeps `mvnw` in LF and `mvnw.cmd`
+  in CRLF.
 
-### `tasks/plan.md`, `tasks/todo.md`, `tasks/platform/task1.md`
-- **What changed:** T1 is ticked as done, and `task1.md` got a "Result" paragraph with the chosen
-  versions.
-- **Why:** these files track progress, so anyone can see what is done and what comes next.
+### Removed: all Gradle files
+`settings.gradle.kts`, `build.gradle.kts`, `gradle/` (version catalog and wrapper), `gradlew`,
+`gradlew.bat`, `build-logic/`, and `backend/shared-kernel/build.gradle.kts`. The Maven files above
+do the same jobs. The Java files were kept.
+
+| Gradle file (old) | Maven file (new) |
+|---|---|
+| `settings.gradle.kts` (project name, module list) | root `pom.xml` (`<artifactId>`, `<modules>`) |
+| `gradle/libs.versions.toml` (versions) | root `pom.xml` (`<properties>`, `<dependencyManagement>`, Boot parent) |
+| `backend/shared-kernel/build.gradle.kts` | `backend/shared-kernel/pom.xml` |
+| `gradlew`, `gradlew.bat`, `gradle/wrapper/*` | `mvnw`, `mvnw.cmd`, `.mvn/wrapper/*` |
+| `build/` | `target/` |
+
+### `tasks/platform/task1.md`, `task2.md`, `tasks/todo.md`, `tasks/plan.md`
+- T1 is ticked as done, with a "Result" paragraph.
+- In `task2.md`, step 2.2 is ticked, because it was done early (see "Decisions").
 
 ## Decisions and why
 
 | Decision | Options | Why we chose it |
 |---|---|---|
-| **Spring Boot 4.1.3** | 4.2.0 (newest, released 2026-11-19) or 4.1.3 | springdoc (makes the API docs) officially supports Boot only up to 4.1.x. The task says springdoc must be listed for our Boot version. We move to 4.2 when springdoc supports it. |
-| Spring Cloud **2025.1.5** | 2026.0.0 (made for Boot 4.2) or 2025.1.x | spring.io lists 2025.1.x for Boot 4.0.x and 4.1.x (from 2025.1.2 on). |
-| Spring Modulith **2.1.3** | 2.2.0 (built on Boot 4.2) or 2.1.3 | 2.1.3 is built on Boot 4.1.3, which matches exactly. |
-| springdoc **3.2.0** | 3.1.x or 3.2.x | Both are listed for Boot 4.1. 3.2.0 is newer. |
-| Testcontainers: **no entry** | pin it ourselves, or let Boot do it | The Boot 4.1.3 BOM already sets it (2.0.5). Two places with the same version could disagree. |
-| Gradle **9.9.2** | any 8.14+ or 9.x | Newest Gradle, and Boot 4.1 supports "Gradle 8.14+ and 9.x". |
-| Versions read from **Maven Central** | memory, blog posts | Maven Central is where the libraries are really published, so the data is exact. |
-
-(A **BOM**, "bill of materials", is a list of library versions that are tested together. Importing
-Spring Boot's BOM gives you hundreds of matching versions at once.)
+| **Spring Boot 4.1.3** as the parent | 4.2.0 (newest) or 4.1.3 | springdoc (makes the API docs) supports Boot only up to 4.1.x. |
+| Spring Cloud **2025.1.5**, Modulith **2.1.3**, springdoc **3.2.0** | newer lines made for Boot 4.2 | These are the versions officially listed for Boot 4.1. |
+| **Maven 3.9.16** | Maven 4.0.0-rc-7 | Maven 4 is still a release candidate (RC), not final. Boot 4.1 needs "Maven 3.6.3 or later". |
+| Inherit **`spring-boot-starter-parent`** | import Boot's BOM only | The parent gives versions **and** plugin settings (UTF-8, Java version, `-parameters`) with no extra config. It keeps our pom short. |
+| **Wrapper scripts from the official zip** | the wrapper plugin in Docker | Docker Desktop was not running. The zip on Maven Central has the very same scripts the plugin writes, and we checked its SHA-1. |
+| **`only-script` wrapper** | the jar type | No binary `.jar` file in git. The script downloads Maven itself. |
+| **Test libraries added in T1**, not T2 | wait until T2.2 | The kept `KernelPlaceholderTest` would not compile without JUnit and AssertJ, and Task 1 must end with a green build. |
 
 ## Problems we hit
 
-1. **No Docker image for Gradle 9.9.2 yet.** Gradle 9.9.2 came out one day earlier. Fix: use the
-   `gradle:9.9.1-jdk21` image to *create* a wrapper for 9.9.2. Any Gradle can create a wrapper for
-   another version.
-2. **"Directory does not contain a Gradle build".** Gradle refused to make a wrapper in a folder
-   with no settings file. Fix: write `settings.gradle.kts` first, then create the wrapper.
-3. **Line endings on Windows.** git warned that LF would become CRLF, which would break `gradlew`.
-   Fix: add `.gitattributes`.
-4. **`gradlew` not executable on Linux.** Windows does not save the "can run" flag. Fix:
-   `git update-index --chmod=+x gradlew`. Now git saves it as mode `100755`.
+1. **Docker Desktop was not running**, so the `maven` Docker image could not start. Fix: download
+   `maven-wrapper-distribution-3.3.4-only-script.zip` from Maven Central, check its SHA-1, and copy
+   `mvnw` and `mvnw.cmd` from it.
+2. **"MISMATCH" when comparing checksums.** This was a mistake in my script, not a bad file. The
+   Windows temp path contains `\`, so `sha512sum` printed a `\` in front of the hash. Fix: read the
+   file through `<` so no path is printed. Then the SHA-512 matched the official one.
+3. **Many "cached from a remote repository ID" lines** in the Maven log. They are only info
+   messages: this computer's Maven cache (`~/.m2`) already had some files from another project, so
+   Maven checks them against Maven Central once. Not an error.
 
 ## How we checked it works
 
 | Check | Command | Result |
 |---|---|---|
-| Build in Git Bash | `./gradlew build` | `BUILD SUCCESSFUL` |
-| Build in PowerShell | `.\gradlew.bat clean build` | `BUILD SUCCESSFUL` |
+| RED first | `./mvnw verify` (before the Maven files) | Failed: `./mvnw: No such file or directory` |
+| Build in Git Bash | `./mvnw -B verify` | `BUILD SUCCESS` |
+| Build in PowerShell | `.\mvnw.cmd -B clean verify` | `BUILD SUCCESS`, `KernelPlaceholderTest`: 1 test, 0 failures |
 | Space in the path is OK | both builds ran in `C:\Smart Campus` | passed |
-| No versions in build files | `grep -rE '[0-9]+\.[0-9]+' --include='*.gradle.kts' .` | nothing found |
-| Line endings | `git ls-files --eol gradlew gradlew.bat` | `gradlew` LF, `gradlew.bat` CRLF |
-| Every library version exists | HTTP check on each Maven Central folder | all `200` (found) |
+| Maven download is genuine | compare SHA-512 with the official `.sha512` file | match |
+| Checksum is enforced | set a wrong `distributionSha256Sum`, then `./mvnw -v` | stopped: "your Maven distribution might be compromised". Restored → works |
+| No Gradle left | `git ls-files` and `find` for gradle files | 0 and 0 |
+| Child pom has no versions | `grep '<version>' backend/shared-kernel/pom.xml` | only the `<parent>` reference |
+| Line endings, executable | `git ls-files --eol`, `git ls-files -s mvnw` | `mvnw` LF + mode `100755`, `mvnw.cmd` CRLF |
 
 ## Words to know
 
 | Word | Meaning in simple words |
 |---|---|
-| Gradle | A tool that compiles, tests and packages code. It does the same job as Maven. |
-| Multi-project build | One big Gradle project that holds several small ones (sub-projects). |
-| Sub-project | One part of the big project, with its own build file. Maven calls it a module. |
-| Kotlin DSL (`.kts`) | Gradle build files written in Kotlin code. It is only for building, not app code. |
-| Plugin | An add-on that gives Gradle new tasks, for example `bootRun` from Spring Boot. |
-| `apply false` | Download a plugin but do not turn it on in this project. |
-| Version catalog | `libs.versions.toml`: the one file that holds all versions. |
-| BOM | A tested list of matching library versions you can import at once. |
-| Wrapper | `gradlew`: a script that downloads and runs the right Gradle version for you. |
-| Toolchain | Gradle's setting for which Java version compiles the code. |
-| LF / CRLF | Two ways to end a line of text: Unix/Linux use LF, Windows uses CRLF. |
-| GA | "General Availability": the final, stable release (not a test version like M1 or RC1). |
+| Maven | A tool that compiles, tests and packages Java code, configured with `pom.xml` files |
+| POM (`pom.xml`) | "Project Object Model": the XML file that describes a Maven project |
+| Parent pom | A pom that other poms inherit settings and versions from |
+| Module | One part of a multi-module project, with its own `pom.xml` |
+| `<properties>` | Named values (like variables) used as `${name}` in the pom |
+| `<dependencyManagement>` | A list of versions. It sets versions, but adds nothing by itself |
+| `<dependencies>` | The libraries a project really uses |
+| BOM | "Bill of materials": a list of library versions tested together |
+| Scope `test` | The library is only used to compile and run tests |
+| SNAPSHOT | A version that is still in progress, not a final release |
+| Maven Wrapper (`mvnw`) | A script that downloads and runs the right Maven version for you |
+| SHA-256 / SHA-512 | A "fingerprint" of a file, used to check the file was not changed |
+| GA / RC | GA = final, stable release. RC = "release candidate", almost final, still being tested |
+| `verify` | A Maven phase that compiles, runs the tests, packages the jar, and runs the checks |
 
 ## Test yourself
 
-1. Why does the root `build.gradle.kts` use `apply false` for the Spring Boot plugin?
-2. You want to upgrade Spring Boot. How many files do you change, and which ones?
-3. Why did we pick Boot 4.1.3 when 4.2.0 is newer?
-4. What happens if someone changes the Gradle zip on the download server?
-5. Why must `gradle-wrapper.jar` be saved in git, when `.gitignore` usually skips jar files?
+1. What is the difference between `<dependencyManagement>` and `<dependencies>` in the parent pom?
+2. Why does `shared-kernel/pom.xml` have no `<version>` for JUnit?
+3. Why did we pick Maven 3.9.16 and not Maven 4?
+4. What happens if someone changes the Maven zip on the download server?
+5. Why were the test libraries added in Task 1, when the plan had them in Task 2?
 
 <details>
 <summary>Answers</summary>
 
-1. The root has no Java code and is not an app. Each sub-project turns the plugin on only if it is
-   an app (like `core-app`). `shared-kernel` is a library, so it never needs it.
-2. One file: `gradle/libs.versions.toml`, the `spring-boot = "..."` line. You also check that
-   Spring Cloud, Modulith and springdoc still match the new version.
-3. springdoc does not support Boot 4.2 yet. The task asks that every library officially supports
-   the chosen Boot version.
-4. Its SHA-256 fingerprint no longer matches `distributionSha256Sum`, so the wrapper stops and does
-   not run it.
-5. `gradlew` needs this jar to start. Without it, nobody can build the project without installing
-   Gradle. That is why `.gitignore` has `!gradle/wrapper/gradle-wrapper.jar`.
+1. `<dependencyManagement>` only sets **versions** ("if you use X, use version Y"). It adds nothing.
+   `<dependencies>` really **adds** the libraries, and in a parent pom it adds them to every module.
+2. Its parent chain sets it: our root pom adds JUnit with no version, and the version comes from
+   `spring-boot-starter-parent`, which manages JUnit's version.
+3. Maven 4 is still a release candidate (`4.0.0-rc-7`), not a final release. Maven 3.9.16 is the
+   newest final version, and Boot 4.1 supports Maven 3.6.3 or later.
+4. Its SHA-256 no longer matches `distributionSha256Sum`, so `mvnw` stops with "your Maven
+   distribution might be compromised" and does not run it.
+5. `KernelPlaceholderTest` was kept from the Gradle version. It needs JUnit and AssertJ to compile,
+   and Task 1 must end with a green `./mvnw verify`.
 
 </details>
 
 ## Learn more
 
-- [Gradle: Structuring multi-project builds](https://docs.gradle.org/9.9.2/userguide/multi_project_builds.html):
-  how `settings.gradle.kts` and `include` work.
-- [Gradle: Version catalogs](https://docs.gradle.org/9.9.2/userguide/version_catalogs.html):
-  the `libs.versions.toml` format.
-- [Gradle: The Gradle Wrapper](https://docs.gradle.org/9.9.2/userguide/gradle_wrapper.html):
-  how `gradlew` works, including the checksum.
-- [Gradle: Toolchains for JVM projects](https://docs.gradle.org/9.9.2/userguide/toolchains.html):
-  how the Java version is chosen.
+- [Maven: Introduction to the POM](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html):
+  parent poms, inheritance, and multi-module projects.
+- [Maven: Introduction to the dependency mechanism](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html):
+  `<dependencyManagement>`, scopes, and importing a BOM.
+- [Maven: Introduction to the build lifecycle](https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html):
+  phases like `test`, `package` and `verify`.
+- [Maven Wrapper](https://maven.apache.org/tools/wrapper/): how `mvnw` works, the `only-script`
+  type, and `distributionSha256Sum`.
+- [Spring Boot Maven plugin: Getting started](https://docs.spring.io/spring-boot/maven-plugin/getting-started.html):
+  what `spring-boot-starter-parent` gives you.
 - [Spring Boot 4.1: System requirements](https://docs.spring.io/spring-boot/4.1/system-requirements.html):
-  which Java and Gradle versions Boot supports.
-- [Spring Boot Gradle plugin](https://docs.spring.io/spring-boot/gradle-plugin/index.html):
-  what the plugin adds (`bootRun`, `bootJar`).
-- [EditorConfig](https://editorconfig.org/): the `.editorconfig` format.
+  which Java and Maven versions Boot supports.
 - [git: gitattributes](https://git-scm.com/docs/gitattributes): line-ending settings.
+- [EditorConfig](https://editorconfig.org/): the `.editorconfig` format.
