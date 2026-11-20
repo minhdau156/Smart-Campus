@@ -15,8 +15,8 @@ having the root `pom.xml` as its parent.
 - [ ] **2.1** In the root `pom.xml`, check the effective pom (`./mvnw help:effective-pom`) for what
   the Boot parent already sets (Java release from `java.version`, UTF-8, `-parameters`), and add
   only what is missing.
-- [ ] **2.2** Add JUnit Jupiter, AssertJ and the JUnit Platform launcher as `test` dependencies for
-  every module (versions from the Boot parent).
+- [x] **2.2** Add JUnit Jupiter, AssertJ and the JUnit Platform launcher as `test` dependencies for
+  every module (versions from the Boot parent). *Done early in T1: the kept placeholder test needed them.*
 - [ ] **2.3** Unit tests vs integration tests: `maven-surefire-plugin` runs `*Test` classes in the
   `test` phase. `maven-failsafe-plugin` runs `*IT` classes in `integration-test` and checks them in
   `verify`. A `skipUTs` property (`-DskipUTs`) skips only the unit tests.

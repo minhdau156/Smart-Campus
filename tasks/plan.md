@@ -65,7 +65,7 @@ T3 Compose infra (parallel) ─────────────────�
 ## Task list (details, acceptance criteria and verification in [`tasks/platform/`](platform/))
 
 ### Phase 1: Foundation
-- [ ] T1 Maven parent pom, wrapper, pinned versions (Boot 4 line) *(redo: was Gradle)*
+- [x] T1 Maven parent pom, wrapper, pinned versions (Boot 4 line)
 - [ ] T2 Build rules in the parent pom: Spotless, JaCoCo, surefire/failsafe (ITs) *(redo: was Gradle)*
 - [ ] T3 Compose core infra + schemas + per-service DB users *(parallel with T1–T2)*
 - [ ] T4 `shared-kernel`: typed ids, `Money`, time (`TimeRange`), `ProblemCode`
