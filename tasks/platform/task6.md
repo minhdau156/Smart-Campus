@@ -10,7 +10,7 @@
 **Subtasks**
 - [ ] **6.1** Create `backend/core-app` (plugins `spring-app` + `integration-test`). Dependencies:
   web, actuator, JDBC, Flyway, the Postgres driver, the Modulith starter and `shared-kernel`.
-  Register it in `settings.gradle.kts`.
+  Add it to `<modules>` in the root `pom.xml`.
 - [ ] **6.2** Write `CoreApplication`, and create the `edu.campus.platform` package as the first Modulith module (`package-info.java` with `@ApplicationModule`).
 - [ ] **6.3** Write a `PingController` for `GET /api/v1/platform/ping`, returning `{app, version, time}`. It gets the time from an injected `Clock`.
 - [ ] **6.4** Write `application.yml`: port 8081, datasource user `core_app`, Flyway default schema `platform`, and `dev` and `test` profiles.
@@ -19,7 +19,7 @@
 - [ ] **6.7** Add a boundary-violation fixture in test sources: two fake modules, one reaching
   into the other's `internal` package. Write a test asserting that `verify()` **throws** for them,
   and add an ArchUnit rule for the same thing.
-- [ ] **6.8** With Compose up, run `./gradlew :backend:core-app:bootRun` and curl the health and ping endpoints.
+- [ ] **6.8** With Compose up, run `./mvnw -pl backend/core-app spring-boot:run` and curl the health and ping endpoints.
 
 **Done when**
 - [ ] Health returns `UP` and ping returns 200 on :8081
@@ -27,15 +27,15 @@
 - [ ] `platform.flyway_schema_history` exists and has the baseline row
 
 **Verify**
-- [ ] `./gradlew :backend:core-app:build` passes
+- [ ] `./mvnw -pl backend/core-app -am verify` passes
 - [ ] `curl localhost:8081/api/v1/platform/ping` returns JSON
 
-**Files:** `backend/core-app/build.gradle.kts`, `CoreApplication.java`, `platform/PingController.java`, `application.yml`, `ModularityTest.java` (+ fixture package)
+**Files:** `backend/core-app/pom.xml`, `CoreApplication.java`, `platform/PingController.java`, `application.yml`, `ModularityTest.java` (+ fixture package)
 
 ---
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

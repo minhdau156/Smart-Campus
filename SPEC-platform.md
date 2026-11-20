@@ -54,7 +54,7 @@ build, infra, eventing, or error-handling plumbing.**
 
 ## Tech Stack
 
-The docs fix the stack. Exact versions are pinned once, in `gradle/libs.versions.toml` and
+The docs fix the stack. Exact versions are pinned once, in the root `pom.xml` (`<properties>`) and
 `frontend/web/package.json`, during task 1, using the newest GA release at that time. No floating
 versions (`latest`, `+`, `^` on majors) anywhere, including Docker image tags.
 
@@ -62,7 +62,7 @@ versions (`latest`, `+`, `^` on majors) anywhere, including Docker image tags.
 |---|---|---|
 | Language | Java 21 (LTS) | Already installed on this machine: 21.0.13 |
 | Framework | Spring Boot 4.x + Spring Modulith 2.x + Spring Cloud Gateway (server-webflux) | Q1. Boot 4 ships Jackson 3 (`tools.jackson.*`) |
-| Build | Gradle (Kotlin DSL) multi-project, version catalog, wrapper committed | Q2 |
+| Build | Maven multi-module: one parent `pom.xml` (inherits `spring-boot-starter-parent`), versions in `<properties>`, Maven Wrapper committed | Q2 (changed from Gradle on 2026-11-20) |
 | Migrations | Flyway | One history table per schema |
 | Messaging | Apache Kafka (KRaft), Spring for Apache Kafka | C2 |
 | Event outbox | Spring Modulith Event Publication Registry (JDBC) + Kafka externalization | See Design decisions D1 |
@@ -77,7 +77,7 @@ versions (`latest`, `+`, `^` on majors) anywhere, including Docker image tags.
 
 ## Commands
 
-Run all commands from the repo root. On Windows PowerShell, use `.\gradlew.bat` in place of `./gradlew`.
+Run all commands from the repo root. On Windows PowerShell, use `.\mvnw.cmd` in place of `./mvnw`.
 
 ```bash
 # Infrastructure
@@ -86,21 +86,21 @@ docker compose -f infra/docker-compose.yml --profile observability up -d --wait
 docker compose -f infra/docker-compose.yml down -v                  # wipe all local data
 
 # Backend
-./gradlew build                                   # compile + spotlessCheck + unit + modulith verify + ITs
-./gradlew test                                    # unit tests only (fast, no Docker)
-./gradlew integrationTest                         # Testcontainers ITs (needs Docker)
-./gradlew spotlessApply                           # format
-./gradlew :backend:core-app:bootRun               # port 8081
-./gradlew :backend:registration-service:bootRun   # port 8082
-./gradlew :backend:notification-service:bootRun   # port 8083
-./gradlew :backend:gateway:bootRun                # port 8080 (single entry point)
+./mvnw verify                                               # compile + unit + modulith verify + ITs + spotless:check
+./mvnw test                                                 # unit tests only (fast, no Docker)
+./mvnw verify -DskipUTs                                     # Testcontainers ITs only (needs Docker)
+./mvnw spotless:apply                                       # format
+./mvnw -pl backend/core-app spring-boot:run                 # port 8081
+./mvnw -pl backend/registration-service spring-boot:run     # port 8082
+./mvnw -pl backend/notification-service spring-boot:run     # port 8083
+./mvnw -pl backend/gateway spring-boot:run                  # port 8080 (single entry point)
 
-# Apps as containers (Arch §8 dev setup). Stop any bootRun apps first: same ports
-./gradlew bootJar
+# Apps as containers (Arch §8 dev setup). Stop any spring-boot:run apps first: same ports
+./mvnw package -DskipTests                                  # layered boot jars in backend/*/target/
 docker compose -f infra/docker-compose.yml --profile apps up -d --build --wait
 
 # API docs
-./gradlew exportOpenApi                           # refreshes docs/api/*.json (commit the diff)
+./mvnw verify -Pexport-openapi                              # refreshes docs/api/*.json (commit the diff)
 #   live: http://localhost:8081/swagger-ui.html (core-app; one group per module)
 
 # Frontend
@@ -129,8 +129,7 @@ Grafana 3000.
 ```
 smart-campus/                          (repo root = C:\Smart Campus)
 ├── CAPABILITY-MAP.md  SPEC-*.md        specs (index = capability map)
-├── settings.gradle.kts  build.gradle.kts  gradle/libs.versions.toml  gradlew(.bat)
-├── build-logic/                        convention plugins: java-conventions, spring-app, integration-test
+├── pom.xml  mvnw(.cmd)  .mvn/wrapper/   parent pom: module list, versions, shared build rules
 ├── backend/
 │   ├── shared-kernel/                  plain Java library, no Spring Boot app. Ids, Money, time, events, topics, errors
 │   │   └── src/main/java/edu/campus/kernel/{id,money,time,event,error}/
@@ -161,8 +160,10 @@ Conventions:
   package root. `internal` sub-packages are private, and `verify()` enforces this.
 - **Migrations:** `src/main/resources/db/migration/<schema>/V<yyyyMMddHHmm>__<what>.sql`. A module's
   migrations only create or alter objects in its own schema.
-- **Tests:** unit tests in `src/test/java`, integration tests in `src/integrationTest/java`
-  (separate source set and Gradle task), Testcontainers shared via `@ServiceConnection`.
+- **Tests:** unit tests and integration tests both live in `src/test/java`. Unit tests are named
+  `*Test` and run by `maven-surefire-plugin` (`test` phase). Integration tests are named `*IT` and
+  run by `maven-failsafe-plugin` (`integration-test` + `verify` phases). Testcontainers shared via
+  `@ServiceConnection`.
 
 ## Code Style
 
@@ -232,10 +233,10 @@ Modulith registry, fall back to the hand-written outbox and update D1 before goi
 
 | Level | Tool | Lives in | Covers | Runs |
 |---|---|---|---|---|
-| Unit | JUnit 5 + AssertJ | `src/test/java` | `shared-kernel` value objects, problem mapping, envelope serialization | `./gradlew test`, every commit |
-| Architecture | Spring Modulith `ApplicationModules.verify()` + ArchUnit | `core-app/src/test` | Module boundaries, no `internal` leaks, no cross-schema repository access, no in-process listeners on other modules' events (D5) | `./gradlew test` |
-| Integration | Testcontainers (Postgres, Kafka, Redis) + `@SpringBootTest` / `@ApplicationModuleTest` | `src/integrationTest/java` | Outbox O1–O6, Flyway per schema, DB-user isolation (D3), problem JSON end to end, gateway routing and rate limit, OpenAPI export | `./gradlew integrationTest`, CI |
-| Smoke | `curl` script | `infra/smoke.sh` | All apps reachable through the gateway, run against both `bootRun` apps and the `apps` Compose profile | Manual, before closing the module |
+| Unit | JUnit 5 + AssertJ | `src/test/java` | `shared-kernel` value objects, problem mapping, envelope serialization | `./mvnw test`, every commit |
+| Architecture | Spring Modulith `ApplicationModules.verify()` + ArchUnit | `core-app/src/test` | Module boundaries, no `internal` leaks, no cross-schema repository access, no in-process listeners on other modules' events (D5) | `./mvnw test` |
+| Integration | Testcontainers (Postgres, Kafka, Redis) + `@SpringBootTest` / `@ApplicationModuleTest` | `src/test/java`, `*IT` | Outbox O1–O6, Flyway per schema, DB-user isolation (D3), problem JSON end to end, gateway routing and rate limit, OpenAPI export | `./mvnw verify` (failsafe), CI |
+| Smoke | `curl` script | `infra/smoke.sh` | All apps reachable through the gateway, run against both `spring-boot:run` apps and the `apps` Compose profile | Manual, before closing the module |
 | Frontend | Vitest + Testing Library | `frontend/web/src/**/*.test.tsx` | App renders. API client parses problem JSON. Generated types are up to date (CI `git diff --exit-code`) | `npm run test` |
 
 Coverage: JaCoCo report on every build. **`shared-kernel` ≥ 90% line coverage, enforced.** Other
@@ -245,11 +246,11 @@ quarantined with an issue link. They are never silently deleted.
 ## Success Criteria
 
 **Repo and build**
-- [ ] P1. A fresh clone with JDK 21, Node 24, and Docker can run `./gradlew build` with no other
-  setup. The build passes, including `integrationTest` and `spotlessCheck`.
+- [ ] P1. A fresh clone with JDK 21, Node 24, and Docker can run `./mvnw verify` with no other
+  setup. The build passes, including the ITs (failsafe) and `spotless:check`.
 - [ ] P2. `npm --prefix frontend/web ci && npm --prefix frontend/web run lint test build` passes.
 - [ ] P3. Adding a class in `core-app` that imports another module's `internal` package makes
-  `./gradlew test` fail with a Modulith violation. Proven by a test fixture that is kept in the repo.
+  `./mvnw test` fail with a Modulith violation. Proven by a test fixture that is kept in the repo.
 
 **Infrastructure**
 - [ ] I1. `docker compose -f infra/docker-compose.yml up -d --wait` returns with every container
@@ -275,11 +276,11 @@ quarantined with an issue link. They are never silently deleted.
   Publishing to a topic without the key required by D6 fails.
 - [ ] O6. Replay: after 10 probe events, running `infra/replay.sh` on the probe consumer rebuilds
   exactly the same 10 rows. A `core-app` class with an in-process listener on another module's
-  event fails `./gradlew test` (D5).
+  event fails `./mvnw test` (D5).
 
 **API docs**
 - [ ] A1. Each app serves `/v3/api-docs`. `core-app` has one OpenAPI group per Modulith module.
-  `./gradlew exportOpenApi` writes `docs/api/*.json`, and `npm run gen:api` turns it into TS types
+  `./mvnw verify -Pexport-openapi` writes `docs/api/*.json`, and `npm run gen:api` turns it into TS types
   that the web app compiles against.
 
 **Gateway rate limiting**
@@ -288,7 +289,7 @@ quarantined with an issue link. They are never silently deleted.
   the limit are unaffected. The limiter state lives in Redis, so it is shared across gateway replicas.
 
 **Containers**
-- [ ] K1. `./gradlew bootJar` followed by `docker compose … --profile apps up -d --build --wait`
+- [ ] K1. `./mvnw package -DskipTests` followed by `docker compose … --profile apps up -d --build --wait`
   brings all 4 apps up healthy, and `infra/smoke.sh` passes against them. Images run as non-root.
 
 **Errors and API**
@@ -319,8 +320,8 @@ quarantined with an issue link. They are never silently deleted.
 ## Boundaries
 
 **Always**
-- Run `./gradlew build` (and the frontend checks, if touched) before saying a task is done.
-- Pin every dependency and image version. Update `libs.versions.toml` and nothing else for versions.
+- Run `./mvnw verify` (and the frontend checks, if touched) before saying a task is done.
+- Pin every dependency and image version. Update the root `pom.xml` `<properties>` and nothing else for versions.
 - Keep each schema owned by exactly one module. Use FKs only inside a schema.
 - Send every cross-module change through an event or a published module API (Arch §4).
 - Use problem JSON for every error response.
@@ -347,7 +348,7 @@ quarantined with an issue link. They are never silently deleted.
 | # | Question | Decision |
 |---|---|---|
 | Q1 | Spring Boot line | **Spring Boot 4.x** (current GA), with the matching Spring Modulith 2.x and Spring Cloud release train. This changes the Arch doc's "Spring Boot 3" and is recorded as an ADR. |
-| Q2 | Build tool | **Gradle (Kotlin DSL)** |
+| Q2 | Build tool | **Maven** (multi-module, parent `pom.xml`, Maven Wrapper). Was Gradle (Kotlin DSL) until 2026-11-20; changed because the user finds Maven config easier to read |
 | Q3 | GitHub repo | **The user creates it.** I write `ci.yml` locally. C1 is verified once the repo exists and is pushed. |
 | Q4 | `schemaVersion` in the envelope | Accepted (default; not objected to) |
 | Q5 | Tempo instead of Jaeger | **Tempo** |

@@ -29,14 +29,14 @@
 - [ ] Invalid envelopes are rejected at construction
 
 **Verify**
-- [ ] `./gradlew :backend:shared-kernel:build` passes
+- [ ] `./mvnw -pl backend/shared-kernel -am verify` passes
 
 **Files:** `kernel/event/DomainEvent.java`, `kernel/event/EventTypes.java`, `kernel/event/Topics.java`, `DomainEventJsonTest.java`, `src/test/resources/golden/domain-event.json`, `TopicsTest.java`
 
 ---
 
 ## ◆ Checkpoint A: Foundation
-- [ ] `./gradlew build` is green on Windows from `C:\Smart Campus`
+- [ ] `./mvnw verify` is green on Windows from `C:\Smart Campus`
 - [ ] Compose infra is healthy, and the DB permission check passes
 - [ ] 🙋 **Human review** of the pinned versions (T1.1) before any app code is written
 
@@ -44,6 +44,6 @@
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

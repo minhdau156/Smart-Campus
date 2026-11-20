@@ -36,7 +36,7 @@ anything else is built on top of it.
 - [ ] Spike notes are in spec D1
 
 **Verify**
-- [ ] `./gradlew :backend:core-app:integrationTest` is green 3 times in a row
+- [ ] `./mvnw -pl backend/core-app -am verify -DskipUTs` is green 3 times in a row
 
 **Files:** `core-app/…/platform/internal/OutboxProbe.java`, `…/OutboxProbeService.java`, `application.yml`, `db/migration/platform/V…__outbox.sql`, `OutboxIT.java`
 
@@ -50,6 +50,6 @@ anything else is built on top of it.
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

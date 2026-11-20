@@ -117,7 +117,7 @@ Second review against both PDFs (2026-11-17, all approved):
 5. **MVP = every "Must" story.** "Should" and "Could" stories are scoped per module spec.
 6. **Stack** is fixed by the docs: Java 21, Spring Modulith, Spring Cloud Gateway, React + TS +
    Vite + TanStack Query. Decided in `SPEC-platform.md` (Q1, Q2): **Spring Boot 4.x** (instead of
-   the docs' Boot 3) and **Gradle**.
+   the docs' Boot 3) and **Maven** (changed from Gradle on 2026-11-20).
 
 ## Spec index (the roadmap: one row per module, in build order)
 

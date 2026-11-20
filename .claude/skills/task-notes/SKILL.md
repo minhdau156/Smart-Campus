@@ -14,7 +14,7 @@ common words, explain each technical word the first time it appears).
    (goal, subtasks, "Done when", "Result") and the parts of `SPEC-<module>.md` it points to.
 2. **List every file the task touched.** Use git: the task's commit(s) (`git log --oneline`,
    `git show --stat <sha>`), or `git status` / `git diff --stat` if not committed yet. Include
-   generated files (e.g. the Gradle wrapper), grouping them when they belong together.
+   generated files (e.g. the Maven wrapper), grouping them when they belong together.
    Done when: every touched file is in the list.
 3. **Read each file** and write its section (format below). Explain the important lines, not every
    line. Compare with something the reader may know (Maven, npm, plain Java) when it helps.

@@ -2,6 +2,9 @@
 
 > Task: [task2.md](../../../tasks/platform/task2.md) · Commit: `d615a1c` · Date: 2026-11-20
 
+> **Outdated (2026-11-20):** this note explains the first, Gradle version of this task. The project
+> switched to Maven (spec Q2), and this note will be rewritten when the task is redone.
+
 ## In one minute
 
 The project will have many Java projects: `shared-kernel` now, and later 4 apps. They all need the

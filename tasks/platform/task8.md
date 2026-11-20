@@ -23,14 +23,14 @@
 - [ ] `core-app` has no outbox config of its own, and the T7 ITs still pass
 
 **Verify**
-- [ ] `./gradlew :backend:platform-starter:build :backend:core-app:build` passes
+- [ ] `./mvnw -pl backend/platform-starter,backend/core-app -am verify` passes
 
-**Files:** `backend/platform-starter/build.gradle.kts`, `ProblemHandlingAutoConfiguration.java`, `CampusProblemHandler.java`, `…AutoConfiguration.imports`, `ProblemJsonIT.java`
+**Files:** `backend/platform-starter/pom.xml`, `ProblemHandlingAutoConfiguration.java`, `CampusProblemHandler.java`, `…AutoConfiguration.imports`, `ProblemJsonIT.java`
 
 ---
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).
