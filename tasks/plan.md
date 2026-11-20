@@ -19,6 +19,11 @@ checkpoint after each phase.
 
 ## Architecture decisions carried into the plan
 
+- **Website only, no mobile app (decided 2026-11-20).** The only frontend is the responsive React
+  web app in `frontend/web`. There is no React Native / Expo app and no `mobile/` folder, even though
+  the Arch and Implementation Plan PDFs list one as optional. Phones use the responsive website
+  (NFR-7). The Gradle build files stay in Kotlin DSL (`*.gradle.kts`), since they are build
+  scripts, not app code.
 - **Boot 4 / Modulith 2 / Spring Cloud for Boot 4.** Exact versions are taken from official
   release notes in T1, not from memory. They are recorded in an ADR as a change from the Arch doc's
   "Spring Boot 3".

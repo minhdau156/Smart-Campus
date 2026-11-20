@@ -48,6 +48,8 @@ build, infra, eventing, or error-handling plumbing.**
 - Per-user rate limiting, waiting room, Redis seat scripts, k6 → `registration`
 - WebSocket/STOMP endpoint → `notification`. The gateway route exists, but nothing serves it yet
 - Any domain table, endpoint, or UI screen
+- Mobile app (React Native / Expo, `mobile/` folder): **not built at all**, in any module
+  (decided 2026-11-20). Phones use the responsive website in `frontend/web` (NFR-7)
 - Kubernetes, Helm, CDN, image registry push, zero-downtime deploys (NFR-6), production deploy → a later shipping phase (map assumption 2, C18)
 
 ## Tech Stack

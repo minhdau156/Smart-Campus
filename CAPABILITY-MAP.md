@@ -109,7 +109,9 @@ Second review against both PDFs (2026-11-17, all approved):
 2. **Local-first target.** Docker Compose is the "done" environment for every module. Kubernetes,
    Helm, HPA, image push and zero-downtime deploys (NFR-6) are a later shipping phase. The k6 rush
    test runs against Compose first.
-3. **Mobile (Expo) is out of scope.** NFR-7 is met by a responsive web app.
+3. **Website only. No mobile app** (decided by the user, 2026-11-20). No React Native / Expo app
+   and no `mobile/` folder in any module, although the PDFs list one as optional. NFR-7 is met by
+   the responsive web app. OIDC login therefore needs only the web client.
 4. **External systems are stubbed.** SIS uses a CSV fixture, the payment gateway uses sandbox or a
    mock webhook, FCM and SMTP use Mailpit plus a fake push sender.
 5. **MVP = every "Must" story.** "Should" and "Could" stories are scoped per module spec.
