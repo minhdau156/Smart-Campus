@@ -1,9 +1,5 @@
 plugins {
     `java-library`
-}
-
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(libs.versions.java.get())
-    }
+    id("campus.java-conventions")
+    id("campus.integration-test")
 }

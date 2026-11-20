@@ -65,7 +65,7 @@ T3 Compose infra (parallel) ─────────────────�
 
 ### Phase 1: Foundation
 - [x] T1 Gradle root, wrapper, version catalog (pinned Boot 4 line)
-- [ ] T2 Build conventions: Spotless, JaCoCo, `integrationTest` source set
+- [x] T2 Build conventions: Spotless, JaCoCo, `integrationTest` source set
 - [ ] T3 Compose core infra + schemas + per-service DB users *(parallel with T1–T2)*
 - [ ] T4 `shared-kernel`: typed ids, `Money`, time (`TimeRange`), `ProblemCode`
 - [ ] T5 `shared-kernel`: `DomainEvent` envelope + `Topics` (name, key, partitions)
