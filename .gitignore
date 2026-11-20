@@ -1,0 +1,32 @@
+# Gradle / build output
+.gradle/
+build/
+out/
+bin/
+!gradle/wrapper/gradle-wrapper.jar
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+
+# Node / frontend
+node_modules/
+dist/
+coverage/
+
+# Local secrets
+infra/.env
+.env.local
+
+# OS / logs
+.DS_Store
+Thumbs.db
+*.log
