@@ -31,7 +31,7 @@ needs them but never names them.
 | 9 | `announcement` | Core | Targeted posts (all/faculty/cohort/section), scheduled publish, relevance feed, read counts | course | ANN-1,2,3,5,6 |
 | 10 | `payment` ★ | Core | Payment-gateway checkout and webhook (VNPay/MoMo), idempotency, refunds → `PaymentConfirmed`, `PaymentRefunded` | identity | CLUB-4 (paid), CLUB-7 |
 | 11 | `club` | Core | Clubs, membership and club roles, club approval, events with quota and price, QR tickets, door scanning, attendee list | identity, payment | CLUB-1..8 |
-| 12 | `marketplace` | Core | Book listings with MinIO photos, edit and mark sold, buyer-seller messages, reports, moderation and bans | course | MKT-1,3,4,5,6 |
+| 12 | `marketplace` | Core | Book listings with photos in S3-compatible storage (RustFS in dev), edit and mark sold, buyer-seller messages, reports, moderation and bans | course | MKT-1,3,4,5,6 |
 | 13 | `lostfound` | Core | Lost/found reports with photos, matching, claims with proof, security-desk handling, 60-day archive job | identity | LF-1..6 |
 | 14 | `search` | Core | OpenSearch read model over sections, listings, and lost-found items. It can be dropped and replayed at any time. | course, marketplace, lostfound | MKT-2 (+ cross-module search) |
 

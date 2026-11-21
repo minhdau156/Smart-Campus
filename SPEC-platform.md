@@ -37,7 +37,7 @@ build, infra, eventing, or error-handling plumbing.**
 | Gateway | Spring Cloud Gateway: `/api/v1/registration/**` → registration-service, `/api/v1/notification/**` and `/ws/**` → notification-service, all other `/api/v1/**` → core-app. **Per-IP rate limiting** (Redis), returning 429 with `Retry-After` and problem JSON (Arch §7) |
 | Container images | One shared Dockerfile (layered Spring Boot jar, pinned JRE 21 base, non-root, healthcheck) used for all 4 apps. A Compose `apps` profile runs them (Arch §8 dev column) |
 | Web app (empty) | Vite + React + TS app in `frontend/web` that builds, lints, tests, proxies `/api` to the gateway in dev, and uses the generated API types |
-| Local infra | `infra/docker-compose.yml`: Postgres, Redis, Kafka (KRaft), Keycloak (empty), OpenSearch, MinIO, Mailpit. Profile `apps` adds the 4 backend apps. Profile `observability` adds OTel Collector, Tempo, Prometheus, Loki, Grafana |
+| Local infra | `infra/docker-compose.yml`: Postgres, Redis, Kafka (KRaft), Keycloak (empty), OpenSearch, RustFS (S3-compatible file store; replaces MinIO, see Q6), Mailpit. Profile `apps` adds the 4 backend apps. Profile `observability` adds OTel Collector, Tempo, Prometheus, Loki, Grafana |
 | Observability | OTel Java agent in every app, Micrometer → Prometheus, JSON logs with `traceId`, one provisioned "Platform overview" Grafana dashboard |
 | CI | GitHub Actions: backend build + unit + Modulith `verify()` + Testcontainers ITs; frontend lint + test + build; Trivy and OWASP Dependency-Check |
 
@@ -121,7 +121,7 @@ curl -s localhost:8080/api/v1/notification/ping   # → notification-service via
 ```
 
 Local ports: gateway 8080, core-app 8081, registration 8082, notification 8083, Postgres 5432,
-Redis 6379, Kafka 9092, Keycloak 8180, OpenSearch 9200, MinIO 9000 (console 9001), Mailpit 8025,
+Redis 6379, Kafka 9092, Keycloak 8180, OpenSearch 9200, RustFS S3 API 9000 (console 9001), Mailpit 8025,
 Grafana 3000.
 
 ## Project Structure
@@ -253,7 +253,7 @@ quarantined with an issue link. They are never silently deleted.
   `./mvnw test` fail with a Modulith violation. Proven by a test fixture that is kept in the repo.
 
 **Infrastructure**
-- [ ] I1. `docker compose -f infra/docker-compose.yml up -d --wait` returns with every container
+- [x] I1. `docker compose -f infra/docker-compose.yml up -d --wait` returns with every container
   healthy in under 3 minutes on a warm image cache.
 - [ ] I2. Postgres contains the schemas `identity, course, timetable, registration, grade,
   announcement, club, marketplace, lostfound, notification, payment, platform`. User
@@ -352,3 +352,4 @@ quarantined with an issue link. They are never silently deleted.
 | Q3 | GitHub repo | **The user creates it.** I write `ci.yml` locally. C1 is verified once the repo exists and is pushed. |
 | Q4 | `schemaVersion` in the envelope | Accepted (default; not objected to) |
 | Q5 | Tempo instead of Jaeger | **Tempo** |
+| Q6 | Object storage (dev) | **RustFS** (`rustfs/rustfs`, S3-compatible, Apache-2.0) instead of MinIO. MinIO stopped publishing Docker images in 2025 (gone from Docker Hub; Quay needs a login), so it cannot be pinned. Apps use the plain S3 API, so only the dev container changes. Decided 2026-11-21. |
