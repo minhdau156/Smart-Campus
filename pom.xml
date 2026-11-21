@@ -68,6 +68,9 @@
         <spotless-maven-plugin.version>3.11.0</spotless-maven-plugin.version>
         <palantir-java-format.version>2.103.0</palantir-java-format.version>
         <jacoco-maven-plugin.version>0.8.16</jacoco-maven-plugin.version>
+
+        <!-- Build switch: `./mvnw verify -DskipUTs` skips unit tests and runs only the ITs. -->
+        <skipUTs>false</skipUTs>
     </properties>
 
     <!-- Version list for libraries. A module that uses one of these writes no <version>. -->
@@ -123,4 +126,98 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <!--
+        Shared build rules (task T2). Every module gets them from this parent.
+        Already set by the Spring Boot parent, so NOT repeated here:
+        Java release (from java.version), UTF-8, compiler -parameters, plugin versions.
+    -->
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!--
+                    Runnable Spring Boot apps only (core-app, gateway, ...). Configured here, but OFF:
+                    an app turns it on by listing this plugin in its own <build><plugins>.
+                    Layered jar = dependencies and our code in separate Docker layers (fast rebuilds).
+                -->
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <configuration>
+                        <layers>
+                            <enabled>true</enabled>
+                        </layers>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- Unit tests: classes named *Test, run in the `test` phase. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skipTests>${skipUTs}</skipTests>
+                </configuration>
+            </plugin>
+
+            <!--
+                Integration tests: classes named *IT, run in `integration-test`, results checked in
+                `verify`. The Boot parent already sets up both goals; listing the plugin turns it on.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+            </plugin>
+
+            <!-- Code format: `spotless:check` runs in `verify` and fails the build on bad format.
+                 Fix the format with `./mvnw spotless:apply`. -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless-maven-plugin.version}</version>
+                <configuration>
+                    <java>
+                        <palantirJavaFormat>
+                            <version>${palantir-java-format.version}</version>
+                        </palantirJavaFormat>
+                        <removeUnusedImports/>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Test coverage: record which lines the tests run, then write a report
+                 to target/site/jacoco/ right after the unit tests. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
