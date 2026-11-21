@@ -9,7 +9,7 @@
 
 **Subtasks**
 - [ ] **18.1** Enable `/actuator/prometheus` in the starter, with latency histograms for HTTP requests so p95 can be calculated.
-- [ ] **18.2** Write `prometheus.yml` scraping the 4 apps, with one target set for `bootRun` (`host.docker.internal`) and one for containers (service names).
+- [ ] **18.2** Write `prometheus.yml` scraping the 4 apps, with one target set for `spring-boot:run` (`host.docker.internal`) and one for containers (service names).
 - [ ] **18.3** 🙋 Pick a source for Kafka consumer lag in **seconds**. The default Kafka client metric
   counts messages, not seconds, so the Arch's "lag over 30 s" alert probably needs an extra lag
   exporter container. Adding a container is "ask first".
@@ -39,6 +39,6 @@
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

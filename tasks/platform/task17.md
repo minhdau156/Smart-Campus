@@ -19,7 +19,7 @@
 - [ ] Trace → logs and logs → trace both work in Grafana
 
 **Verify**
-- [ ] Step 17.5 was observed, and `./gradlew build` passes
+- [ ] Step 17.5 was observed, and `./mvnw verify` passes
 
 **Files:** `platform-starter/…/logging defaults`, `infra/docker-compose.yml`, `infra/otel/collector.yaml`, `infra/grafana/provisioning/datasources/datasources.yaml`
 
@@ -27,6 +27,6 @@
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

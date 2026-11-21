@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Parent of every Smart Campus module. It holds:
+        1. the list of modules (<modules>),
+        2. every version, in ONE place (<properties> + the Spring Boot parent below),
+        3. the shared build rules (added in task T2).
+
+        Spring Boot parent: sets Java release, UTF-8, -parameters, and the versions of
+        hundreds of libraries and Maven plugins (JUnit, AssertJ, Testcontainers, surefire, ...).
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <!-- Spring Boot. Kept on 4.1.x: springdoc does not list Boot 4.2 yet (see sources below). -->
+        <version>4.1.3</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>edu.campus</groupId>
+    <artifactId>smart-campus</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>Smart Campus</name>
+
+    <modules>
+        <module>backend/shared-kernel</module>
+    </modules>
+
+    <!--
+        Versions, checked on 2026-11-20 against official sources (task T1.1):
+
+        Spring Boot 4.1.3 (in <parent> above)
+          https://repo1.maven.org/maven2/org/springframework/boot/spring-boot/maven-metadata.xml
+          Boot 4.2.0 is GA, but springdoc lists only Boot 4.1.x -> 3.1.x-3.2.x:
+          https://springdoc.org/#what-is-the-compatibility-matrix-of-springdoc-openapi-with-spring-boot
+          Boot 4.1 needs "Maven 3.6.3 or later": https://docs.spring.io/spring-boot/4.1/system-requirements.html
+        Spring Cloud 2025.1.5 (Oakwood): "2025.1.x -> Boot 4.0.x, 4.1.x (starting with 2025.1.2)"
+          https://spring.io/projects/spring-cloud
+        Spring Modulith 2.1.3: spring-modulith-starter-core 2.1.3 is built on spring-boot-starter 4.1.3
+          https://repo1.maven.org/maven2/org/springframework/modulith/spring-modulith-starter-core/2.1.3/spring-modulith-starter-core-2.1.3.pom
+        springdoc 3.2.0: listed for Boot 4.1.x (link above)
+        ArchUnit 1.5.1
+          https://repo1.maven.org/maven2/com/tngtech/archunit/archunit/maven-metadata.xml
+        spotless-maven-plugin 3.11.0
+          https://repo1.maven.org/maven2/com/diffplug/spotless/spotless-maven-plugin/maven-metadata.xml
+        palantir-java-format 2.103.0
+          https://repo1.maven.org/maven2/com/palantir/javaformat/palantir-java-format/maven-metadata.xml
+        jacoco-maven-plugin 0.8.16 (not managed by Boot)
+          https://repo1.maven.org/maven2/org/jacoco/jacoco-maven-plugin/maven-metadata.xml
+        Testcontainers 2.0.5, JUnit, AssertJ, surefire/failsafe 3.5.6: managed by the Boot parent
+          https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-dependencies/4.1.3/spring-boot-dependencies-4.1.3.pom
+        Maven 3.9.16 (in .mvn/wrapper/maven-wrapper.properties, with its SHA-256). Maven 4 is still RC.
+          https://repo1.maven.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml
+        Maven Wrapper 3.3.4
+          https://repo1.maven.org/maven2/org/apache/maven/plugins/maven-wrapper-plugin/maven-metadata.xml
+    -->
+    <properties>
+        <java.version>21</java.version>
+        <spring-cloud.version>2025.1.5</spring-cloud.version>
+        <spring-modulith.version>2.1.3</spring-modulith.version>
+        <springdoc.version>3.2.0</springdoc.version>
+        <archunit.version>1.5.1</archunit.version>
+        <spotless-maven-plugin.version>3.11.0</spotless-maven-plugin.version>
+        <palantir-java-format.version>2.103.0</palantir-java-format.version>
+        <jacoco-maven-plugin.version>0.8.16</jacoco-maven-plugin.version>
+
+        <!-- Build switch: `./mvnw verify -DskipUTs` skips unit tests and runs only the ITs. -->
+        <skipUTs>false</skipUTs>
+    </properties>
+
+    <!-- Version list for libraries. A module that uses one of these writes no <version>. -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.modulith</groupId>
+                <artifactId>spring-modulith-bom</artifactId>
+                <version>${spring-modulith.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webflux-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.tngtech.archunit</groupId>
+                <artifactId>archunit-junit5</artifactId>
+                <version>${archunit.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- Test libraries for every module (versions from the Boot parent). -->
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <!--
+        Shared build rules (task T2). Every module gets them from this parent.
+        Already set by the Spring Boot parent, so NOT repeated here:
+        Java release (from java.version), UTF-8, compiler -parameters, plugin versions.
+    -->
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!--
+                    Runnable Spring Boot apps only (core-app, gateway, ...). Configured here, but OFF:
+                    an app turns it on by listing this plugin in its own <build><plugins>.
+                    Layered jar = dependencies and our code in separate Docker layers (fast rebuilds).
+                -->
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <configuration>
+                        <layers>
+                            <enabled>true</enabled>
+                        </layers>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- Unit tests: classes named *Test, run in the `test` phase. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skipTests>${skipUTs}</skipTests>
+                </configuration>
+            </plugin>
+
+            <!--
+                Integration tests: classes named *IT, run in `integration-test`, results checked in
+                `verify`. The Boot parent already sets up both goals; listing the plugin turns it on.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+            </plugin>
+
+            <!-- Code format: `spotless:check` runs in `verify` and fails the build on bad format.
+                 Fix the format with `./mvnw spotless:apply`. -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless-maven-plugin.version}</version>
+                <configuration>
+                    <java>
+                        <palantirJavaFormat>
+                            <version>${palantir-java-format.version}</version>
+                        </palantirJavaFormat>
+                        <removeUnusedImports/>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Test coverage: record which lines the tests run, then write a report
+                 to target/site/jacoco/ right after the unit tests. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

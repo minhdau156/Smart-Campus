@@ -26,7 +26,7 @@
 - [ ] The limit is shared across gateway instances through Redis
 
 **Verify**
-- [ ] `./gradlew :backend:gateway:integrationTest` passes
+- [ ] `./mvnw -pl backend/gateway -am verify -DskipUTs` passes
 
 **Files:** `gateway/…/RateLimitConfig.java`, `gateway/…/TrustedProxyIpKeyResolver.java`, `gateway/…/RateLimitedProblemFilter.java`, `application.yml`, `RateLimitIT.java`
 
@@ -34,6 +34,6 @@
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

@@ -9,9 +9,9 @@
 
 ## Overview
 
-Build the empty, runnable skeleton described in the spec: a Gradle monorepo with
+Build the empty, runnable skeleton described in the spec: a Maven multi-module monorepo with
 `shared-kernel`, 4 Spring Boot 4 apps (`core-app`, `registration-service`,
-`notification-service`, `gateway`) runnable via Gradle and as Compose containers, a transactional
+`notification-service`, `gateway`) runnable via Maven (`spring-boot:run`) and as Compose containers, a transactional
 outbox to Kafka with per-topic keys and replayable topics, RFC 7807 errors, OpenAPI docs with
 generated frontend types, per-IP rate limiting at the gateway, OTel/Tempo/Loki/Prometheus/Grafana,
 a Vite web scaffold, and GitHub Actions CI. The work is 21 tasks in 5 phases, with a human
@@ -22,8 +22,9 @@ checkpoint after each phase.
 - **Website only, no mobile app (decided 2026-11-20).** The only frontend is the responsive React
   web app in `frontend/web`. There is no React Native / Expo app and no `mobile/` folder, even though
   the Arch and Implementation Plan PDFs list one as optional. Phones use the responsive website
-  (NFR-7). The Gradle build files stay in Kotlin DSL (`*.gradle.kts`), since they are build
-  scripts, not app code.
+  (NFR-7).
+- **Maven, not Gradle (decided 2026-11-20, spec Q2).** One parent `pom.xml` holds the module list,
+  the versions and the shared build rules. T1 and T2 were first built with Gradle and are redone.
 - **Boot 4 / Modulith 2 / Spring Cloud for Boot 4.** Exact versions are taken from official
   release notes in T1, not from memory. They are recorded in an ADR as a change from the Arch doc's
   "Spring Boot 3".
@@ -33,14 +34,14 @@ checkpoint after each phase.
 - **Kafka is the only cross-module channel (D5), and keys are defined per topic (D6).** These are
   settled in T12, before any feature module exists. Retrofitting them later would mean touching
   every module.
-- **Slices are runnable end to end.** Every task leaves `./gradlew build` green and something you
+- **Slices are runnable end to end.** Every task leaves `./mvnw verify` green and something you
   can start or curl.
-- **Infra (T3) is independent of the Gradle work (T1–T2)** and can be done in parallel.
+- **Infra (T3) is independent of the Maven build work (T1–T2)** and can be done in parallel.
 
 ## Dependency graph
 
 ```
-T1 Gradle root ─→ T2 conventions ─→ T4 kernel types+time ─→ T5 kernel events+topics ─┐
+T1 Maven root  ─→ T2 conventions ─→ T4 kernel types+time ─→ T5 kernel events+topics ─┐
 T3 Compose infra (parallel) ─────────────────────────────────────────────────────────┤
                                                                                      ▼
                          T6 core-app skeleton ─→ T7 outbox spike (O1–O3)   ◆ Checkpoint B (D1 gate)
@@ -64,13 +65,13 @@ T3 Compose infra (parallel) ─────────────────�
 ## Task list (details, acceptance criteria and verification in [`tasks/platform/`](platform/))
 
 ### Phase 1: Foundation
-- [x] T1 Gradle root, wrapper, version catalog (pinned Boot 4 line)
-- [x] T2 Build conventions: Spotless, JaCoCo, `integrationTest` source set
-- [ ] T3 Compose core infra + schemas + per-service DB users *(parallel with T1–T2)*
-- [ ] T4 `shared-kernel`: typed ids, `Money`, time (`TimeRange`), `ProblemCode`
-- [ ] T5 `shared-kernel`: `DomainEvent` envelope + `Topics` (name, key, partitions)
+- [x] T1 Maven parent pom, wrapper, pinned versions (Boot 4 line)
+- [x] T2 Build rules in the parent pom: Spotless, JaCoCo, surefire/failsafe (ITs)
+- [x] T3 Compose core infra + schemas + per-service DB users *(parallel with T1–T2)*
+- [x] T4 `shared-kernel`: typed ids, `Money`, time (`TimeRange`), `ProblemCode`
+- [x] T5 `shared-kernel`: `DomainEvent` envelope + `Topics` (name, key, partitions)
 
-**Checkpoint A:** `./gradlew build` green, Compose healthy, kernel ≥ 90% coverage, versions reviewed.
+**Checkpoint A:** `./mvnw verify` green, Compose healthy, kernel ≥ 90% coverage, versions reviewed.
 
 ### Phase 2: First app + outbox risk spike
 - [ ] T6 `core-app` skeleton: ping, Flyway, Modulith `verify()`, boundary-violation fixture (P3)
@@ -80,7 +81,7 @@ T3 Compose infra (parallel) ─────────────────�
 
 ### Phase 3: Services, errors, events, routing, containers
 - [ ] T8 `platform-starter`: RFC 7807 problem handler (E1)
-- [ ] T9 OpenAPI: springdoc, one group per module, `exportOpenApi` → `docs/api/` (A1, backend part)
+- [ ] T9 OpenAPI: springdoc, one group per module, `-Pexport-openapi` → `docs/api/` (A1, backend part)
 - [ ] T10 `registration-service` skeleton + schema-restricted DB user (D3)
 - [ ] T11 `notification-service` skeleton + idempotent consumer (O4)
 - [ ] T12 Topics: per-topic keys, unlimited retention, Kafka-only cross-module rule, replay (O5, O6)
@@ -88,7 +89,7 @@ T3 Compose infra (parallel) ─────────────────�
 - [ ] T14 Gateway per-IP rate limiting (R1)
 - [ ] T15 App container images + Compose `apps` profile (K1)
 
-**Checkpoint C:** 4 apps up both via `bootRun` and as containers, smoke green both ways, full build green.
+**Checkpoint C:** 4 apps up both via `spring-boot:run` and as containers, smoke green both ways, full build green.
 
 ### Phase 4: Observability
 - [ ] T16 OTel agent + Collector + Tempo, trace across Kafka (B1)
@@ -118,8 +119,8 @@ T3 Compose infra (parallel) ─────────────────�
 | Modulith Kafka externalization cannot set a per-topic key from something other than the event (D6) | Med | T12 tests every key from the Arch §6 table. If the externalizer cannot do it, the key is a field in the payload and is resolved by a routing SpEL expression. Fallback: our own `KafkaTemplate` relay on top of the registry. |
 | Unlimited retention fills the dev disk, or a replay re-sends notifications | Med | Dev Compose caps the broker log size. Replay resets the consumer's *derived* state only; side-effecting consumers (email/push) are marked non-replayable in `Topics` docs and `replay.sh` refuses them. |
 | Boot 4 ecosystem gaps: Spring Cloud Gateway artifact renames (`…-gateway-server-webflux`), Jackson 3 package move, OTel agent and springdoc support for Boot 4 | Med | T1 checks every version against official release notes and compatibility matrices before pinning. Each app's first task proves it starts. |
-| Path with a space (`C:\Smart Campus`) breaks Gradle, Node or Docker bind mounts on Windows | Med | T1/T3 run the full build and `compose up` from this path early. If something breaks, the fix is to move the repo to a path without spaces (ask first). |
-| Testcontainers + Docker Desktop on Windows is slow or flaky | Med | Shared static containers via `@ServiceConnection`. ITs in a separate `integrationTest` task so `./gradlew test` stays fast. |
+| Path with a space (`C:\Smart Campus`) breaks Maven, Node or Docker bind mounts on Windows | Med | T1/T3 run the full build and `compose up` from this path early. If something breaks, the fix is to move the repo to a path without spaces (ask first). |
+| Testcontainers + Docker Desktop on Windows is slow or flaky | Med | Shared static containers via `@ServiceConnection`. ITs are `*IT` classes run by failsafe, so `./mvnw test` stays fast. |
 | Compose stack (infra + 4 apps + observability) exceeds Docker Desktop memory | Med | `apps` and `observability` are opt-in profiles. JVM heap capped per container, OpenSearch heap 512m. T15/T18 record the memory needed in the README. |
 | CI cannot be verified until the GitHub repo exists | Low | `ci.yml` is linted locally (actionlint via Docker). C1 is closed only after the first push. |
 

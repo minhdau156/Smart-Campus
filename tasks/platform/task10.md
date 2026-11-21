@@ -15,7 +15,7 @@
 - [ ] **10.5** Write `SchemaIsolationIT`: Testcontainers Postgres runs the **same** init SQL as
   Compose (`infra/postgres/init/`). Connected as `registration_svc`, `SELECT` on `notification.*`
   and `course.*` must fail with a permission error.
-- [ ] **10.6** Add the app to `exportOpenApi`, then start it against Compose and curl ping and health.
+- [ ] **10.6** Add the app to the `export-openapi` Maven profile, then start it against Compose and curl ping and health.
 
 **Done when**
 - [ ] Health is `UP` and ping returns 200 on :8082
@@ -23,14 +23,14 @@
 - [ ] `docs/api/` contains this app's OpenAPI JSON
 
 **Verify**
-- [ ] `./gradlew :backend:registration-service:build` passes
+- [ ] `./mvnw -pl backend/registration-service -am verify` passes
 
-**Files:** `backend/registration-service/build.gradle.kts`, `RegistrationApplication.java`, `PingController.java`, `application.yml`, `SchemaIsolationIT.java`
+**Files:** `backend/registration-service/pom.xml`, `RegistrationApplication.java`, `PingController.java`, `application.yml`, `SchemaIsolationIT.java`
 
 ---
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

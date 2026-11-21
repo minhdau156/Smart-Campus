@@ -32,7 +32,7 @@ Kafka; read models can be rebuilt.
 - [ ] Replay rebuilds the same 10 rows, and the D5 fixture fails the build (O6)
 
 **Verify**
-- [ ] `./gradlew build` passes
+- [ ] `./mvnw verify` passes
 - [ ] Step 12.7 was observed
 
 **Files:** `core-app/…/platform/TopicConfig.java`, `registration-service/…/TopicConfig.java`, `core-app/…/KafkaOnlyCrossModuleRuleTest.java`, `TopicsIT.java`, `infra/replay.sh`
@@ -41,6 +41,6 @@ Kafka; read models can be rebuilt.
 
 ## Definition of Done (applies to every task)
 
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that this task closes are ticked in [SPEC-platform.md](../../SPEC-platform.md).

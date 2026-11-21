@@ -18,18 +18,18 @@
   **one subtask** (the next unticked one), verifies it, ticks only that box, and stops.
 
 **Definition of Done (every task):**
-`./gradlew build` is green (plus the frontend checks, if touched). No new suppressions and no
+`./mvnw verify` is green (plus the frontend checks, if touched). No new suppressions and no
 disabled tests. If a decision changed, the spec was updated first. The spec's success-criterion
 ids that the task closes are ticked.
 
 ## Progress
 
 ### Phase 1: Foundation
-- [x] [T1](platform/task1.md): Gradle root, wrapper, version catalog (8 subtasks)
-- [x] [T2](platform/task2.md): Build conventions (6)
-- [ ] [T3](platform/task3.md): Compose core infra, schemas, DB users (8) · closes I1, I2 (infra) · *parallel with T1–T2*
-- [ ] [T4](platform/task4.md): `shared-kernel`: ids, money, time, problem codes (6)
-- [ ] [T5](platform/task5.md): `shared-kernel`: event envelope and topics (5)
+- [x] [T1](platform/task1.md): Maven parent pom, wrapper, pinned versions (7 subtasks)
+- [x] [T2](platform/task2.md): Build rules in the parent pom (7)
+- [x] [T3](platform/task3.md): Compose core infra, schemas, DB users (8) · closes I1, I2 (infra) · *parallel with T1–T2*
+- [x] [T4](platform/task4.md): `shared-kernel`: ids, money, time, problem codes (6)
+- [x] [T5](platform/task5.md): `shared-kernel`: event envelope and topics (5)
 - [ ] ◆ **Checkpoint A: Foundation** (in [task5.md](platform/task5.md)) 🙋
 
 ### Phase 2: First app + outbox risk spike
