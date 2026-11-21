@@ -28,7 +28,7 @@ ids that the task closes are ticked.
 - [x] [T1](platform/task1.md): Maven parent pom, wrapper, pinned versions (7 subtasks)
 - [x] [T2](platform/task2.md): Build rules in the parent pom (7)
 - [x] [T3](platform/task3.md): Compose core infra, schemas, DB users (8) · closes I1, I2 (infra) · *parallel with T1–T2*
-- [ ] [T4](platform/task4.md): `shared-kernel`: ids, money, time, problem codes (6)
+- [x] [T4](platform/task4.md): `shared-kernel`: ids, money, time, problem codes (6)
 - [ ] [T5](platform/task5.md): `shared-kernel`: event envelope and topics (5)
 - [ ] ◆ **Checkpoint A: Foundation** (in [task5.md](platform/task5.md)) 🙋
 
