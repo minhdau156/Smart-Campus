@@ -20,6 +20,17 @@
     <packaging>jar</packaging>
     <name>Smart Campus :: Shared Kernel</name>
 
+    <dependencies>
+        <!-- Jackson 3 (T5.4), tests only: checks that DomainEvent turns into the agreed JSON.
+             The main code has no Jackson annotations and does not need Jackson at runtime.
+             The version comes from the Spring Boot parent (Jackson BOM). -->
+        <dependency>
+            <groupId>tools.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
     <build>
         <plugins>
             <!-- Guard (T4.1): the build fails if any Spring library ends up on the classpath,

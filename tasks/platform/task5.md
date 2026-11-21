@@ -8,9 +8,9 @@
 **Goal:** one agreed event format and one agreed list of topics (with their keys) that every service uses.
 
 **Subtasks**
-- [ ] **5.1** Write the `DomainEvent<P>` record (`eventId, type, schemaVersion, occurredAt, aggregateId, payload`), with validation that rejects nulls and `schemaVersion < 1`. Add tests.
-- [ ] **5.2** Write the `EventTypes` registry: register a type name → payload class, resolve it, and fail on a duplicate. Add tests.
-- [ ] **5.3** Write `Topics`, with one entry per Arch §6 topic. Each entry has a name, a partition count, a key extractor and a `replayable` flag:
+- [x] **5.1** Write the `DomainEvent<P>` record (`eventId, type, schemaVersion, occurredAt, aggregateId, payload`), with validation that rejects nulls and `schemaVersion < 1`. Add tests.
+- [x] **5.2** Write the `EventTypes` registry: register a type name → payload class, resolve it, and fail on a duplicate. Add tests.
+- [x] **5.3** Write `Topics`, with one entry per Arch §6 topic. Each entry has a name, a partition count, a key extractor and a `replayable` flag:
 
   | Topic | Partitions | Key |
   |---|---|---|
@@ -20,16 +20,28 @@
   | `grade.events` | 3 | studentId |
   | `campus.events` | 3 | aggregateId |
 
-- [ ] **5.4** Add a golden file `domain-event.json` and a round-trip test using Jackson 3 (`tools.jackson`, test scope only). `occurredAt` must be ISO-8601 UTC.
-- [ ] **5.5** Add a table test asserting `Topics` matches the table in 5.3 exactly. Confirm coverage is still ≥ 90%.
+- [x] **5.4** Add a golden file `domain-event.json` and a round-trip test using Jackson 3 (`tools.jackson`, test scope only). `occurredAt` must be ISO-8601 UTC.
+- [x] **5.5** Add a table test asserting `Topics` matches the table in 5.3 exactly. Confirm coverage is still ≥ 90%.
 
 **Done when**
-- [ ] The JSON field names and format match the golden file (Arch §6 envelope + `schemaVersion`)
-- [ ] `Topics` contains exactly those 5 topics with those partitions and keys
-- [ ] Invalid envelopes are rejected at construction
+- [x] The JSON field names and format match the golden file (Arch §6 envelope + `schemaVersion`)
+- [x] `Topics` contains exactly those 5 topics with those partitions and keys
+- [x] Invalid envelopes are rejected at construction
 
 **Verify**
-- [ ] `./mvnw -pl backend/shared-kernel -am verify` passes
+- [x] `./mvnw -pl backend/shared-kernel -am verify` passes
+
+**Result (2026-11-21):** 81 unit tests (35 new), line coverage **97.6%** (122/125; the 3 missed
+lines are the reflection-error `catch` in `Topics`). Golden test and table test both seen failing
+(field renamed to `aggregate_id`; `grade.events` set to 4 partitions). Choices: `Topics` is an enum;
+the key is a **field name** (`keyField`): `"aggregateId"` = the envelope's `aggregateId`, anything
+else = that payload record field, read by `keyOf(event)` (a `TypedId` gives its UUID text; a missing
+field, a null value or a non-record payload throws, per D6). `registration.requests` is
+`replayable = false` (it carries commands; replaying would act twice); the 4 `*.events` topics are
+replayable. `DomainEvent` also rejects a blank `type` / `aggregateId`. `EventTypes` is an instance
+(no global state), duplicate → `IllegalStateException`, unknown → `IllegalArgumentException`.
+Jackson 3.1.8 (`tools.jackson.core:jackson-databind`, version from the Boot BOM) is test scope
+only; Jackson 3 writes `Instant` as ISO-8601 text by default, so no config was needed.
 
 **Files:** `kernel/event/DomainEvent.java`, `kernel/event/EventTypes.java`, `kernel/event/Topics.java`, `DomainEventJsonTest.java`, `src/test/resources/golden/domain-event.json`, `TopicsTest.java`
 

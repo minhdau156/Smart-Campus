@@ -69,7 +69,7 @@ T3 Compose infra (parallel) ─────────────────�
 - [x] T2 Build rules in the parent pom: Spotless, JaCoCo, surefire/failsafe (ITs)
 - [x] T3 Compose core infra + schemas + per-service DB users *(parallel with T1–T2)*
 - [x] T4 `shared-kernel`: typed ids, `Money`, time (`TimeRange`), `ProblemCode`
-- [ ] T5 `shared-kernel`: `DomainEvent` envelope + `Topics` (name, key, partitions)
+- [x] T5 `shared-kernel`: `DomainEvent` envelope + `Topics` (name, key, partitions)
 
 **Checkpoint A:** `./mvnw verify` green, Compose healthy, kernel ≥ 90% coverage, versions reviewed.
 
