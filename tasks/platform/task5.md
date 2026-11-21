@@ -48,9 +48,9 @@ only; Jackson 3 writes `Instant` as ISO-8601 text by default, so no config was n
 ---
 
 ## ◆ Checkpoint A: Foundation
-- [ ] `./mvnw verify` is green on Windows from `C:\Smart Campus`
-- [ ] Compose infra is healthy, and the DB permission check passes
-- [ ] 🙋 **Human review** of the pinned versions (T1.1) before any app code is written
+- [x] `./mvnw verify` is green on Windows from `C:\Smart Campus`
+- [x] Compose infra is healthy, and the DB permission check passes
+- [x] 🙋 **Human review** of the pinned versions (T1.1) before any app code is written (approved by minhdau156, 2026-11-21)
 
 ---
 
