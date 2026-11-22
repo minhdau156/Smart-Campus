@@ -75,9 +75,10 @@ T3 Compose infra (parallel) ─────────────────�
 
 ### Phase 2: First app + outbox risk spike
 - [x] T6 `core-app` skeleton: ping, Flyway, Modulith `verify()`, boundary-violation fixture (P3)
-- [ ] T7 Outbox spike in `core-app`: O1, O2, O3 as integration tests
+- [x] T7 Outbox spike in `core-app`: O1, O2, O3 as integration tests
 
 **Checkpoint B (decision gate):** D1 confirmed or replaced. Human review before Phase 3.
+*Passed 2026-11-22: D1 kept; O3 revised to at-least-once with one `eventId` (see spec D1 spike notes).*
 
 ### Phase 3: Services, errors, events, routing, containers
 - [ ] T8 `platform-starter`: RFC 7807 problem handler (E1)

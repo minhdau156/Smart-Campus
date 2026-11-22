@@ -18,6 +18,32 @@ spring:
     # Modules = packages directly below edu.campus, except the shared-kernel library
     # (edu.campus.kernel). See CoreModuleDetection.
     detection-strategy: edu.campus.CoreModuleDetection
+    events:
+      # Outbox (spec D1). The registry table is platform.event_publication, created by Flyway
+      # (V202611220100__event_publication.sql).
+      jdbc:
+        schema: platform
+        # Must be written out: Modulith 2.1.3 turns its own schema creation ON when this is missing
+        # (its docs say the default is false). It would run CREATE SCHEMA, which core_app may not do.
+        schema-initialization:
+          enabled: false
+      # At startup, send again every event that was saved but not yet delivered (e.g. the app
+      # was killed before Kafka answered).
+      republish-outstanding-events-on-restart: true
+      # An event that stays "in flight" too long (the app died while sending) is marked FAILED,
+      # so OutboxRetryJob sends it again.
+      staleness:
+        published: 5m
+        processing: 5m
+        check-interval: 1m
+  kafka:
+    producer:
+      # Modulith turns the event into JSON bytes itself (spring.modulith.events.kafka.enable-json,
+      # on by default), so the producer only has to pass the bytes on. The key is a String.
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      # The broker answers only after the record is safely stored. Only then is the event complete.
+      acks: all
 
 server:
   port: 8081
@@ -25,6 +51,9 @@ server:
 # Copied from pom.xml by Maven when it builds (resource filtering); shown by /ping.
 campus:
   version: "@project.version@"
+  outbox:
+    # How often OutboxRetryJob sends FAILED events again (the "relay interval" of spec O2).
+    retry-interval: 30s
 
 management:
   endpoints:
@@ -44,6 +73,12 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
     password: ${CORE_APP_DB_PASSWORD}
+  flyway:
+    # Also create the dev-only outbox_probe table (T7 spike).
+    locations: classpath:db/migration/platform, classpath:db/migration/platform-probe
+  kafka:
+    # The Kafka broker from infra/docker-compose.yml.
+    bootstrap-servers: localhost:9092
 
 management:
   endpoint:
@@ -57,6 +92,23 @@ spring:
   config:
     activate:
       on-profile: test
+  flyway:
+    # Also create the dev-only outbox_probe table (T7 spike).
+    locations: classpath:db/migration/platform, classpath:db/migration/platform-probe
+  kafka:
+    producer:
+      properties:
+        # Short timeouts so the outbox tests (OutboxIT) run fast. Production keeps Kafka's defaults
+        # (max.block 60 s, request 30 s, delivery 120 s): an outage shorter than delivery.timeout.ms
+        # gives no duplicate, a longer one may give a second copy with the same eventId (spec O3).
+        max.block.ms: 2000
+        request.timeout.ms: 1000
+        delivery.timeout.ms: 8000
+
+campus:
+  outbox:
+    # Retry often in tests; O2 waits 2x this, O3 waits for a retry round after Kafka is back.
+    retry-interval: 2s
 
 management:
   endpoint:

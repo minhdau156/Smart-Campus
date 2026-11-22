@@ -71,6 +71,24 @@
             <artifactId>spring-modulith-core</artifactId>
         </dependency>
 
+        <!-- ===== Outbox (spec D1) ===== -->
+        <!-- Event Publication Registry stored in PostgreSQL: every published event is saved in the
+             table platform.event_publication, in the same transaction as the business data. -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-starter-jdbc</artifactId>
+        </dependency>
+        <!-- Sends the saved events to Kafka after the commit ("externalization"). -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-events-kafka</artifactId>
+        </dependency>
+        <!-- Kafka client + KafkaTemplate + auto-configuration (spring.kafka.* settings). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
         <!-- ===== Tests only ===== -->
         <!-- JUnit, AssertJ, Mockito, Spring test support. -->
         <dependency>
@@ -105,6 +123,18 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- A real Kafka broker in Docker for the outbox tests (OutboxIT). -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Waits until something becomes true ("await until 1 record arrived"). -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

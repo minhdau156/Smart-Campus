@@ -229,6 +229,46 @@ because each app has one datasource.
 **D1 must be verified in task 7.** If any outbox success criterion (O1–O4) cannot be met with the
 Modulith registry, fall back to the hand-written outbox and update D1 before going further.
 
+**D1 spike notes (T7, 2026-11-22). Result: D1 kept, with at-least-once delivery.**
+- *Setup:* Spring Modulith 2.1.3 (`spring-modulith-starter-jdbc` + `spring-modulith-events-kafka`),
+  Spring Kafka 4.1.3, kafka-clients 4.2.2; broker `apache/kafka:4.4.0`, DB `postgres:19.0-alpine3.24`
+  (Testcontainers). Externalization mode `module-listener` (default): after commit, an async
+  listener calls `KafkaTemplate.send(...)` and the publication is marked complete only when that
+  future succeeds.
+- *Settings:* `spring.modulith.events.jdbc.schema=platform` (table made by Flyway
+  `V202611220100__event_publication.sql`, copied from the jar's `schemas/v2/schema-postgresql.sql`);
+  `republish-outstanding-events-on-restart=true`; staleness `published`/`processing` 5m (stuck
+  in-flight rows become FAILED); `OutboxRetryJob` calls `FailedEventPublications.resubmit(...)`
+  every `campus.outbox.retry-interval` (30s; tests 2s). It picks only FAILED rows and marks each
+  RESUBMITTED first, so it never re-sends a row still in flight. Producer: `acks=all`, idempotence
+  on (Kafka default), String key, `ByteArraySerializer` value (Modulith writes the JSON itself,
+  `spring.modulith.events.kafka.enable-json=true`). Production keeps Kafka's timeouts
+  (`delivery.timeout.ms` 120 s); the test profile uses 1 s request / 8 s delivery / 2 s max.block.
+- *How the key is set (T12 depends on this):* an `EventExternalizationConfiguration` bean
+  (`externalizing().select(predicate).route(DomainEvent.class, fn)`) returns
+  `RoutingTarget.forTarget(topic).andKey(key)`, with the key already computed as a String. Modulith
+  puts it in the `kafka_messageKey` header and `KafkaTemplate` sends it as the record key. No SpEL
+  and no annotation on the event. **Caveat:** an event that is resent is read back from the registry
+  JSON as `DomainEvent` with an untyped payload (a `Map`), so the key must come from envelope fields
+  (as the probe does with `aggregateId`), or T12 must register a `DomainEvent` deserializer that
+  uses `EventTypes` to restore the payload class before `Topics.keyOf` reads a payload field.
+- *Observed:* O1 one record, full envelope, key = probe id, then COMPLETED. O2 rollback: no row in
+  `outbox_probe` or `event_publication`, no record after 2× the interval. O3 broker paused
+  (`docker pause`): the commit succeeds, the publication stays incomplete (PROCESSING, then FAILED
+  after the producer timeout), it is COMPLETED only after unpause + acknowledgement. **Duplicate
+  found:** when the outage is longer than `delivery.timeout.ms`, the frozen broker still writes
+  the request that was waiting in its network buffer, and the resubmission writes it again: 2
+  records with the same `eventId` (seen 2 of 2 runs). With an outage shorter than the delivery
+  timeout, the idempotent producer resends the same batch and the broker drops the repeat: exactly
+  1 record. A hand-written outbox has the same limit, so the fix is D2 (consumer dedupe by
+  `eventId`), not a different outbox.
+- *Trap found:* `spring.modulith.events.jdbc.schema-initialization.enabled` must be set to `false`
+  explicitly. In 2.1.3 the condition is `matchIfMissing = true` (the docs say default false), so
+  without it Modulith runs `CREATE SCHEMA IF NOT EXISTS platform` at startup, which fails as
+  `core_app` against Compose. Tests did not show it (Testcontainers DB user is a superuser);
+  `CoreApplicationIT.modulithDoesNotCreateTablesItself` now guards it. Each extracted service must
+  set it too.
+
 ## Testing Strategy
 
 | Level | Tool | Lives in | Covers | Runs |
@@ -263,12 +303,16 @@ quarantined with an issue link. They are never silently deleted.
   `/ping` routes in Commands answer through the gateway on :8080.
 
 **Eventing (outbox)**
-- [ ] O1. A test event saved in the same transaction as a business row appears on Kafka with the
+- [x] O1. A test event saved in the same transaction as a business row appears on Kafka with the
   full envelope (D4) and the key defined for its topic (D6).
-- [ ] O2. If that transaction rolls back, nothing is published, after waiting at least 2× the relay
+- [x] O2. If that transaction rolls back, nothing is published, after waiting at least 2× the relay
   interval.
-- [ ] O3. If the app is killed after commit but before Kafka acknowledges, the event is published
-  after restart.
+- [x] O3. If Kafka does not acknowledge after commit (broker down, or the app killed), the event
+  stays incomplete in the registry and is published **at least once** later; it is marked complete
+  only after Kafka acknowledges. Every copy carries the same `eventId`, so consumers drop repeats
+  (D2, O4). An outage shorter than the producer's `delivery.timeout.ms` gives exactly one copy.
+  *(Revised 2026-11-22 after the T7 spike: "exactly once" is not possible for any outbox that
+  resends after a timeout; decided by minhdau156 at Checkpoint B.)*
 - [ ] O4. Delivering the same event twice to a consumer causes the side effect exactly once (D2).
 - [ ] O5. The topics from Arch §6 (`registration.requests` 12 partitions, `registration.events` 6,
   `course.events` 3, `grade.events` 3, `campus.events` 3) are declared in code by their producing

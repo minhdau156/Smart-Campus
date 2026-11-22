@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -36,6 +37,9 @@ class CoreApplicationIT {
 
     @Autowired
     private JsonMapper json;
+
+    @Autowired
+    private ApplicationContext context;
 
     private final HttpClient http = HttpClient.newHttpClient();
 
@@ -71,8 +75,26 @@ class CoreApplicationIT {
     @Test
     void flywayHistoryIsInThePlatformSchemaWithTheBaselineRow() {
         Map<String, Object> row = jdbc.queryForMap(
-                "SELECT description, success FROM platform.flyway_schema_history WHERE version IS NOT NULL");
+                "SELECT description, success FROM platform.flyway_schema_history WHERE version = '202611220000'");
 
         assertThat(row).containsEntry("description", "baseline").containsEntry("success", true);
+    }
+
+    /**
+     * Flyway owns every table. Modulith's own schema creation must be off: it would run
+     * {@code CREATE SCHEMA}, which the core_app DB user may not do (seen in T7 against Compose; here
+     * the test DB user is a superuser, so only the bean's absence can catch it).
+     */
+    @Test
+    void modulithDoesNotCreateTablesItself() {
+        assertThat(context.containsBean("databaseSchemaInitializer")).isFalse();
+    }
+
+    @Test
+    void everyMigrationSucceeded() {
+        Integer failed = jdbc.queryForObject(
+                "SELECT count(*) FROM platform.flyway_schema_history WHERE NOT success", Integer.class);
+
+        assertThat(failed).isZero();
     }
 }

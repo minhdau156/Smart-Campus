@@ -34,8 +34,8 @@ ids that the task closes are ticked.
 
 ### Phase 2: First app + outbox risk spike
 - [x] [T6](platform/task6.md): `core-app` skeleton (8) · closes P3
-- [ ] [T7](platform/task7.md) ⚠: Outbox spike (8) · closes O1, O2, O3
-- [ ] ◆ **Checkpoint B: D1 decision gate** (in [task7.md](platform/task7.md)) 🙋
+- [x] [T7](platform/task7.md) ⚠: Outbox spike (8) · closes O1, O2, O3
+- [x] ◆ **Checkpoint B: D1 decision gate** (in [task7.md](platform/task7.md)) 🙋
 
 ### Phase 3: Services, errors, events, routing, containers
 - [ ] [T8](platform/task8.md): Problem JSON handler (7) · closes E1
