@@ -249,7 +249,7 @@ quarantined with an issue link. They are never silently deleted.
 - [ ] P1. A fresh clone with JDK 21, Node 24, and Docker can run `./mvnw verify` with no other
   setup. The build passes, including the ITs (failsafe) and `spotless:check`.
 - [ ] P2. `npm --prefix frontend/web ci && npm --prefix frontend/web run lint test build` passes.
-- [ ] P3. Adding a class in `core-app` that imports another module's `internal` package makes
+- [x] P3. Adding a class in `core-app` that imports another module's `internal` package makes
   `./mvnw test` fail with a Modulith violation. Proven by a test fixture that is kept in the repo.
 
 **Infrastructure**

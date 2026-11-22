@@ -33,7 +33,7 @@ ids that the task closes are ticked.
 - [ ] ◆ **Checkpoint A: Foundation** (in [task5.md](platform/task5.md)) 🙋
 
 ### Phase 2: First app + outbox risk spike
-- [ ] [T6](platform/task6.md): `core-app` skeleton (8) · closes P3
+- [x] [T6](platform/task6.md): `core-app` skeleton (8) · closes P3
 - [ ] [T7](platform/task7.md) ⚠: Outbox spike (8) · closes O1, O2, O3
 - [ ] ◆ **Checkpoint B: D1 decision gate** (in [task7.md](platform/task7.md)) 🙋
 

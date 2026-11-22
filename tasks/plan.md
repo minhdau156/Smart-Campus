@@ -74,7 +74,7 @@ T3 Compose infra (parallel) ─────────────────�
 **Checkpoint A:** `./mvnw verify` green, Compose healthy, kernel ≥ 90% coverage, versions reviewed.
 
 ### Phase 2: First app + outbox risk spike
-- [ ] T6 `core-app` skeleton: ping, Flyway, Modulith `verify()`, boundary-violation fixture (P3)
+- [x] T6 `core-app` skeleton: ping, Flyway, Modulith `verify()`, boundary-violation fixture (P3)
 - [ ] T7 Outbox spike in `core-app`: O1, O2, O3 as integration tests
 
 **Checkpoint B (decision gate):** D1 confirmed or replaced. Human review before Phase 3.

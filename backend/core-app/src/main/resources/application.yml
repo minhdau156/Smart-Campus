@@ -1,0 +1,64 @@
+# core-app settings. The first block is used always; a block with
+# `spring.config.activate.on-profile` is used only when that profile is on.
+
+spring:
+  application:
+    name: core-app
+  datasource:
+    # core_app is the DB user for core-app (created by infra/postgres/init). It owns the
+    # schemas of all core-app modules, but not registration or notification (spec D3).
+    username: core_app
+  flyway:
+    # Each module has its own schema and its own history table (spec "Flyway per schema").
+    # The platform module's migrations live in db/migration/platform/.
+    schemas: platform
+    default-schema: platform
+    locations: classpath:db/migration/platform
+  modulith:
+    # Modules = packages directly below edu.campus, except the shared-kernel library
+    # (edu.campus.kernel). See CoreModuleDetection.
+    detection-strategy: edu.campus.CoreModuleDetection
+
+server:
+  port: 8081
+
+# Copied from pom.xml by Maven when it builds (resource filtering); shown by /ping.
+campus:
+  version: "@project.version@"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+# dev: the app on your machine, using the Docker Compose infra (`spring-boot:run` turns this on).
+spring:
+  config:
+    activate:
+      on-profile: dev
+    # Reads the passwords from infra/.env (gitignored), so no password is written here.
+    # The path is relative to backend/core-app, where `spring-boot:run` starts the app.
+    import: optional:file:../../infra/.env[.properties]
+  datasource:
+    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
+    password: ${CORE_APP_DB_PASSWORD}
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+---
+# test: integration tests (*IT). Testcontainers gives the datasource URL, user and password
+# through @ServiceConnection, so none are set here.
+spring:
+  config:
+    activate:
+      on-profile: test
+
+management:
+  endpoint:
+    health:
+      show-details: always
