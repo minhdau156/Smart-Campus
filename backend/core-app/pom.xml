@@ -27,6 +27,13 @@
             <artifactId>shared-kernel</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- Shared Spring setup for all apps: problem JSON + traceId, outbox defaults and retry job,
+             the Modulith module-detection rule. Switches itself on (auto-configuration). -->
+        <dependency>
+            <groupId>edu.campus</groupId>
+            <artifactId>platform-starter</artifactId>
+            <version>${project.version}</version>
+        </dependency>
 
         <!-- REST endpoints (Spring MVC + embedded Tomcat). Boot 4 name for the old "starter-web". -->
         <dependency>
@@ -63,12 +70,6 @@
         <dependency>
             <groupId>org.springframework.modulith</groupId>
             <artifactId>spring-modulith-starter-core</artifactId>
-        </dependency>
-        <!-- Modulith's module model, needed at compile time by CoreModuleDetection
-             (the starter only puts it on the runtime classpath). -->
-        <dependency>
-            <groupId>org.springframework.modulith</groupId>
-            <artifactId>spring-modulith-core</artifactId>
         </dependency>
 
         <!-- ===== Outbox (spec D1) ===== -->

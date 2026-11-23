@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Gets versions and build rules from the root pom.xml. -->
+    <parent>
+        <groupId>edu.campus</groupId>
+        <artifactId>smart-campus</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <!--
+        platform-starter: Spring settings and beans shared by every backend app. An app only adds
+        this jar as a dependency; Spring Boot then switches the parts on by itself
+        ("auto-configuration", listed in META-INF/spring/...AutoConfiguration.imports):
+          - problem JSON for every error (+ a traceId per request),
+          - outbox defaults (Modulith registry, Kafka producer, retry job),
+          - the Modulith module-detection rule.
+
+        "optional" dependencies below: the starter compiles against them, but does NOT force them
+        on an app. Each part switches on only when the app has those libraries itself
+        (@ConditionalOnClass). For example the gateway (T13, not Spring MVC) gets no MVC handler.
+    -->
+    <artifactId>platform-starter</artifactId>
+    <packaging>jar</packaging>
+    <name>Smart Campus :: Platform Starter</name>
+
+    <dependencies>
+        <!-- ProblemCode, CampusProblem, ... -->
+        <dependency>
+            <groupId>edu.campus</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- @AutoConfiguration, @ConditionalOnClass, ... -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+
+        <!-- Spring MVC: the problem handler and the traceId filter. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- Bean validation (@Valid, @NotBlank): only to test the 400 VALIDATION_FAILED case. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- FailedEventPublications, used by the outbox retry job. -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-events-api</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- ApplicationModuleDetectionStrategy, used by CampusModuleDetection. -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-core</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- ===== Tests only ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

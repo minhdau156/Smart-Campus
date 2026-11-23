@@ -43,4 +43,15 @@ class PingControllerTest {
                 .isNotBlank()
                 .doesNotContain("@");
     }
+
+    /** platform-starter's error handling also works in a @WebMvcTest slice. */
+    @Test
+    void wrongMethodGivesProblemJson() {
+        var result = mvc.post().uri("/api/v1/platform/ping").exchange();
+
+        assertThat(result).hasStatus(405);
+        assertThat(result).hasContentType("application/problem+json");
+        assertThat(result).bodyJson().extractingPath("$.code").isEqualTo("METHOD_NOT_ALLOWED");
+        assertThat(result).bodyJson().extractingPath("$.traceId").asString().matches("[0-9a-f]{32}");
+    }
 }

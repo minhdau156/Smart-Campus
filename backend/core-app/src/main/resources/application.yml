@@ -14,36 +14,8 @@ spring:
     schemas: platform
     default-schema: platform
     locations: classpath:db/migration/platform
-  modulith:
-    # Modules = packages directly below edu.campus, except the shared-kernel library
-    # (edu.campus.kernel). See CoreModuleDetection.
-    detection-strategy: edu.campus.CoreModuleDetection
-    events:
-      # Outbox (spec D1). The registry table is platform.event_publication, created by Flyway
-      # (V202611220100__event_publication.sql).
-      jdbc:
-        schema: platform
-        # Must be written out: Modulith 2.1.3 turns its own schema creation ON when this is missing
-        # (its docs say the default is false). It would run CREATE SCHEMA, which core_app may not do.
-        schema-initialization:
-          enabled: false
-      # At startup, send again every event that was saved but not yet delivered (e.g. the app
-      # was killed before Kafka answered).
-      republish-outstanding-events-on-restart: true
-      # An event that stays "in flight" too long (the app died while sending) is marked FAILED,
-      # so OutboxRetryJob sends it again.
-      staleness:
-        published: 5m
-        processing: 5m
-        check-interval: 1m
-  kafka:
-    producer:
-      # Modulith turns the event into JSON bytes itself (spring.modulith.events.kafka.enable-json,
-      # on by default), so the producer only has to pass the bytes on. The key is a String.
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
-      # The broker answers only after the record is safely stored. Only then is the event complete.
-      acks: all
+  # Outbox, Kafka producer and Modulith settings come from platform-starter
+  # (campus-platform-defaults.yml): the outbox table lives in the Flyway default schema above.
 
 server:
   port: 8081
@@ -51,9 +23,6 @@ server:
 # Copied from pom.xml by Maven when it builds (resource filtering); shown by /ping.
 campus:
   version: "@project.version@"
-  outbox:
-    # How often OutboxRetryJob sends FAILED events again (the "relay interval" of spec O2).
-    retry-interval: 30s
 
 management:
   endpoints:

@@ -268,6 +268,11 @@ Modulith registry, fall back to the hand-written outbox and update D1 before goi
   `core_app` against Compose. Tests did not show it (Testcontainers DB user is a superuser);
   `CoreApplicationIT.modulithDoesNotCreateTablesItself` now guards it. Each extracted service must
   set it too.
+- *Moved in T8:* all of the settings above (except the test profile's short timeouts) and
+  `OutboxRetryJob` now live in `platform-starter` (`campus-platform-defaults.yml`, lowest
+  priority; `jdbc.schema` = the app's `spring.flyway.default-schema`), so every app gets the same
+  outbox setup by depending on the starter. The module-detection rule moved there too
+  (`CampusModuleDetection`, via `META-INF/spring.factories`).
 
 ## Testing Strategy
 
@@ -337,7 +342,7 @@ quarantined with an issue link. They are never silently deleted.
   brings all 4 apps up healthy, and `infra/smoke.sh` passes against them. Images run as non-root.
 
 **Errors and API**
-- [ ] E1. An unhandled exception, a validation failure, a `CampusProblem`, and an unknown route
+- [x] E1. An unhandled exception, a validation failure, a `CampusProblem`, and an unknown route
   each return `application/problem+json` with `type, title, status, detail, code, traceId`. Stack
   traces never appear in the response.
 

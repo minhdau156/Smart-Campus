@@ -27,11 +27,19 @@ class ModularityTest {
 
     /**
      * shared-kernel's classes are also in a package below edu.campus ({@code edu.campus.kernel}), but
-     * they are a plain library that every module may use, not a module (see CoreModuleDetection).
+     * they are a plain library that every module may use, not a module (see CampusModuleDetection
+     * in platform-starter).
      */
     @Test
     void sharedKernelIsALibraryNotAModule() {
         assertThat(modules.stream().map(ApplicationModule::getIdentifier).map(Object::toString))
                 .doesNotContain("kernel");
+    }
+
+    /** Same for platform-starter ({@code edu.campus.starter}): shared Spring setup, not a module. */
+    @Test
+    void platformStarterIsALibraryNotAModule() {
+        assertThat(modules.stream().map(ApplicationModule::getIdentifier).map(Object::toString))
+                .doesNotContain("starter");
     }
 }

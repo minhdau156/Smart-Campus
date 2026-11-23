@@ -1,0 +1,37 @@
+# Settings that every Smart Campus app gets from platform-starter (T8.6).
+# Loaded by PlatformDefaultsEnvironmentPostProcessor with the LOWEST priority, so an app can still
+# change any of them in its own application.yml (e.g. the test profile's short timeouts).
+
+spring:
+  modulith:
+    events:
+      # Outbox (spec D1). The registry table event_publication is created by each app's Flyway
+      # migration, in the app's own schema (core-app: platform, registration-service: registration).
+      jdbc:
+        schema: ${spring.flyway.default-schema:public}
+        # Must be written out: Modulith 2.1.3 turns its own schema creation ON when this is
+        # missing (its docs say the default is false). It would run CREATE SCHEMA, which the app's
+        # DB user may not do (found in T7).
+        schema-initialization:
+          enabled: false
+      # At startup, send again every event that was saved but not yet delivered.
+      republish-outstanding-events-on-restart: true
+      # An event "in flight" for too long (the app died while sending) is marked FAILED, so
+      # OutboxRetryJob sends it again.
+      staleness:
+        published: 5m
+        processing: 5m
+        check-interval: 1m
+  kafka:
+    producer:
+      # Modulith writes the event as JSON bytes itself (spring.modulith.events.kafka.enable-json,
+      # on by default); the producer passes the bytes on. The key is a String (spec D6).
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      # The broker answers only after the record is safely stored. Only then is the event complete.
+      acks: all
+
+campus:
+  outbox:
+    # How often OutboxRetryJob sends FAILED events again (the "relay interval" of spec O2).
+    retry-interval: 30s

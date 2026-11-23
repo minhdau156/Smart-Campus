@@ -1,0 +1,10 @@
+# Hooks that Spring Boot and Spring Modulith look up by name (not auto-configurations; those are in
+# META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports).
+
+# Adds campus-platform-defaults.yml to every app's settings (lowest priority).
+org.springframework.boot.EnvironmentPostProcessor=\
+edu.campus.starter.config.PlatformDefaultsEnvironmentPostProcessor
+
+# Module detection: direct sub-packages of edu.campus, minus our shared libraries.
+org.springframework.modulith.core.ApplicationModuleDetectionStrategy=\
+edu.campus.starter.modulith.CampusModuleDetection

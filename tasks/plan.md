@@ -81,7 +81,7 @@ T3 Compose infra (parallel) ─────────────────�
 *Passed 2026-11-22: D1 kept; O3 revised to at-least-once with one `eventId` (see spec D1 spike notes).*
 
 ### Phase 3: Services, errors, events, routing, containers
-- [ ] T8 `platform-starter`: RFC 7807 problem handler (E1)
+- [x] T8 `platform-starter`: RFC 7807 problem handler (E1)
 - [ ] T9 OpenAPI: springdoc, one group per module, `-Pexport-openapi` → `docs/api/` (A1, backend part)
 - [ ] T10 `registration-service` skeleton + schema-restricted DB user (D3)
 - [ ] T11 `notification-service` skeleton + idempotent consumer (O4)

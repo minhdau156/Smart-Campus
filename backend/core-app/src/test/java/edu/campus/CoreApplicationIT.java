@@ -90,6 +90,21 @@ class CoreApplicationIT {
         assertThat(context.containsBean("databaseSchemaInitializer")).isFalse();
     }
 
+    /** platform-starter is active in core-app: errors are problem JSON with a traceId (spec E1). */
+    @Test
+    void unknownRouteIsProblemJsonWithATraceId() throws Exception {
+        HttpResponse<String> response = get("/api/v1/no-such-endpoint");
+
+        assertThat(response.statusCode()).isEqualTo(404);
+        assertThat(response.headers().firstValue("Content-Type"))
+                .hasValueSatisfying(type -> assertThat(type).startsWith("application/problem+json"));
+        JsonNode body = json.readTree(response.body());
+        assertThat(body.get("code").asString()).isEqualTo("NOT_FOUND");
+        assertThat(body.get("traceId").asString())
+                .matches("[0-9a-f]{32}")
+                .isEqualTo(response.headers().firstValue("X-Trace-Id").orElseThrow());
+    }
+
     @Test
     void everyMigrationSucceeded() {
         Integer failed = jdbc.queryForObject(

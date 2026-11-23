@@ -29,6 +29,7 @@
 
     <modules>
         <module>backend/shared-kernel</module>
+        <module>backend/platform-starter</module>
         <module>backend/core-app</module>
     </modules>
 

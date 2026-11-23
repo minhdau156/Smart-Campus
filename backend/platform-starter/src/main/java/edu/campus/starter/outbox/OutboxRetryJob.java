@@ -1,9 +1,7 @@
-package edu.campus.platform.internal;
+package edu.campus.starter.outbox;
 
-import org.springframework.context.annotation.Configuration;
 import org.springframework.modulith.events.FailedEventPublications;
 import org.springframework.modulith.events.ResubmissionOptions;
-import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 
 /**
@@ -15,21 +13,21 @@ import org.springframework.scheduling.annotation.Scheduled;
  * copy of an event that is still waiting for Kafka's answer. Publications stuck in flight (the app
  * died mid-send) are turned into FAILED by Modulith's staleness check
  * ({@code spring.modulith.events.staleness.*}) and then picked up here too.
+ *
+ * <p>Moved from core-app in T8.6; created by {@link OutboxAutoConfiguration}.
  */
-@Configuration(proxyBeanMethods = false)
-@EnableScheduling
-class OutboxRetryJob {
+public class OutboxRetryJob {
 
     private final FailedEventPublications failed;
 
-    OutboxRetryJob(FailedEventPublications failed) {
+    public OutboxRetryJob(FailedEventPublications failed) {
         this.failed = failed;
     }
 
     @Scheduled(
             initialDelayString = "${campus.outbox.retry-interval}",
             fixedDelayString = "${campus.outbox.retry-interval}")
-    void resubmitFailed() {
+    public void resubmitFailed() {
         failed.resubmit(ResubmissionOptions.defaults());
     }
 }
