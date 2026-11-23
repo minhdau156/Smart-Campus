@@ -31,6 +31,11 @@ spring:
       # The broker answers only after the record is safely stored. Only then is the event complete.
       acks: all
 
+springdoc:
+  # Our endpoints answer JSON. Without this the docs say "*/*" (any type) for every answer,
+  # and the frontend's generated types get less precise.
+  default-produces-media-type: application/json
+
 campus:
   outbox:
     # How often OutboxRetryJob sends FAILED events again (the "relay interval" of spec O2).

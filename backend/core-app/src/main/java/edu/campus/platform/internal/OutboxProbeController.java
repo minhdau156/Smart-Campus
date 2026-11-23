@@ -1,5 +1,6 @@
 package edu.campus.platform.internal;
 
+import io.swagger.v3.oas.annotations.Hidden;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code curl -X POST "localhost:8081/api/v1/platform/outbox-probe?note=hi"} creates a probe; its
  * event then shows up on the Kafka topic {@code platform.probe}.
  */
+@Hidden // a dev tool, not part of the API: left out of the OpenAPI docs (T9)
 @RestController
 @Profile({"dev", "test"})
 class OutboxProbeController {

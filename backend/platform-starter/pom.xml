@@ -66,6 +66,14 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- springdoc (OpenAPI docs): the shared Problem schema and default error response.
+             Each app brings its own flavor (webmvc-ui or webflux-ui), which includes this. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-common</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- ===== Tests only ===== -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

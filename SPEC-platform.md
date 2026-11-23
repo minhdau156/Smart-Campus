@@ -330,7 +330,8 @@ quarantined with an issue link. They are never silently deleted.
 **API docs**
 - [ ] A1. Each app serves `/v3/api-docs`. `core-app` has one OpenAPI group per Modulith module.
   `./mvnw verify -Pexport-openapi` writes `docs/api/*.json`, and `npm run gen:api` turns it into TS types
-  that the web app compiles against.
+  that the web app compiles against. *(Backend part done in T9, 2026-11-23: core-app serves
+  `/v3/api-docs/<module>`; the export is deterministic and checked on every build. Frontend part open.)*
 
 **Gateway rate limiting**
 - [ ] R1. Exceeding the per-IP limit (default 20 req/s, burst 40, set in config) on any `/api/v1/**`

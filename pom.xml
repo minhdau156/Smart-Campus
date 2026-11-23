@@ -92,6 +92,12 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- springdoc core (no UI): used by platform-starter for the shared Problem schema. -->
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-common</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.springdoc</groupId>
                 <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
@@ -222,4 +228,37 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+            ./mvnw verify -Pexport-openapi
+            Writes the OpenAPI docs to docs/api/<app>-<group>.json (commit the diff). Runs ONLY the
+            export test (OpenApiExportIT): no unit tests, no other ITs, so it is quick.
+            Without this profile, OpenApiExportIT only checks that the committed files are up to date.
+        -->
+        <profile>
+            <id>export-openapi</id>
+            <properties>
+                <!-- Skip unit tests (see surefire above). -->
+                <skipUTs>true</skipUTs>
+                <!-- Run only this IT; modules without it (shared-kernel, ...) are fine. -->
+                <it.test>OpenApiExportIT</it.test>
+                <failsafe.failIfNoSpecifiedTests>false</failsafe.failIfNoSpecifiedTests>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <!-- Tells OpenApiExportIT to WRITE the files instead of comparing. -->
+                            <systemPropertyVariables>
+                                <openapi.export>true</openapi.export>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

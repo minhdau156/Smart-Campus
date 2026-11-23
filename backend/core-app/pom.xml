@@ -40,6 +40,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
+        <!-- API docs: /v3/api-docs (OpenAPI JSON) and /swagger-ui.html (version in the root pom). -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
         <!-- /actuator/health and metrics. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -70,6 +75,12 @@
         <dependency>
             <groupId>org.springframework.modulith</groupId>
             <artifactId>spring-modulith-starter-core</artifactId>
+        </dependency>
+        <!-- Modulith's module model (ApplicationModules), needed at compile time by
+             ModuleApiGroups (the starter above only puts it on the runtime classpath). -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-core</artifactId>
         </dependency>
 
         <!-- ===== Outbox (spec D1) ===== -->

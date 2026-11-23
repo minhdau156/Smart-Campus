@@ -39,7 +39,7 @@ ids that the task closes are ticked.
 
 ### Phase 3: Services, errors, events, routing, containers
 - [x] [T8](platform/task8.md): Problem JSON handler (7) · closes E1
-- [ ] [T9](platform/task9.md): OpenAPI docs, backend part (5) · closes A1 (backend)
+- [x] [T9](platform/task9.md): OpenAPI docs, backend part (5) · closes A1 (backend)
 - [ ] [T10](platform/task10.md): `registration-service` skeleton (6) · closes I2 (D3 part)
 - [ ] [T11](platform/task11.md): `notification-service` + idempotent consumer (6) · closes O4
 - [ ] [T12](platform/task12.md): Topics, keys, retention, Kafka-only rule, replay (7) · closes O5, O6
