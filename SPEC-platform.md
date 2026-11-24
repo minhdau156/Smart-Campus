@@ -216,7 +216,7 @@ Rules:
 | # | Decision | Rationale | Rejected alternative |
 |---|---|---|---|
 | D1 | **Outbox = Spring Modulith Event Publication Registry (JDBC) + Kafka externalization.** Events are written to `event_publication` in the business transaction. They are published to Kafka after commit. Incomplete publications are retried on startup and on a schedule. | Satisfies ADR-5 (no lost or phantom events) without writing our own relay. Works the same in all three backend apps. | Hand-written `outbox_events` table + `@Scheduled` relay (more code, same guarantees). Debezium (more infra). |
-| D2 | **Consumers deduplicate by `eventId`.** Each consuming module has a `<schema>.processed_events(event_id PK, processed_at)` row, inserted in the same transaction as the side effect. A duplicate key means skip. | Kafka delivers at least once. This makes delivery effectively once per consumer. | Kafka exactly-once transactions (do not cover DB side effects). |
+| D2 | **Consumers deduplicate by `eventId`.** Each consuming module has a `<schema>.processed_events(consumer, event_id, processed_at, PK(consumer, event_id))` table. platform-starter's `IdempotentConsumer` inserts the row in the same transaction as the side effect (`ON CONFLICT DO NOTHING`); 0 rows inserted means a repeat, so skip. The `consumer` part lets two listeners in one schema each handle an event once (T11, 2026-11-24). | Kafka delivers at least once. This makes delivery effectively once per consumer. | Kafka exactly-once transactions (do not cover DB side effects). |
 | D3 | **Schema isolation is enforced twice.** (a) Modulith `verify()` + an ArchUnit rule ban cross-module JPA/JDBC access in `core-app`. (b) `registration-service` and `notification-service` connect as DB users with privileges only on their own schema. | A schema violation fails the build in core-app and fails at runtime in the extracted services. | Separate DB users per core-app module (one datasource makes this impractical). |
 | D4 | **Event envelope adds `schemaVersion`** to the Arch §6 envelope. The W3C `traceparent` travels in Kafka headers, not in the payload. | Allows payloads to evolve. Tracing stays out of the business data. | Version encoded in the type name (`EnrollmentConfirmedV2`). |
 | D5 | **Cross-module events are consumed only from Kafka**, even between modules inside `core-app`. In-process listeners (`@ApplicationModuleListener`, `@EventListener`, `@TransactionalEventListener`) may only handle the module's *own* events, and an ArchUnit rule enforces this. Event topics use `retention.ms=-1`. **Replay** = delete the consumer's derived tables and its `processed_events`, reset the consumer group to the earliest offset, restart. Only read-model consumers can be replayed. Consumers with external side effects (email, push) are registered as non-replayable, and `replay.sh` refuses them. | Arch §3 (all cross-module changes via Kafka) and Arch §4 (read models can be dropped and replayed). In-process delivery cannot be replayed. | In-process Modulith listeners inside `core-app` (faster, but no replay and two delivery paths). Compacted topics (lose history per key). |
@@ -301,12 +301,13 @@ quarantined with an issue link. They are never silently deleted.
 **Infrastructure**
 - [x] I1. `docker compose -f infra/docker-compose.yml up -d --wait` returns with every container
   healthy in under 3 minutes on a warm image cache.
-- [ ] I2. Postgres contains the schemas `identity, course, timetable, registration, grade,
+- [x] I2. Postgres contains the schemas `identity, course, timetable, registration, grade,
   announcement, club, marketplace, lostfound, notification, payment, platform`. User
   `registration_svc` can read and write only `registration`. User `notification_svc` can read and
-  write only `notification`. Both proven by IT. *(registration part done in T10, 2026-11-24:
-  `SchemaIsolationIT` runs the Compose init script in Testcontainers and, logged in as
-  `registration_svc`, gets "permission denied" on every other schema. notification part: T11.)*
+  write only `notification`. Both proven by IT. *(Done 2026-11-24: in each service,
+  `SchemaIsolationIT` runs the Compose init script in Testcontainers and, logged in as the
+  service's user, gets "permission denied" on every other schema. registration in T10,
+  notification in T11.)*
 - [ ] I3. All 4 apps start against Compose. `GET /actuator/health` returns `UP` on each. The three
   `/ping` routes in Commands answer through the gateway on :8080.
 
@@ -321,7 +322,8 @@ quarantined with an issue link. They are never silently deleted.
   (D2, O4). An outage shorter than the producer's `delivery.timeout.ms` gives exactly one copy.
   *(Revised 2026-11-22 after the T7 spike: "exactly once" is not possible for any outbox that
   resends after a timeout; decided by minhdau156 at Checkpoint B.)*
-- [ ] O4. Delivering the same event twice to a consumer causes the side effect exactly once (D2).
+- [x] O4. Delivering the same event twice to a consumer causes the side effect exactly once (D2).
+  *(T11, 2026-11-24: `IdempotentConsumerIT` and `ProbeListenerIT` in notification-service.)*
 - [ ] O5. The topics from Arch §6 (`registration.requests` 12 partitions, `registration.events` 6,
   `course.events` 3, `grade.events` 3, `campus.events` 3) are declared in code by their producing
   app and exist after startup with `retention.ms=-1`. The broker does not auto-create topics.

@@ -84,7 +84,7 @@ T3 Compose infra (parallel) ─────────────────�
 - [x] T8 `platform-starter`: RFC 7807 problem handler (E1)
 - [x] T9 OpenAPI: springdoc, one group per module, `-Pexport-openapi` → `docs/api/` (A1, backend part)
 - [x] T10 `registration-service` skeleton + schema-restricted DB user (D3)
-- [ ] T11 `notification-service` skeleton + idempotent consumer (O4)
+- [x] T11 `notification-service` skeleton + idempotent consumer (O4)
 - [ ] T12 Topics: per-topic keys, unlimited retention, Kafka-only cross-module rule, replay (O5, O6)
 - [ ] T13 `gateway` routes + `infra/smoke.sh` (I3)
 - [ ] T14 Gateway per-IP rate limiting (R1)

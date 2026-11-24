@@ -1,0 +1,76 @@
+# notification-service settings. The first block is used always; a block with
+# `spring.config.activate.on-profile` is used only when that profile is on.
+
+spring:
+  application:
+    name: notification-service
+  datasource:
+    # notification_svc may only use the `notification` schema (created by infra/postgres/init).
+    # A query on any other schema fails with "permission denied" (spec D3, SchemaIsolationIT).
+    username: notification_svc
+  flyway:
+    # The service's own schema and Flyway history table (the schema already exists and belongs to
+    # notification_svc, so Flyway does not need to create it).
+    schemas: notification
+    default-schema: notification
+    locations: classpath:db/migration/notification
+  kafka:
+    consumer:
+      # A listener whose consumer group has never run starts at the OLDEST record of the topic, so
+      # it sees events published before its first start. (Kafka's own default, "latest", would
+      # silently skip them.)
+      auto-offset-reset: earliest
+
+server:
+  port: 8083
+
+# Copied from pom.xml by Maven when it builds (resource filtering); shown by /ping.
+campus:
+  version: "@project.version@"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+# dev: the app on your machine, using the Docker Compose infra (`spring-boot:run` turns this on).
+spring:
+  config:
+    activate:
+      on-profile: dev
+    # Reads the passwords from infra/.env (gitignored), so no password is written here.
+    # The path is relative to backend/notification-service, where the app is started.
+    import: optional:file:../../infra/.env[.properties]
+  datasource:
+    # Compose publishes Postgres on port 5433 of your computer (infra/docker-compose.yml).
+    url: jdbc:postgresql://localhost:5433/${POSTGRES_DB:campus}
+    password: ${NOTIFICATION_SVC_DB_PASSWORD}
+  flyway:
+    # Also create the dev-only probe_read_model table (written by ProbeListener).
+    locations: classpath:db/migration/notification, classpath:db/migration/notification-probe
+  kafka:
+    # The Kafka broker from infra/docker-compose.yml.
+    bootstrap-servers: localhost:9092
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+---
+# test: integration tests (*IT). TestcontainersConfiguration gives the datasource (notification_svc
+# login) and the Kafka address, so none are set here.
+spring:
+  config:
+    activate:
+      on-profile: test
+  flyway:
+    # Also create the dev-only probe_read_model table (written by ProbeListener).
+    locations: classpath:db/migration/notification, classpath:db/migration/notification-probe
+
+management:
+  endpoint:
+    health:
+      show-details: always

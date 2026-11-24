@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Gets versions and build rules from the root pom.xml. -->
+    <parent>
+        <groupId>edu.campus</groupId>
+        <artifactId>smart-campus</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <!--
+        notification-service: sends notifications (inbox, WebSocket, push, email) when other modules
+        publish events. A separate app because it is a "sink": it listens to many topics and must
+        not slow down the apps that publish. Runs on port 8083.
+        It may only touch the `notification` schema: it logs in to PostgreSQL as notification_svc
+        (spec D3). Empty for now (platform T11): ping, health, Flyway, and an idempotent Kafka
+        consumer for the probe events (spec D2, O4).
+    -->
+    <artifactId>notification-service</artifactId>
+    <packaging>jar</packaging>
+    <name>Smart Campus :: Notification Service</name>
+
+    <dependencies>
+        <!-- Our own plain-Java types (DomainEvent, Topics, ...). -->
+        <dependency>
+            <groupId>edu.campus</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Shared Spring setup: problem JSON + traceId, IdempotentConsumer, OpenAPI Problem schema. -->
+        <dependency>
+            <groupId>edu.campus</groupId>
+            <artifactId>platform-starter</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- REST endpoints (Spring MVC + embedded Tomcat). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <!-- API docs: /v3/api-docs (OpenAPI JSON) and /swagger-ui.html. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
+        <!-- /actuator/health and metrics. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- DataSource (connection pool), JdbcTemplate and transactions. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <!-- Database migrations (db/migration/notification/). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <!-- PostgreSQL JDBC driver: only needed when the app runs. -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- Kafka client + @KafkaListener + spring.kafka.* settings. This app only consumes for now,
+             so it has no outbox (no Modulith event registry) yet. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
+        <!-- ===== Tests only ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- @WebMvcTest: test one controller without starting the whole app. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers: a real PostgreSQL and a real Kafka in Docker for the *IT tests. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Waits until something becomes true ("await until the row arrived"). -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Builds the runnable jar and gives `spring-boot:run` (with the `dev` profile). -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <profiles>
+                        <profile>dev</profile>
+                    </profiles>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

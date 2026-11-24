@@ -1,0 +1,115 @@
+{
+  "components" : {
+    "schemas" : {
+      "FieldError" : {
+        "description" : "One invalid field of a request",
+        "properties" : {
+          "field" : {
+            "description" : "Field name, e.g. name",
+            "type" : "string"
+          },
+          "message" : {
+            "description" : "What is wrong, e.g. must not be blank",
+            "type" : "string"
+          }
+        },
+        "required" : [ "field", "message" ],
+        "type" : "object"
+      },
+      "Ping" : {
+        "properties" : {
+          "app" : {
+            "type" : "string"
+          },
+          "time" : {
+            "format" : "date-time",
+            "type" : "string"
+          },
+          "version" : {
+            "type" : "string"
+          }
+        },
+        "type" : "object"
+      },
+      "Problem" : {
+        "description" : "Error response (RFC 7807 problem details + code and traceId)",
+        "properties" : {
+          "code" : {
+            "description" : "Stable machine code, e.g. NOT_FOUND. Switch on this.",
+            "type" : "string"
+          },
+          "detail" : {
+            "description" : "What went wrong this time",
+            "type" : "string"
+          },
+          "errors" : {
+            "description" : "Only for VALIDATION_FAILED: one entry per invalid field",
+            "items" : {
+              "$ref" : "#/components/schemas/FieldError"
+            },
+            "type" : "array"
+          },
+          "status" : {
+            "description" : "HTTP status code",
+            "format" : "int32",
+            "type" : "integer"
+          },
+          "title" : {
+            "description" : "Short summary, same for every problem of this kind",
+            "type" : "string"
+          },
+          "traceId" : {
+            "description" : "Id to find this request in the logs",
+            "type" : "string"
+          },
+          "type" : {
+            "description" : "Kind of problem, e.g. https://campus.edu/problems/not-found",
+            "format" : "uri",
+            "type" : "string"
+          }
+        },
+        "required" : [ "code", "detail", "status", "title", "traceId", "type" ],
+        "type" : "object"
+      }
+    }
+  },
+  "info" : {
+    "title" : "Smart Campus notification-service",
+    "version" : "0.1.0-SNAPSHOT"
+  },
+  "openapi" : "3.1.0",
+  "paths" : {
+    "/api/v1/notification/ping" : {
+      "get" : {
+        "operationId" : "ping",
+        "responses" : {
+          "200" : {
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Ping"
+                }
+              }
+            },
+            "description" : "OK"
+          },
+          "default" : {
+            "content" : {
+              "application/problem+json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description" : "Error (problem details, see the Problem schema)"
+          }
+        },
+        "tags" : [ "ping-controller" ]
+      }
+    }
+  },
+  "servers" : [ {
+    "description" : "This server",
+    "url" : "/"
+  } ]
+}
