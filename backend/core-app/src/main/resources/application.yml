@@ -40,7 +40,8 @@ spring:
     # The path is relative to backend/core-app, where `spring-boot:run` starts the app.
     import: optional:file:../../infra/.env[.properties]
   datasource:
-    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
+    # Compose publishes Postgres on port 5433 of your computer (infra/docker-compose.yml).
+    url: jdbc:postgresql://localhost:5433/${POSTGRES_DB:campus}
     password: ${CORE_APP_DB_PASSWORD}
   flyway:
     # Also create the dev-only outbox_probe table (T7 spike).

@@ -120,8 +120,9 @@ curl -s localhost:8080/api/v1/registration/ping   # → registration-service via
 curl -s localhost:8080/api/v1/notification/ping   # → notification-service via gateway
 ```
 
-Local ports: gateway 8080, core-app 8081, registration 8082, notification 8083, Postgres 5432,
-Redis 6379, Kafka 9092, Keycloak 8180, OpenSearch 9200, RustFS S3 API 9000 (console 9001), Mailpit 8025,
+Local ports: gateway 8080, core-app 8081, registration 8082, notification 8083, Postgres 5433
+(on your computer; inside the Compose network it is still `postgres:5432`. Changed from 5432 on
+2026-11-24 by minhdau156, so it does not clash with another Postgres on 5432), Redis 6379, Kafka 9092, Keycloak 8180, OpenSearch 9200, RustFS S3 API 9000 (console 9001), Mailpit 8025,
 Grafana 3000.
 
 ## Project Structure

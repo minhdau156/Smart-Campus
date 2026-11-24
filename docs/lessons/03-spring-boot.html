@@ -164,7 +164,7 @@ spring:
       on-profile: dev                  <span class="c"># your laptop + Docker Compose</span>
     import: optional:file:../../infra/.env[.properties]
   datasource:
-    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
+    url: jdbc:postgresql://localhost:5433/${POSTGRES_DB:campus}
     password: ${CORE_APP_DB_PASSWORD}  <span class="c"># read from infra/.env, never written here</span>
 
 ---

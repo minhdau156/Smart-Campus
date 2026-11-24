@@ -41,7 +41,8 @@ spring:
     # The path is relative to backend/registration-service, where the app is started.
     import: optional:file:../../infra/.env[.properties]
   datasource:
-    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
+    # Compose publishes Postgres on port 5433 of your computer (infra/docker-compose.yml).
+    url: jdbc:postgresql://localhost:5433/${POSTGRES_DB:campus}
     password: ${REGISTRATION_SVC_DB_PASSWORD}
   kafka:
     # The Kafka broker from infra/docker-compose.yml.

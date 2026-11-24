@@ -92,7 +92,7 @@ exactly:</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Service</th><th>Image</th><th>Host port(s)</th></tr></thead>
 <tbody>
-<tr><td>postgres</td><td><code>postgres:19.0-alpine3.24</code></td><td>5432</td></tr>
+<tr><td>postgres</td><td><code>postgres:19.0-alpine3.24</code></td><td>5433 (container port 5432)</td></tr>
 <tr><td>redis</td><td><code>redis:8.8.4-alpine3.23</code></td><td>6379</td></tr>
 <tr><td>kafka</td><td><code>apache/kafka:4.4.0</code> (KRaft, no ZooKeeper)</td><td>9092</td></tr>
 <tr><td>keycloak</td><td><code>quay.io/keycloak/keycloak:26.8.2</code></td><td>8180</td></tr>
@@ -111,7 +111,10 @@ exactly:</p>
 <h3>Publishing ports</h3>
 <pre data-file="infra/docker-compose.yml (part)"><code>  postgres:
     ports:
-      - "127.0.0.1:5432:5432"     <span class="c"># host-address : host-port : container-port</span></code></pre>
+      - "127.0.0.1:5433:5432"     <span class="c"># host-address : host-port : container-port</span></code></pre>
+<p>The two port numbers do not have to be the same. Postgres listens on 5432 <em>inside</em> its
+container, but we open it as <strong>5433</strong> on your computer, because another Postgres on
+your computer may already use 5432.</p>
 <p>A container has its own network. <code>ports</code> opens a door from your computer into it.
 <code>127.0.0.1</code> means only <strong>your computer</strong> can use the door, not other devices
 on your Wi-Fi. Our dev passwords are simple, so this matters.</p>
@@ -121,7 +124,7 @@ on your Wi-Fi. Our dev passwords are simple, so this matters.</p>
 <code>smart-campus_default</code>, from <code>name: smart-campus</code>). Inside it, each
 <strong>service name is a host name</strong>. This is the most important rule for T15:</p>
 <div class="flow">
-  <div class="box accent"><b>App on your laptop</b>(<code>spring-boot:run</code>)<br>Postgres: <code>localhost:5432</code><br>Kafka: <code>localhost:9092</code></div>
+  <div class="box accent"><b>App on your laptop</b>(<code>spring-boot:run</code>)<br>Postgres: <code>localhost:5433</code><br>Kafka: <code>localhost:9092</code></div>
   <div class="box project"><b>App in a container</b>(profile <code>apps</code>, T15)<br>Postgres: <code>postgres:5432</code><br>Kafka: <code>kafka:29092</code></div>
 </div>
 <p>Inside a container, <code>localhost</code> means <strong>that container itself</strong>, not your
@@ -315,8 +318,8 @@ up or down while ITs run.</p>
   <li><strong>Line endings:</strong> a shell script with Windows line endings (CRLF) fails inside a
       Linux container. Our <code>.gitattributes</code> keeps files in LF (only <code>.cmd</code>/<code>.bat</code>
       use CRLF), which protects <code>infra/postgres/init/01-schemas-and-users.sh</code>.</li>
-  <li><strong>Port already in use:</strong> a Postgres installed on Windows may already hold 5432.
-      Find it with <code>Get-NetTCPConnection -LocalPort 5432</code> and stop that service.</li>
+  <li><strong>Port already in use:</strong> a Postgres installed on Windows (or another project's container) may hold the port. That is why we publish Postgres on 5433, not 5432.
+      Find the owner with <code>Get-NetTCPConnection -LocalPort 5433</code>, or change the host port in the compose file.</li>
   <li><strong>The space in <code>C:\Smart Campus</code>:</strong> always quote paths in scripts.</li>
   <li><strong>From a container to your laptop:</strong> use <code>host.docker.internal</code> (T18's
       Prometheus will reach <code>spring-boot:run</code> apps this way).</li>
@@ -350,7 +353,7 @@ up or down while ITs run.</p>
   <li><strong>Using <code>latest</code> or a short tag like <code>21</code>.</strong> Pin the exact tag.</li>
   <li><strong>Committing <code>infra/.env</code>.</strong> It is gitignored for a reason.</li>
   <li><strong>Publishing ports on <code>0.0.0.0</code></strong> (the default when you write only
-      <code>"5432:5432"</code>). Keep <code>127.0.0.1:</code>.</li>
+      <code>"5433:5432"</code>). Keep <code>127.0.0.1:</code>.</li>
   <li><strong>Copying the app code before the libraries in a Dockerfile.</strong> Every code change
       then rebuilds all layers.</li>
   <li><strong>Running the app as root in the image.</strong></li>
@@ -407,7 +410,7 @@ docker compose -f infra/docker-compose.yml exec redis sh -c "nc -z localhost 543
 
 <h2 id="quiz">13. Test yourself</h2>
 <div class="quiz">
-  <details><summary>1. Why does an app in a container use <code>postgres:5432</code>, while <code>spring-boot:run</code> uses <code>localhost:5432</code>?</summary>
+  <details><summary>1. Why does an app in a container use <code>postgres:5432</code>, while <code>spring-boot:run</code> uses <code>localhost:5433</code>?</summary>
     <p><code>localhost</code> always means "this machine". For an app on your laptop, the published
     port on your laptop leads to Postgres. Inside a container, <code>localhost</code> is the
     container itself, so it must use the service name, which Compose's network turns into
