@@ -31,6 +31,7 @@
         <module>backend/shared-kernel</module>
         <module>backend/platform-starter</module>
         <module>backend/core-app</module>
+        <module>backend/registration-service</module>
     </modules>
 
     <!--

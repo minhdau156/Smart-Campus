@@ -303,7 +303,9 @@ quarantined with an issue link. They are never silently deleted.
 - [ ] I2. Postgres contains the schemas `identity, course, timetable, registration, grade,
   announcement, club, marketplace, lostfound, notification, payment, platform`. User
   `registration_svc` can read and write only `registration`. User `notification_svc` can read and
-  write only `notification`. Both proven by IT.
+  write only `notification`. Both proven by IT. *(registration part done in T10, 2026-11-24:
+  `SchemaIsolationIT` runs the Compose init script in Testcontainers and, logged in as
+  `registration_svc`, gets "permission denied" on every other schema. notification part: T11.)*
 - [ ] I3. All 4 apps start against Compose. `GET /actuator/health` returns `UP` on each. The three
   `/ping` routes in Commands answer through the gateway on :8080.
 

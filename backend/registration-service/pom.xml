@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Gets versions and build rules from the root pom.xml. -->
+    <parent>
+        <groupId>edu.campus</groupId>
+        <artifactId>smart-campus</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <!--
+        registration-service: the course-registration service, split out of core-app because it
+        must scale on its own during the registration rush (Arch). Runs on port 8082.
+        It may only touch the `registration` schema: it logs in to PostgreSQL as registration_svc,
+        a user with rights on that schema only (spec D3).
+        Empty for now (platform T10): ping, health, Flyway and the outbox setup.
+    -->
+    <artifactId>registration-service</artifactId>
+    <packaging>jar</packaging>
+    <name>Smart Campus :: Registration Service</name>
+
+    <dependencies>
+        <!-- Our own plain-Java types (ids, Money, DomainEvent, Topics, ...). -->
+        <dependency>
+            <groupId>edu.campus</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Shared Spring setup for all apps: problem JSON + traceId, outbox defaults and retry job,
+             OpenAPI Problem schema. Switches itself on (auto-configuration). -->
+        <dependency>
+            <groupId>edu.campus</groupId>
+            <artifactId>platform-starter</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <!-- REST endpoints (Spring MVC + embedded Tomcat). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <!-- API docs: /v3/api-docs (OpenAPI JSON) and /swagger-ui.html (version in the root pom). -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
+        <!-- /actuator/health and metrics. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- DataSource (connection pool) + JdbcTemplate. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <!-- Database migrations (db/migration/registration/). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <!-- PostgreSQL JDBC driver: only needed when the app runs. -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ===== Outbox (spec D1), same setup as core-app ===== -->
+        <!-- Event Publication Registry in PostgreSQL: table registration.event_publication. -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-starter-jdbc</artifactId>
+        </dependency>
+        <!-- Sends the saved events to Kafka after the commit. -->
+        <dependency>
+            <groupId>org.springframework.modulith</groupId>
+            <artifactId>spring-modulith-events-kafka</artifactId>
+        </dependency>
+        <!-- Kafka client + KafkaTemplate + spring.kafka.* settings. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
+        <!-- ===== Tests only ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- @WebMvcTest: test one controller without starting the whole app. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers: a real PostgreSQL in Docker for the *IT tests. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Builds the runnable jar and gives `spring-boot:run` (with the `dev` profile). -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <profiles>
+                        <profile>dev</profile>
+                    </profiles>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,66 @@
+# registration-service settings. The first block is used always; a block with
+# `spring.config.activate.on-profile` is used only when that profile is on.
+
+spring:
+  application:
+    name: registration-service
+  datasource:
+    # registration_svc may only use the `registration` schema (created by infra/postgres/init).
+    # A query on any other schema fails with "permission denied" (spec D3, SchemaIsolationIT).
+    username: registration_svc
+  flyway:
+    # The service's own schema and Flyway history table. The schema already exists (init script)
+    # and belongs to registration_svc, so Flyway does not need to create it.
+    schemas: registration
+    default-schema: registration
+    locations: classpath:db/migration/registration
+  # Outbox, Kafka producer and Modulith settings come from platform-starter
+  # (campus-platform-defaults.yml): the outbox table event_publication lives in the Flyway default
+  # schema above, so here in `registration`.
+
+server:
+  port: 8082
+
+# Copied from pom.xml by Maven when it builds (resource filtering); shown by /ping.
+campus:
+  version: "@project.version@"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+# dev: the app on your machine, using the Docker Compose infra (`spring-boot:run` turns this on).
+spring:
+  config:
+    activate:
+      on-profile: dev
+    # Reads the passwords from infra/.env (gitignored), so no password is written here.
+    # The path is relative to backend/registration-service, where the app is started.
+    import: optional:file:../../infra/.env[.properties]
+  datasource:
+    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
+    password: ${REGISTRATION_SVC_DB_PASSWORD}
+  kafka:
+    # The Kafka broker from infra/docker-compose.yml.
+    bootstrap-servers: localhost:9092
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+---
+# test: integration tests (*IT). TestcontainersConfiguration gives the datasource URL and the
+# registration_svc login, so none are set here.
+spring:
+  config:
+    activate:
+      on-profile: test
+
+management:
+  endpoint:
+    health:
+      show-details: always
