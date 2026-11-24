@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Search with OpenSearch</title>
+<meta name="description" content="Smart Campus lesson 29: inverted indexes, mappings, Vietnamese-friendly analyzers, the query DSL, BM25, search_after, aliases and building the index from Kafka.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="29">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 29 · Part 2: Feature modules</div>
+<h1>Search with OpenSearch</h1>
+<p class="lede">A student types "giai tich" without accents and expects to find the book
+"Giải tích 1" for their course, cheapest first. SQL <code>LIKE '%…%'</code> cannot do that well.
+A search engine can. This lesson explains how it works and how Smart Campus will feed it from
+Kafka.</p>
+
+<div class="meta">
+  <span class="badge module">search</span>
+  <span class="badge module">marketplace, lostfound, course (sources)</span>
+  <span class="badge task">MKT-2</span>
+  <span class="badge task">LF-3</span>
+  <span class="badge task">C16</span>
+  <span class="badge time">~80 min</span>
+  <span class="badge level">Planned module</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="07-kafka.html">07 (Kafka)</a>, <a href="08-outbox-idempotency.html">08 (replay)</a>
+  and <a href="22-read-models-cqrs.html">22 (read models)</a>. <code>SPEC-search.md</code> is not
+  written yet: index names and code here are <strong>planned</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#inverted">The inverted index</a></li>
+    <li><a href="#mapping">Documents and mappings</a></li>
+    <li><a href="#analyzers">Analyzers and Vietnamese accents</a></li>
+    <li><a href="#query">The query DSL and BM25</a></li>
+    <li><a href="#paging">Paging with search_after</a></li>
+    <li><a href="#from-kafka">Building the index from Kafka</a></li>
+    <li><a href="#java">The Java client and lost-and-found matching</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p><strong>MKT-2</strong>: "As a buyer, I want to search and filter by course, title and price, so
+I find a cheap copy quickly." The capability map adds cross-module search over sections, listings
+and lost-and-found items. The <code>search</code> module (module 14) is special:</p>
+<ul>
+  <li>It owns <strong>no source data</strong>. It has no PostgreSQL schema (look at
+      <code>infra/postgres/init/01-schemas-and-users.sh</code>: there is no <code>search</code>
+      schema). It owns only OpenSearch indexes.</li>
+  <li>It is a <strong>read model</strong> built from events: <code>course.events</code> and
+      <code>campus.events</code> (<code>ListingCreated</code>, <code>ListingSold</code>,
+      <code>ItemReported</code>, …).</li>
+  <li>Resolution <strong>C16</strong>: it "can be dropped and replayed at any time".</li>
+</ul>
+<p>Why not just SQL? <code>WHERE title ILIKE '%giai tich%'</code> cannot use a normal index (it
+reads every row), does not ignore accents, does not handle typos, and cannot rank "best match
+first". A search engine is built for exactly these jobs.</p>
+
+<h2 id="inverted">2. The inverted index</h2>
+<p>A book's index at the back lists words and the pages they appear on. A search engine does the
+same for documents: an <strong>inverted index</strong> maps each <em>term</em> (a word after
+cleaning) to the list of documents that contain it.</p>
+<pre class="diagram">Documents                         Inverted index (term → documents)
+ 1: "Giải tích 1 - bản mới"        giai  → 1, 3
+ 2: "Vật lý đại cương"             tich  → 1, 3
+ 3: "Bài tập giải tích"            1     → 1
+                                   ban   → 1
+                                   moi   → 1
+                                   vat   → 2       bai → 3
+                                   ly    → 2       tap → 3 …
+
+Query "giai tich" → terms giai, tich → documents 1 and 3 → rank them</pre>
+<p>Finding documents is now a quick lookup per term, not a scan of every row. The work moved from
+search time to <strong>index time</strong>: every document is cut into terms when it is saved.</p>
+<p><strong>OpenSearch</strong> is an open-source search engine (a fork of Elasticsearch, built on the
+Apache Lucene library). You talk to it with JSON over HTTP. Our Compose file runs one node:</p>
+<pre data-file="infra/docker-compose.yml (service opensearch, part)"><code>opensearch:
+  image: opensearchproject/opensearch:3.10.0
+  environment:
+    discovery.type: single-node
+    DISABLE_SECURITY_PLUGIN: "true"      <span class="c"># dev only: no login, no TLS</span>
+  ports:
+    - "127.0.0.1:9200:9200"</code></pre>
+
+<h2 id="mapping">3. Documents and mappings</h2>
+<p>A <strong>document</strong> is one JSON object, like one row. An <strong>index</strong> is a
+collection of documents, like a table. The <strong>mapping</strong> is the index's schema: it says
+the type of every field. The most important choice is <code>text</code> vs <code>keyword</code>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>What happens</th><th>Use for</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td>Cut into terms by an analyzer. Good for "contains these words"</td><td>Full-text search</td><td><code>title</code>, <code>description</code></td></tr>
+<tr><td><code>keyword</code></td><td>Kept as one exact value. Good for equal, filter, sort, count</td><td>Ids, codes, statuses</td><td><code>courseId</code>, <code>status</code></td></tr>
+<tr><td><code>long</code>, <code>date</code>, …</td><td>Numbers and times; range queries and sort</td><td>Price, time</td><td><code>price</code>, <code>createdAt</code></td></tr>
+</tbody></table></div>
+<p>A field can have both, with a <strong>sub-field</strong>: <code>title</code> as text for
+searching, and <code>title.raw</code> as keyword for exact sort.</p>
+<pre data-file="planned mapping for listings (sketch)"><code>PUT /listings-v1
+{
+  "settings": { "analysis": { … see next section … } },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "id":          { "type": "keyword" },
+      "title":       { "type": "text", "analyzer": "vi_folded",
+                       "fields": { "raw": { "type": "keyword" } } },
+      "description": { "type": "text", "analyzer": "vi_folded" },
+      "courseId":    { "type": "keyword" },
+      "courseCode":  { "type": "keyword" },
+      "price":       { "type": "long" },
+      "status":      { "type": "keyword" },
+      "createdAt":   { "type": "date" }
+    }
+  }
+}</code></pre>
+<p><code>"dynamic": "strict"</code> rejects documents with unknown fields, so a typo in our code
+fails loudly instead of quietly creating a new field. You cannot change a field's type in an existing
+index; you create a new index and fill it again (section 7).</p>
+
+<h2 id="analyzers">4. Analyzers and Vietnamese accents</h2>
+<p>An <strong>analyzer</strong> turns text into terms. It has a <strong>tokenizer</strong> (cuts
+the text into pieces) and <strong>token filters</strong> (change each piece). The same analyzer is
+used for the documents and for the user's query, so both sides become the same terms.</p>
+<p>Many students type Vietnamese without accents ("toan" for "Toán"). The
+<code>asciifolding</code> filter turns letters with accents into plain ASCII letters, so both become
+<code>toan</code>. It also turns <code>đ</code> into <code>d</code>.</p>
+<pre data-file="analysis settings (planned)"><code>"settings": {
+  "analysis": {
+    "filter": {
+      "vi_fold": { "type": "asciifolding", "preserve_original": true }
+    },
+    "analyzer": {
+      "vi_folded": {
+        "type": "custom",
+        "tokenizer": "standard",
+        "filter": [ "lowercase", "vi_fold" ]
+      }
+    }
+  }
+}</code></pre>
+<pre class="diagram">"Toán Cao Cấp"  ─standard─►  Toán | Cao | Cấp
+                ─lowercase─► toán | cao | cấp
+                ─vi_fold──►  toán + toan | cao | cấp + cap   (preserve_original keeps both)</pre>
+<p>With <code>preserve_original</code>, the accented form is kept too. So "Toán" and "toan" both
+match, and a query typed <em>with</em> the right accents also matches the exact form. You can test
+any analyzer with the <code>_analyze</code> API (see Practice).</p>
+<div class="callout warn">
+  <span class="title">Limits of folding</span>
+  Folding can mix up words that differ only by accents (for example "bàn" table and "bán" sell both
+  become "ban"). For a book market that is usually fine. The standard tokenizer cuts Vietnamese into
+  syllables, not words; phrase queries help keep syllables together. Plugins with real Vietnamese
+  word splitting exist, but adding one is a spec decision.
+</div>
+
+<h2 id="query">5. The query DSL and BM25</h2>
+<p>OpenSearch queries are JSON (the <strong>query DSL</strong>, a small language for queries). The
+main pieces:</p>
+<ul>
+  <li><code>match</code>: full-text search in one field.</li>
+  <li><code>multi_match</code>: the same in several fields, with weights (<code>title^3</code>
+      means a match in the title counts 3 times more).</li>
+  <li><code>bool</code>: combine queries. <code>must</code> = must match and adds to the score;
+      <code>filter</code> = must match but <strong>does not change the score</strong> and can be
+      cached; <code>should</code> = nice to have; <code>must_not</code> = exclude.</li>
+  <li><code>fuzziness: "AUTO"</code>: allow small typos ("giai tihc" still finds "giai tich").</li>
+</ul>
+<pre data-file="MKT-2: search a listing (planned)"><code>GET /listings/_search
+{
+  "query": {
+    "bool": {
+      "must": [
+        { "multi_match": { "query": "giai tich", "fields": ["title^3", "description"],
+                           "fuzziness": "AUTO" } }
+      ],
+      "filter": [
+        { "term":  { "status": "AVAILABLE" } },
+        { "term":  { "courseId": "4b1c…" } },
+        { "range": { "price": { "lte": 100000 } } }
+      ]
+    }
+  },
+  "sort": [ { "_score": "desc" }, { "id": "asc" } ],
+  "size": 20
+}</code></pre>
+<p>Rule: <strong>yes/no conditions go in <code>filter</code></strong> (status, course, price range).
+Only the words the user typed go in <code>must</code>. This keeps the score meaningful and the query
+fast.</p>
+<h3>How the score is computed: BM25</h3>
+<p>OpenSearch ranks with <strong>BM25</strong> by default. In simple words, a document scores higher
+when:</p>
+<ul>
+  <li>the query term appears <strong>often in it</strong> (term frequency), but with less extra
+      gain each time, so repeating a word 50 times does not win;</li>
+  <li>the term is <strong>rare in the whole index</strong> (inverse document frequency): "giai tich"
+      tells more than "sach" (book), which is in every listing;</li>
+  <li>the field is <strong>short</strong>: a match in a 4-word title means more than in a 300-word
+      description.</li>
+</ul>
+
+<h2 id="paging">6. Paging with search_after</h2>
+<p><code>from</code> + <code>size</code> works like SQL <code>OFFSET</code>: deep pages get slow, and
+OpenSearch limits how deep you can go by default. For "load more" lists, use
+<strong><code>search_after</code></strong>, the search-engine version of keyset pagination
+(<a href="25-scheduled-jobs-feeds.html">lesson 25</a>):</p>
+<ol>
+  <li>Sort by something with a unique tie-breaker: <code>_score</code>, then <code>id</code>.</li>
+  <li>Each hit in the answer has a <code>sort</code> array, for example <code>[7.31, "a91e…"]</code>.</li>
+  <li>For the next page, send the last hit's array as <code>"search_after": [7.31, "a91e…"]</code>.</li>
+</ol>
+<p>If documents change between pages, results can shift. For a stable view across pages,
+OpenSearch offers a <strong>point in time</strong> (PIT) to use with <code>search_after</code>.
+For a marketplace list, small shifts are usually acceptable.</p>
+
+<h2 id="from-kafka">7. Building the index from Kafka</h2>
+<p>The search module listens to events and keeps the index up to date. It never reads the
+marketplace tables (no cross-module reads, D3).</p>
+<div class="flow">
+  <div class="box project"><b>marketplace</b><code>ListingCreated</code>, <code>ListingSold</code> via outbox</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>Kafka</b><code>campus.events</code>, key = aggregateId</div>
+  <div class="arrow">→</div>
+  <div class="box"><b>search consumer</b>build a document, bulk write</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>OpenSearch</b>alias <code>listings</code></div>
+</div>
+<h3>Idempotent by design</h3>
+<p>Use the listing id as the <strong>document id</strong>. Writing the same document twice just
+overwrites it with the same content, so duplicate events are harmless. Because
+<code>campus.events</code> is keyed by <code>aggregateId</code>, events of one listing arrive in
+order. For extra safety against old events overwriting new ones, OpenSearch supports
+<strong>external versioning</strong>: send a version number with each write, and it rejects a write
+with an older version. Where to keep dedupe state, given that search has no PostgreSQL schema, is a
+decision for <code>SPEC-search.md</code>.</p>
+
+<h3>The bulk API</h3>
+<p>Writing documents one HTTP call at a time is slow. The <strong>bulk API</strong> sends many
+actions in one request (as NDJSON: one JSON object per line). A Kafka listener that receives a batch
+of records can turn it into one bulk call. Important: a bulk call can partly fail. Its answer has
+<code>"errors": true</code> and a status per item; check every item, and do not acknowledge the
+Kafka batch if an item failed for a reason that a retry can fix.</p>
+
+<h3>Aliases: rebuild with zero downtime</h3>
+<p>An <strong>alias</strong> is a second name that points to an index. The app always searches
+<code>listings</code>, which points to <code>listings-v1</code>. To change a mapping or rebuild:</p>
+<ol class="steps">
+  <li>Create <code>listings-v2</code> with the new mapping.</li>
+  <li>Replay: a new consumer group reads the topics from the beginning
+      (<code>retention.ms=-1</code>, D5) and fills <code>listings-v2</code>.</li>
+  <li>When it has caught up, move the alias in <strong>one atomic call</strong>:
+<pre><code>POST /_aliases
+{ "actions": [
+  { "remove": { "index": "listings-v1", "alias": "listings" } },
+  { "add":    { "index": "listings-v2", "alias": "listings" } } ] }</code></pre></li>
+  <li>Delete <code>listings-v1</code> later.</li>
+</ol>
+<p>Users never see an empty index. This is exactly the "drop and replay" promise of C16, done
+without downtime.</p>
+
+<h3>Eventual consistency</h3>
+<p>A seller saves a listing. The outbox sends the event, the consumer indexes it, and OpenSearch makes
+it searchable after its <strong>refresh</strong> (about once per second by default). So for a short
+time, the listing exists but search cannot find it. This is <strong>eventual consistency</strong>:
+correct soon, not instantly. Design the UI for it: after "Save", show the listing page (read from
+marketplace's own API), not a search result.</p>
+
+<h2 id="java">8. The Java client and lost-and-found matching</h2>
+<p>The <strong>opensearch-java</strong> client builds requests with typed builders. A sketch (method
+names can differ between client versions; check the client's docs for the version you add):</p>
+<pre data-file="core-app/.../search/internal/ListingSearch.java (planned)"><code>package edu.campus.search.internal;
+
+<span class="k">@Component</span>
+class ListingSearch {
+    private final OpenSearchClient client;
+
+    ListingSearch(OpenSearchClient client) {
+        this.client = client;
+    }
+
+    List&lt;ListingDoc&gt; search(String text, String courseId, long maxPrice) throws IOException {
+        SearchResponse&lt;ListingDoc&gt; response = client.search(s -&gt; s
+                .index("listings")                                     <span class="c">// the alias</span>
+                .query(q -&gt; q.bool(b -&gt; b
+                        .must(m -&gt; m.multiMatch(mm -&gt; mm
+                                .query(text).fields("title^3", "description").fuzziness("AUTO")))
+                        .filter(f -&gt; f.term(t -&gt; t.field("status").value(FieldValue.of("AVAILABLE"))))
+                        .filter(f -&gt; f.term(t -&gt; t.field("courseId").value(FieldValue.of(courseId))))
+                        .filter(f -&gt; f.range(r -&gt; r.field("price").lte(JsonData.of(maxPrice))))))
+                .size(20),
+                ListingDoc.class);
+        return response.hits().hits().stream().map(Hit::source).toList();
+    }
+}</code></pre>
+<p>Spring Data OpenSearch is another option with repositories. Either way, wrap OpenSearch behind
+the search module's own API, so other modules never depend on the client library.</p>
+
+<h3>Matching lost and found items (LF-3)</h3>
+<p>LF-3: "be notified when a found item matches my report". Ways to find candidates for a new
+FOUND item among open LOST reports:</p>
+<ul>
+  <li><strong>Hard filters</strong>: same category, status OPEN, lost time before found time and
+      within N days.</li>
+  <li><strong>Text similarity</strong>: a <code>multi_match</code> on title and description with the
+      folded analyzer, or OpenSearch's <code>more_like_this</code> query ("find documents similar
+      to this one").</li>
+  <li><strong>Place</strong>: same building or campus area as a keyword, or a distance query if
+      the spec stores coordinates.</li>
+  <li>Take only results above a score threshold, and <strong>suggest</strong> them to the owner,
+      who must still claim with proof (LF-4). Never hand an item over automatically.</li>
+</ul>
+<div class="callout project">
+  <span class="title">A dependency to decide</span>
+  The capability map says <code>search</code> depends on <code>lostfound</code>, not the other way
+  round, and the Architecture says search publishes no events. So either <code>lostfound</code> does
+  simple matching in its own PostgreSQL schema (filters + PostgreSQL full-text search), or the
+  spec allows <code>search</code> to publish a "possible match" event. This is an "Ask first"
+  decision for <code>SPEC-lostfound.md</code>.
+</div>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>OpenSearch 3 single node, :9200, no security in dev</td><td><code>infra/docker-compose.yml</code>, service <code>opensearch</code></td><td>Exists</td></tr>
+<tr><td>Topics <code>campus.events</code>, <code>course.events</code> (replayable)</td><td><code>backend/shared-kernel/.../kernel/event/Topics.java</code></td><td>Exists</td></tr>
+<tr><td>Replay procedure (D5, C16)</td><td><code>infra/replay.sh</code></td><td>Planned (platform T12)</td></tr>
+<tr><td>Source events <code>ListingCreated</code>, <code>ListingSold</code>, <code>ItemReported</code>, <code>SectionChanged</code></td><td>marketplace, lostfound, course</td><td>Planned</td></tr>
+<tr><td>Indexes, analyzers, aliases, consumer, search API</td><td><code>core-app/.../search/</code>, <code>SPEC-search.md</code></td><td>Planned (module 14)</td></tr>
+<tr><td>Lost/found matching (LF-3)</td><td><code>SPEC-lostfound.md</code></td><td>Planned, design open</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Mapping ids and statuses as <code>text</code>.</strong> Filters then match parts of
+      words. Use <code>keyword</code>.</li>
+  <li><strong>Putting filters in <code>must</code>.</strong> They change the score and are not
+      cached. Use <code>filter</code>.</li>
+  <li><strong>Different analyzers for index and query</strong>, so "toan" never meets "toán".</li>
+  <li><strong>Letting OpenSearch guess the mapping</strong> (dynamic mapping). Define it, and use
+      <code>"dynamic": "strict"</code>.</li>
+  <li><strong>Searching the real index name</strong> instead of the alias. Then a rebuild needs a
+      code change.</li>
+  <li><strong>Treating search as the source of truth.</strong> It is a copy. Read the listing page
+      from marketplace.</li>
+  <li><strong>Ignoring per-item errors</strong> in a bulk answer.</li>
+  <li><strong>Deep <code>from</code> paging.</strong> Use <code>search_after</code>.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infrastructure and check OpenSearch:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+curl -s "localhost:9200/_cluster/health?pretty"</code></pre></li>
+  <li><p>Test the folding analyzer without creating an index:</p>
+<pre><code>curl -s -X POST "localhost:9200/_analyze?pretty" -H "Content-Type: application/json" -d '{
+  "tokenizer": "standard",
+  "filter": ["lowercase", {"type": "asciifolding", "preserve_original": true}],
+  "text": "Giải tích 1 - Đại cương"
+}'</code></pre>
+      <p>(In PowerShell, put the JSON in a file and use <code>-d "@body.json"</code>.)</p></li>
+  <li><p>Create a scratch index <code>scratch-listings-v1</code> with the mapping from section 3,
+      add 5 books with <code>PUT /scratch-listings-v1/_doc/{id}</code>, and try the MKT-2 query
+      with and without accents and with a typo.</p></li>
+  <li><p>Add an alias <code>scratch-listings</code>, create <code>scratch-listings-v2</code>, copy
+      the documents (the <code>_reindex</code> API), and swap the alias in one
+      <code>_aliases</code> call. Search the alias before and after.</p></li>
+  <li><p>Clean up: <code>curl -X DELETE "localhost:9200/scratch-*"</code>. Then on paper: list the
+      events the search consumer needs for listings, and what it does for each one
+      (create/overwrite, update status, delete).</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Inverted index</td><td>A list from each word to the documents that contain it.</td></tr>
+<tr><td>Document / index</td><td>One JSON object / a collection of them (like row / table).</td></tr>
+<tr><td>Mapping</td><td>The schema of an index: the type of each field.</td></tr>
+<tr><td><code>text</code> / <code>keyword</code></td><td>Cut into words for search / kept whole for exact match and sort.</td></tr>
+<tr><td>Analyzer</td><td>Tokenizer + filters that turn text into terms.</td></tr>
+<tr><td>ASCII folding</td><td>Turning "á", "đ" into "a", "d".</td></tr>
+<tr><td>Query DSL</td><td>OpenSearch's JSON language for queries.</td></tr>
+<tr><td>Fuzziness</td><td>Allowing small typos in a match.</td></tr>
+<tr><td>BM25</td><td>The default scoring formula: frequent in the doc, rare overall, short field = higher.</td></tr>
+<tr><td><code>search_after</code></td><td>Keyset paging for search results.</td></tr>
+<tr><td>Alias</td><td>A second name for an index; can be moved to another index at once.</td></tr>
+<tr><td>Bulk API</td><td>Many write actions in one request.</td></tr>
+<tr><td>Eventual consistency</td><td>The copy becomes correct a little later, not instantly.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why is an inverted index faster than <code>ILIKE '%giai tich%'</code>?</summary>
+    <p><code>ILIKE</code> with a leading <code>%</code> must read every row. The inverted index
+    already lists the documents for each term, so the search is a few lookups. The work was done
+    once, at index time.</p></details>
+  <details><summary>2. Why must the same analyzer run on the documents and on the query?</summary>
+    <p>Matching compares terms. If documents become "toan" but the query stays "Toán", the terms
+    differ and nothing matches.</p></details>
+  <details><summary>3. Why do status and price go in <code>filter</code>, not in <code>must</code>?</summary>
+    <p>They are yes/no conditions. In <code>filter</code> they do not distort the relevance score,
+    and OpenSearch can cache them, so queries are faster.</p></details>
+  <details><summary>4. How do aliases make "drop and replay" (C16) possible without downtime?</summary>
+    <p>The app searches the alias. We build a new index from a replay while the old one still
+    serves users, then move the alias in one atomic call. Users never see an empty or half-built
+    index.</p></details>
+  <details><summary>5. Why is it safe if the search consumer receives <code>ListingCreated</code> twice?</summary>
+    <p>The document id is the listing id, so the second write overwrites the same document with the
+    same content. Ordering per listing comes from the Kafka key; external versions can reject old
+    writes.</p></details>
+  <details><summary>6. A seller saves a listing and searches for it at once, but it is missing. Is this a bug?</summary>
+    <p>No. Search is eventually consistent: the event must go through the outbox, Kafka, the consumer
+    and the index refresh. The UI should show the new listing from marketplace's own API.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.opensearch.org/latest/">OpenSearch documentation</a>: start with "Getting started", then "Mappings", "Text analysis" and "Query DSL".</li>
+  <li><a href="https://docs.opensearch.org/latest/analyzers/token-filters/asciifolding/">OpenSearch docs: ASCII folding token filter</a>.</li>
+  <li><a href="https://docs.opensearch.org/latest/search-plugins/searching-data/paginate/">OpenSearch docs: Paginate results</a> (<code>search_after</code>, point in time).</li>
+  <li><a href="https://docs.opensearch.org/latest/im-plugin/index-alias/">OpenSearch docs: Index aliases</a>.</li>
+  <li><a href="https://docs.opensearch.org/latest/clients/java/">OpenSearch docs: Java client</a>.</li>
+  <li><a href="https://lucene.apache.org/core/">Apache Lucene</a>: the library under OpenSearch.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

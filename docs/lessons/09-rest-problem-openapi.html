@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>REST and OpenAPI Lesson</title>
+<meta name="description" content="Smart Campus lesson 09: REST APIs, HTTP methods and status codes, validation, 202 plus polling, RFC 9457 problem details and OpenAPI docs with springdoc.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="09">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 09 · Part 1: Foundations</div>
+<h1>REST APIs, problem JSON and OpenAPI</h1>
+<p class="lede">Every Smart Campus module talks to the website through HTTP and JSON. This lesson
+covers the rules that make all those APIs look the same: methods, status codes, URLs, validation,
+one error format, and API docs that are generated from the code.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module with endpoints</span>
+  <span class="badge task">T8 (done)</span>
+  <span class="badge task">T9 (done)</span>
+  <span class="badge task">T19</span>
+  <span class="badge time">~60 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="01-java-21.html">01 (records)</a> and
+  <a href="03-spring-boot.html">03 (controllers, beans, auto-configuration)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#http">HTTP methods and status codes</a></li>
+    <li><a href="#conventions">Our API conventions</a></li>
+    <li><a href="#validation">Checking input: Bean Validation</a></li>
+    <li><a href="#async">Slow work: 202 Accepted and polling</a></li>
+    <li><a href="#problem">One error format: problem details</a></li>
+    <li><a href="#handler">How our errors are made</a></li>
+    <li><a href="#openapi">OpenAPI docs with springdoc</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>The website will call endpoints from 14 modules, written over many months. If
+<code>course</code> answers errors as <code>{"error":"…"}</code> and <code>grade</code> as
+<code>{"message":"…"}</code>, the frontend needs special code for each module. So the
+<code>platform</code> module fixes the shape once:</p>
+<ul>
+  <li>the same URL pattern and JSON style everywhere (Arch §7);</li>
+  <li>the same error body everywhere, with a stable <code>code</code> and a <code>traceId</code> (spec E1, T8);</li>
+  <li>API docs generated from the code, one group per module, exported to <code>docs/api/</code>
+      so the frontend can generate TypeScript types (spec A1, T9).</li>
+</ul>
+
+<h2 id="http">2. HTTP methods and status codes</h2>
+<p><strong>REST</strong> is a style for HTTP APIs: you work with <strong>resources</strong> (things
+with a URL, like a course or an enrollment) using the standard HTTP <strong>methods</strong>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Method</th><th>Meaning</th><th>Safe?</th><th>Idempotent?</th></tr></thead>
+<tbody>
+<tr><td><code>GET</code></td><td>Read a resource or a list</td><td>Yes</td><td>Yes</td></tr>
+<tr><td><code>POST</code></td><td>Create something, or start an action</td><td>No</td><td><strong>No</strong></td></tr>
+<tr><td><code>PUT</code></td><td>Replace a resource with this full version</td><td>No</td><td>Yes</td></tr>
+<tr><td><code>PATCH</code></td><td>Change some fields</td><td>No</td><td>Not by rule</td></tr>
+<tr><td><code>DELETE</code></td><td>Remove a resource</td><td>No</td><td>Yes</td></tr>
+</tbody></table></div>
+<ul>
+  <li><strong>Safe</strong> = it changes nothing on the server. Browsers, caches and crawlers may
+      call it freely.</li>
+  <li><strong>Idempotent</strong> = calling it twice has the same effect as once. "Set my phone
+      number to X" twice is fine. "Create an enrollment" twice may create two.</li>
+</ul>
+<div class="callout project">
+  <span class="title">Why this matters for registration and payments</span>
+  Networks fail. A student's browser may send the same <code>POST</code> again after a timeout.
+  POST is not idempotent, so Arch §7 says: an <strong><code>Idempotency-Key</code> header is
+  required on POSTs that create enrollments, tickets or payments</strong>. The server remembers
+  the key and answers a repeat with the first result instead of acting twice (planned in
+  <code>registration</code>, <code>club</code>, <code>payment</code>;
+  <a href="26-payments-webhooks.html">lesson 26</a>).
+</div>
+
+<h3>Status codes you will use</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Meaning</th><th>Example in Smart Campus</th></tr></thead>
+<tbody>
+<tr><td>200 OK</td><td>Here is the answer</td><td><code>GET /api/v1/platform/ping</code></td></tr>
+<tr><td>201 Created</td><td>I made a new resource (often with a <code>Location</code> header)</td><td>The dev-only outbox probe</td></tr>
+<tr><td>202 Accepted</td><td>I got your request; the work will finish later</td><td>Registration requests (planned)</td></tr>
+<tr><td>204 No Content</td><td>Done, nothing to return</td><td>A delete</td></tr>
+<tr><td>400 Bad Request</td><td>Your input is wrong</td><td><code>VALIDATION_FAILED</code></td></tr>
+<tr><td>401 / 403</td><td>Who are you? / You may not do this</td><td>Identity module (<a href="17-spring-security.html">lesson 17</a>)</td></tr>
+<tr><td>404 Not Found</td><td>No such resource or URL</td><td><code>NOT_FOUND</code></td></tr>
+<tr><td>409 Conflict</td><td>The request clashes with the current state</td><td><code>SECTION_FULL</code> (planned)</td></tr>
+<tr><td>429 Too Many Requests</td><td>Slow down</td><td><code>RATE_LIMITED</code> at the gateway (<a href="11-gateway-rate-limit.html">lesson 11</a>)</td></tr>
+<tr><td>500</td><td>A bug or crash on our side</td><td><code>INTERNAL_ERROR</code></td></tr>
+<tr><td>503 / 504</td><td>A backend is down / too slow (from the gateway)</td><td>Gateway errors (T13)</td></tr>
+</tbody></table></div>
+<p>Rule of thumb: <strong>4xx = the caller must change something; 5xx = we must fix
+something.</strong></p>
+
+<h2 id="conventions">3. Our API conventions (Arch §7)</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Concern</th><th>Rule</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td>URL</td><td><code>/api/v1/{module}/{resource}</code>, plural nouns, no verbs</td><td><code>/api/v1/registration/enrollments</code></td></tr>
+<tr><td>One item</td><td>Resource id in the path</td><td><code>/api/v1/course/sections/{sectionId}</code></td></tr>
+<tr><td>JSON field names</td><td><code>camelCase</code></td><td><code>"sectionId"</code>, not <code>"section_id"</code></td></tr>
+<tr><td>Time</td><td>UTC, ISO-8601 text</td><td><code>"2026-11-17T08:00:01Z"</code></td></tr>
+<tr><td>Pagination</td><td><code>?page=0&amp;size=20&amp;sort=createdAt,desc</code>; the answer carries <code>content</code>, <code>page</code>, <code>totalElements</code></td><td>Lists of listings, notifications…</td></tr>
+<tr><td>Errors</td><td>Problem JSON with <code>code</code> (section 6)</td><td><code>SECTION_FULL</code></td></tr>
+<tr><td>Docs</td><td>OpenAPI 3 from springdoc, one group per module</td><td><code>/v3/api-docs/platform</code></td></tr>
+</tbody></table></div>
+<p>The <code>v1</code> is the API version. If we ever must break clients, a <code>v2</code> path can
+live next to <code>v1</code> for a while. The <code>{module}</code> part matches the module id, so
+the gateway can route by prefix (<code>/api/v1/registration/**</code> goes to
+registration-service).</p>
+<p>The ping endpoint already follows the rules. Note the record, the injected <code>Clock</code>, and
+the <code>Instant</code> that Jackson writes as ISO-8601 UTC:</p>
+<pre data-file="backend/core-app/src/main/java/edu/campus/platform/PingController.java (part)"><code><span class="k">@RestController</span>
+<span class="k">@RequestMapping</span>(<span class="s">"/api/v1/platform"</span>)
+class PingController {
+
+    record Ping(String app, String version, Instant time) {}
+
+    <span class="k">@GetMapping</span>(<span class="s">"/ping"</span>)
+    Ping ping() {
+        return new Ping(app, version, clock.instant());   <span class="c">// {"app":"core-app","version":"…","time":"2026-…Z"}</span>
+    }
+}</code></pre>
+<p>The exact Java record for a page answer is not built yet. It will come with the first list
+endpoint (planned), following the field names above.</p>
+
+<h2 id="validation">4. Checking input: Bean Validation</h2>
+<p><strong>Jakarta Bean Validation</strong> lets you write the rules on the record itself, as
+annotations. Spring checks them when you mark the parameter with <code>@Valid</code>. (Needs
+<code>spring-boot-starter-validation</code>; <code>platform-starter</code> already brings it.)</p>
+<pre data-file="Example: a request body for a planned course endpoint"><code>package edu.campus.course;
+
+public record NewCourse(
+        <span class="k">@NotBlank</span> <span class="k">@Size</span>(max = 20) String code,     <span class="c">// "CS101"</span>
+        <span class="k">@NotBlank</span> String name,
+        <span class="k">@Min</span>(1) <span class="k">@Max</span>(30) int credits) {}
+
+<span class="k">@PostMapping</span>(<span class="s">"/api/v1/course/courses"</span>)
+<span class="k">@ResponseStatus</span>(HttpStatus.CREATED)
+CourseView create(<span class="k">@Valid</span> <span class="k">@RequestBody</span> NewCourse body) { … }</code></pre>
+<p>If <code>name</code> is blank and <code>credits</code> is 99, the controller method never runs.
+Spring throws, and our handler answers:</p>
+<pre data-file="400 response (shape tested by ProblemJsonIT)"><code>HTTP/1.1 400
+Content-Type: application/problem+json
+
+{
+  "type": "https://campus.edu/problems/validation-failed",
+  "title": "Validation failed",
+  "status": 400,
+  "detail": "The request has 2 invalid field(s)",
+  "code": "VALIDATION_FAILED",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "errors": [
+    {"field": "name",    "message": "must not be blank"},
+    {"field": "credits", "message": "must be less than or equal to 30"}
+  ]
+}</code></pre>
+<div class="callout tip">
+  <span class="title">Validation is for shape, not for business rules</span>
+  "Name is not blank" is shape: an annotation. "The section still has a seat" needs the database:
+  that is business logic in the service, which throws a <code>CampusProblem</code> with a
+  <code>409</code> code.
+</div>
+
+<h2 id="async">5. Slow work: 202 Accepted and polling</h2>
+<p>Some work cannot finish inside one HTTP request. In the registration rush, the server checks the
+seat in Redis in milliseconds, puts the request on Kafka, and a worker writes the enrollment later
+(Arch §5). The API says so honestly:</p>
+<div class="flow">
+  <div class="box accent"><b>1. POST</b>…/registration/requests<br>with Idempotency-Key</div>
+  <div class="arrow">→</div>
+  <div class="box"><b>2. 202 Accepted</b>body: request id, status PENDING<br>Location: …/requests/{id}</div>
+  <div class="arrow">→</div>
+  <div class="box"><b>3. GET</b>…/requests/{id}<br>every second or two</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>4. Final status</b>CONFIRMED or a problem such as SECTION_FULL</div>
+</div>
+<p>This is <strong>polling</strong>: the client asks again until the answer is final. Map C8 decided
+that registration ships with polling first; a WebSocket push is added later when
+<code>notification</code> exists (<a href="24-realtime-notifications.html">lesson 24</a>). Names above
+are the planned shape; the <code>registration</code> spec will fix them. The frontend must show a
+"pending" state (ADR-7's accepted trade-off).</p>
+
+<h2 id="problem">6. One error format: problem details</h2>
+<p><strong>RFC 9457</strong> "Problem Details for HTTP APIs" is a standard JSON shape for errors,
+sent with the media type <code>application/problem+json</code>. It replaced the older
+<strong>RFC 7807</strong>, which our spec and Arch mention: same fields, small clarifications. The
+standard fields:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th><th>Our use</th></tr></thead>
+<tbody>
+<tr><td><code>type</code></td><td>A URI that names the kind of problem</td><td><code>https://campus.edu/problems/not-found</code></td></tr>
+<tr><td><code>title</code></td><td>Short summary, the same every time for this type</td><td><code>"Not found"</code></td></tr>
+<tr><td><code>status</code></td><td>The HTTP status, repeated in the body</td><td><code>404</code></td></tr>
+<tr><td><code>detail</code></td><td>What went wrong <em>this</em> time, for humans</td><td><code>"Course CS101 does not exist"</code></td></tr>
+<tr><td><code>instance</code></td><td>Optional URI of this one occurrence</td><td>Not used</td></tr>
+</tbody></table></div>
+<p>The RFC allows <strong>extension members</strong> (extra fields). We add two, on every error:</p>
+<ul>
+  <li><strong><code>code</code></strong>: a stable machine code like <code>SECTION_FULL</code>. The
+      frontend switches on this, never on <code>detail</code> text, which may change or be translated.</li>
+  <li><strong><code>traceId</code></strong>: 32 hex characters. A student can quote it, and support
+      finds the exact log lines. Also sent as the <code>X-Trace-Id</code> header (T8; T16 replaces it
+      with the real OpenTelemetry trace id).</li>
+</ul>
+<div class="callout bad">
+  <span class="title">Never leak internals</span>
+  A 500 answer says only "An unexpected error occurred. Quote traceId … when you report it." The
+  stack trace goes to the log, never to the client. <code>ProblemJsonIT</code> checks this with an
+  endpoint that throws "db password is hunter2" and asserts the text does not appear.
+</div>
+
+<h2 id="handler">7. How our errors are made</h2>
+<p>Three pieces, in two libraries:</p>
+<pre data-file="backend/shared-kernel/src/main/java/edu/campus/kernel/error/ProblemCode.java (part)"><code>public enum ProblemCode {
+    INTERNAL_ERROR(500, <span class="s">"Internal error"</span>),
+    VALIDATION_FAILED(400, <span class="s">"Validation failed"</span>),
+    NOT_FOUND(404, <span class="s">"Not found"</span>),
+    CONFLICT(409, <span class="s">"Conflict"</span>),
+    RATE_LIMITED(429, <span class="s">"Rate limited"</span>);
+    <span class="c">// type() = https://campus.edu/problems/ + name in kebab-case</span>
+}</code></pre>
+<p>Feature modules will add their own codes (for example <code>SECTION_FULL</code>,
+<code>SCHEDULE_CONFLICT</code> from Arch §7) when they need them. To fail a request, a service throws:</p>
+<pre data-file="Any service (shared-kernel CampusProblem)"><code>throw new CampusProblem(ProblemCode.NOT_FOUND, <span class="s">"Course %s does not exist"</span>.formatted(code));</code></pre>
+<p><code>CampusProblem</code> is a plain <code>RuntimeException</code> in <code>shared-kernel</code>, with
+no Spring in it. The web part lives in <code>platform-starter</code>:</p>
+<div class="flow">
+  <div class="box"><b>Controller / service</b>throws CampusProblem, or @Valid fails, or a bug</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>CampusProblemHandler</b>@RestControllerAdvice, extends ResponseEntityExceptionHandler</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>ProblemBody record</b>written as application/problem+json</div>
+</div>
+<div class="table-wrap"><table>
+<thead><tr><th>What happened</th><th>Answer</th></tr></thead>
+<tbody>
+<tr><td><code>CampusProblem</code></td><td>Status, title and type from its <code>ProblemCode</code>; its detail</td></tr>
+<tr><td><code>@Valid</code> failed</td><td>400 <code>VALIDATION_FAILED</code> + <code>errors[]</code></td></tr>
+<tr><td>No endpoint for the URL</td><td>404 <code>NOT_FOUND</code></td></tr>
+<tr><td>Other Spring MVC errors (405, 415, bad JSON)</td><td>Spring's status, code from it (e.g. <code>METHOD_NOT_ALLOWED</code>)</td></tr>
+<tr><td>Anything else</td><td>500 <code>INTERNAL_ERROR</code>, generic detail, full error logged with the traceId</td></tr>
+</tbody></table></div>
+<p>An app gets all of this just by depending on <code>platform-starter</code>: the handler is
+registered by auto-configuration (<a href="03-spring-boot.html">lesson 03</a>). It is also listed for
+<code>@WebMvcTest</code>, so controller slice tests see the same error JSON
+(<code>PingControllerTest.wrongMethodGivesProblemJson</code>).</p>
+
+<h2 id="openapi">8. OpenAPI docs with springdoc</h2>
+<p><strong>OpenAPI</strong> is a standard JSON (or YAML) description of an HTTP API: every path,
+method, parameter, request body, response and schema. <strong>springdoc</strong> builds it at
+startup by reading your controllers, records and annotations. No hand-written docs that go stale.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>URL on core-app (:8081)</th><th>What you get</th></tr></thead>
+<tbody>
+<tr><td><code>/v3/api-docs/platform</code></td><td>The OpenAPI JSON of the <code>platform</code> group</td></tr>
+<tr><td><code>/v3/api-docs/swagger-config</code></td><td>The list of groups that Swagger UI shows</td></tr>
+<tr><td><code>/swagger-ui.html</code></td><td>A web page to read and try the endpoints, with a group selector</td></tr>
+</tbody></table></div>
+
+<h3>What platform-starter adds (T9)</h3>
+<ul>
+  <li><strong>A shared <code>Problem</code> schema</strong> (and <code>FieldError</code>), plus a
+      <code>default</code> response on <em>every</em> operation pointing to it. "default" in OpenAPI
+      means "any status not listed". So the frontend gets one <code>Problem</code> type for all
+      errors (<code>ProblemSchemaCustomizer</code>, a <code>GlobalOpenApiCustomizer</code> that runs
+      for every group).</li>
+  <li><strong>A relative server URL <code>/</code></strong>, so the random test port or the gateway
+      host never ends up in the file.</li>
+  <li><strong>JSON as the default answer type</strong>, not <code>*/*</code>.</li>
+</ul>
+
+<h3>One group per module (core-app)</h3>
+<p><code>ModuleApiGroups</code> asks Spring Modulith for the module list and makes one group per
+module (<a href="06-spring-modulith.html">lesson 06</a>). New modules get a group with no code
+change. Dev-only endpoints are hidden with <code>@Hidden</code>
+(<code>OutboxProbeController</code>).</p>
+
+<h3>The export to <code>docs/api/</code></h3>
+<p><code>OpenApiExportIT</code> starts the app, downloads each group, sorts the keys, pretty-prints
+it with <code>\n</code> line ends, and then:</p>
+<div class="compare">
+  <div><h4><code>.\mvnw.cmd verify -Pexport-openapi</code></h4>
+    <p><strong>Writes</strong> <code>docs/api/core-app-&lt;group&gt;.json</code>. You commit the
+    diff. Runs only this one IT, so it is quick.</p></div>
+  <div><h4>Normal <code>.\mvnw.cmd verify</code></h4>
+    <p><strong>Compares</strong> and fails with "out of date. Run ./mvnw verify -Pexport-openapi"
+    if you changed an endpoint and forgot to export.</p></div>
+</div>
+<p>Why sorted and pretty? So the same API gives the <strong>same bytes</strong> every time
+("deterministic"). Then a git diff shows only real API changes, and two runs in a row give no diff.</p>
+
+<h3>Looking ahead: generated TypeScript types</h3>
+<p>In T19 (planned), <code>npm run gen:api</code> runs <strong>openapi-typescript</strong> on
+<code>docs/api/*.json</code> and writes types into <code>frontend/web/src/shared/api/generated/</code>.
+If a backend record changes, the frontend stops compiling until it is updated. CI also checks that
+the generated files are up to date. See <a href="14-frontend-api-testing.html">lesson 14</a>.</p>
+<pre class="diagram">Java record + @RestController ──► springdoc ──► /v3/api-docs/&lt;group&gt;
+        ──► OpenApiExportIT ──► docs/api/core-app-&lt;group&gt;.json  (committed)
+        ──► openapi-typescript (T19) ──► TypeScript types the website compiles against</pre>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Error codes and exception</td><td><code>backend/shared-kernel/src/main/java/edu/campus/kernel/error/ProblemCode.java</code>, <code>CampusProblem.java</code></td><td>T4</td></tr>
+<tr><td>Error handler and body</td><td><code>backend/platform-starter/src/main/java/edu/campus/starter/problem/</code></td><td>T8</td></tr>
+<tr><td>Trace id filter and header</td><td><code>backend/platform-starter/src/main/java/edu/campus/starter/trace/TraceIdFilter.java</code></td><td>T8 (T16 replaces)</td></tr>
+<tr><td>Error tests (the 4 kinds)</td><td><code>backend/platform-starter/src/test/java/edu/campus/starter/problem/ProblemJsonIT.java</code></td><td>T8</td></tr>
+<tr><td>Problem schema in the docs</td><td><code>platform-starter/…/starter/openapi/ProblemSchemaCustomizer.java</code></td><td>T9</td></tr>
+<tr><td>One group per module</td><td><code>backend/core-app/src/main/java/edu/campus/platform/ModuleApiGroups.java</code></td><td>T9</td></tr>
+<tr><td>Export and check</td><td><code>backend/core-app/src/test/java/edu/campus/OpenApiExportIT.java</code>, profile in root <code>pom.xml</code></td><td>T9</td></tr>
+<tr><td>Exported doc</td><td><code>docs/api/core-app-platform.json</code></td><td>T9</td></tr>
+<tr><td>Generated frontend types</td><td><code>frontend/web/src/shared/api/generated/</code> (planned)</td><td>T19</td></tr>
+<tr><td>202 + polling, Idempotency-Key</td><td><code>registration</code> module (planned)</td><td>module 5</td></tr>
+</tbody></table></div>
+<p>Learning notes: <a href="../learn/platform/task8.md">task8.md</a> and
+<a href="../learn/platform/task9.md">task9.md</a>.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Verbs in URLs</strong> (<code>/api/v1/course/createCourse</code>). Use
+      <code>POST /api/v1/course/courses</code>.</li>
+  <li><strong>Returning 200 with <code>{"success": false}</code>.</strong> Use a real status code
+      and a problem body.</li>
+  <li><strong>Building your own error JSON in a controller.</strong> Throw a
+      <code>CampusProblem</code>; the handler makes the body.</li>
+  <li><strong>Frontend code that checks <code>detail</code> text.</strong> Switch on
+      <code>code</code>.</li>
+  <li><strong>Local times without a zone</strong> (<code>LocalDateTime</code> in an API). Send
+      <code>Instant</code>, which becomes UTC ISO-8601.</li>
+  <li><strong>Changing an endpoint and not exporting.</strong> The build fails; run
+      <code>-Pexport-openapi</code> and commit <code>docs/api/</code>.</li>
+  <li><strong>Making a long job synchronous.</strong> If the work happens behind Kafka, answer 202
+      and give a status URL.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infra and core-app (dev profile), then try the happy path and three errors.
+      Look at the status, the <code>Content-Type</code> and the <code>X-Trace-Id</code> header:</p>
+<pre><code>curl.exe -i http://localhost:8081/api/v1/platform/ping
+curl.exe -i http://localhost:8081/api/v1/platform/nope
+curl.exe -i -X POST http://localhost:8081/api/v1/platform/ping
+curl.exe -i -X DELETE http://localhost:8081/api/v1/platform/ping</code></pre>
+      <p>Is the <code>traceId</code> in the body the same as the header?</p></li>
+  <li><p>Open <code>http://localhost:8081/swagger-ui.html</code>. Find the ping operation and its
+      <code>default</code> response. Click through to the <code>Problem</code> schema.</p></li>
+  <li><p>Read <code>ProblemJsonIT</code> and <code>TestApp</code> in
+      <code>backend/platform-starter/src/test/java/edu/campus/starter/</code>. Which test proves that a
+      stack trace never reaches the client?</p></li>
+  <li><p>Change <code>PingController.Ping</code> by adding a field (in a scratch branch). Run
+      <code>.\mvnw.cmd -pl backend/core-app -am verify</code> and read the failure. Then run
+      <code>.\mvnw.cmd verify -Pexport-openapi</code> and look at the git diff of
+      <code>docs/api/</code>. Undo your change afterwards.</p></li>
+  <li><p>On paper: design the planned endpoints for "list my enrollments" and "drop an
+      enrollment". Write the method, URL, success status and two possible problem codes for each.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Resource</td><td>A thing with a URL, like a course or an enrollment.</td></tr>
+<tr><td>Safe method</td><td>A method that changes nothing (GET).</td></tr>
+<tr><td>Idempotent method</td><td>Doing it twice has the same effect as once (PUT, DELETE).</td></tr>
+<tr><td>Idempotency key</td><td>A client-made id that lets the server spot a repeated POST.</td></tr>
+<tr><td>Bean Validation</td><td>Rules on fields as annotations (<code>@NotBlank</code>), checked by <code>@Valid</code>.</td></tr>
+<tr><td>202 Accepted</td><td>"I got it, the result comes later."</td></tr>
+<tr><td>Polling</td><td>Asking again and again until the answer is final.</td></tr>
+<tr><td>Problem details</td><td>The standard error JSON of RFC 9457 (was RFC 7807).</td></tr>
+<tr><td>Extension member</td><td>An extra field in a problem body, like our <code>code</code>.</td></tr>
+<tr><td>Trace id</td><td>An id that links one request's error, logs and trace.</td></tr>
+<tr><td>OpenAPI</td><td>A standard machine-readable description of an HTTP API.</td></tr>
+<tr><td>springdoc</td><td>The library that builds OpenAPI from Spring controllers.</td></tr>
+<tr><td>Deterministic</td><td>Same input, same output, every time.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do enrollment and payment POSTs need an <code>Idempotency-Key</code>, but a PUT does not?</summary>
+    <p>PUT is idempotent by definition: sending the same full version twice gives the same state.
+    POST creates something each time, so a retried POST could enroll a student twice or charge twice.
+    The key lets the server recognise the repeat.</p></details>
+  <details><summary>2. Why should the frontend switch on <code>code</code> and not on <code>detail</code>?</summary>
+    <p><code>detail</code> is human text that changes per case and may be reworded or translated.
+    <code>code</code> is a stable contract that the backend promises not to change.</p></details>
+  <details><summary>3. Why does a 500 answer contain a <code>traceId</code> but no error message from the exception?</summary>
+    <p>Exception messages can leak secrets or internals (SQL, passwords, class names). The trace id is
+    enough for support to find the full error in the logs.</p></details>
+  <details><summary>4. Registration answers 202 instead of 201. Why?</summary>
+    <p>The enrollment is not created yet when the HTTP answer is sent; a worker writes it later from
+    Kafka. 201 would be a lie. 202 plus a status URL tells the client to wait and check.</p></details>
+  <details><summary>5. Why is the exported OpenAPI file sorted and pretty-printed, with a relative server URL?</summary>
+    <p>So the same API always gives byte-identical files. Then git diffs show only real API changes,
+    and the build can compare the committed file with the running app.</p></details>
+  <details><summary>6. Why put the <code>Problem</code> schema in the OpenAPI doc at all?</summary>
+    <p>The frontend generates its types from the doc. With the schema there, it gets one typed
+    <code>Problem</code> for every error instead of guessing the shape.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457: Problem Details for HTTP APIs</a>.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9110#name-method-definitions">RFC 9110: HTTP Semantics, methods</a> and <a href="https://www.rfc-editor.org/rfc/rfc9110#name-status-codes">status codes</a>.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html">Spring Framework reference: Error responses</a>: <code>ResponseEntityExceptionHandler</code> and <code>ProblemDetail</code>.</li>
+  <li><a href="https://beanvalidation.org/">Jakarta Bean Validation</a> and <a href="https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html">Spring Framework reference: Java Bean Validation</a>.</li>
+  <li><a href="https://springdoc.org/">springdoc-openapi documentation</a>: groups, Swagger UI, customizers.</li>
+  <li><a href="https://spec.openapis.org/oas/latest.html">OpenAPI Specification</a>.</li>
+  <li><a href="https://openapi-ts.dev/">openapi-typescript</a>: generating TypeScript types from OpenAPI.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

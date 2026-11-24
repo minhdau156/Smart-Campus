@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Observability Lesson</title>
+<meta name="description" content="Smart Campus lesson 12: traces, logs and metrics with OpenTelemetry, Tempo, Loki, Prometheus and Grafana.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="12">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 12 · Part 1: Foundations</div>
+<h1>Observability: traces, logs, metrics</h1>
+<p class="lede">When a student says "registration was slow at 08:00", how do you find the one slow
+request among millions? Observability is the set of tools that let you look inside the running
+system and answer that question in minutes, not days.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every app</span>
+  <span class="badge task">T8 (done)</span>
+  <span class="badge task">T16</span>
+  <span class="badge task">T17</span>
+  <span class="badge task">T18</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="05-docker-compose.html">05 (Compose profiles, Dockerfiles)</a>,
+  <a href="07-kafka.html">07 (Kafka headers, consumer groups)</a> and
+  <a href="09-rest-problem-openapi.html">09 (problem JSON and its <code>traceId</code>)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#pillars">The three pillars</a></li>
+    <li><a href="#otel">OpenTelemetry in five words</a></li>
+    <li><a href="#traces">Traces, spans and <code>traceparent</code></a></li>
+    <li><a href="#agent">The Java agent, the Collector and Tempo</a></li>
+    <li><a href="#logs">JSON logs, MDC and Loki</a></li>
+    <li><a href="#metrics">Metrics: Micrometer and Prometheus</a></li>
+    <li><a href="#dashboards">Dashboards, alerts, RED and cardinality</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Smart Campus is not one program. One click from a student can travel through the
+<strong>gateway</strong>, then <strong>core-app</strong>, then <strong>Kafka</strong>, then
+<strong>notification-service</strong>. Each app writes its own logs, on its own machine or
+container. If something goes wrong, you need a way to see the <em>whole journey</em>.</p>
+<p>The Architecture document sets the goal: <em>"Find a slow request in minutes"</em>. The spec
+turns that into three success criteria that close in Phase 4:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Id</th><th>What must be true</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td><strong>B1</strong></td><td>One call to <code>/api/v1/platform/ping?emit=true</code> shows in Grafana/Tempo as
+    <strong>one trace</strong> across gateway → core-app → Kafka → a consumer in notification-service.</td><td>T16</td></tr>
+<tr><td><strong>B2</strong></td><td>Every app logs <strong>single-line JSON</strong> with <code>traceId</code> and
+    <code>spanId</code>. Loki can find the logs by <code>traceId</code>.</td><td>T17</td></tr>
+<tr><td><strong>B3</strong></td><td>Prometheus scrapes all 4 apps. The "Platform overview" dashboard shows request
+    rate, p95 latency per route, 5xx rate, JVM memory and Kafka consumer lag. Alert rules exist for
+    lag &gt; 30 s and 5xx &gt; 1%.</td><td>T18</td></tr>
+</tbody></table></div>
+<p>A good everyday picture: a hospital. <strong>Metrics</strong> are the heart-rate monitor (numbers
+over time). <strong>Logs</strong> are the nurse's notes (what happened, in words).
+<strong>Traces</strong> are the patient's path through the building (reception → X-ray → doctor),
+with the time spent in each room.</p>
+
+<h2 id="pillars">2. The three pillars</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Pillar</th><th>What it is</th><th>Answers</th><th>Stored in</th><th>Query language</th></tr></thead>
+<tbody>
+<tr><td><strong>Metrics</strong></td><td>Numbers counted or measured over time (requests per second, heap size)</td>
+    <td>"Is something wrong? Since when? How bad?"</td><td>Prometheus</td><td>PromQL</td></tr>
+<tr><td><strong>Logs</strong></td><td>Text events, one line per thing that happened</td>
+    <td>"What exactly happened, and with what values?"</td><td>Loki</td><td>LogQL</td></tr>
+<tr><td><strong>Traces</strong></td><td>The timed path of one request through all apps</td>
+    <td>"Where did this one request spend its time? Where did it fail?"</td><td>Tempo</td><td>TraceQL (or search by id)</td></tr>
+</tbody></table></div>
+<p>All three are shown in <strong>one</strong> UI: Grafana (port 3000). The spec chose Tempo
+instead of Jaeger exactly for this reason (spec Q5): one place to look.</p>
+<p>The pillars work together. A typical investigation:</p>
+<div class="flow">
+  <div class="box bad"><b>1. Metric alert</b>5xx rate over 1% on core-app</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>2. Logs</b>Filter ERROR lines in Loki, copy a <code>traceId</code></div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>3. Trace</b>Open it in Tempo: the Kafka send took 30 s</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>4. Cause</b>Kafka was down; the outbox retried later</div>
+</div>
+<p>The glue between them is the <strong>trace id</strong>: a 32-character hex id that is the same
+in the trace, in every log line of that request, and in the problem JSON the user sees.</p>
+
+<h2 id="otel">3. OpenTelemetry in five words</h2>
+<p><strong>OpenTelemetry</strong> (short: <strong>OTel</strong>) is an open standard plus free tools
+for producing traces, metrics and logs. It is not a database and not a UI. It only
+<em>creates</em> and <em>sends</em> the data. Five words to know:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning</th><th>In Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><strong>API</strong></td><td>The interfaces your code can call: "start a span", "get the current span". Does nothing by itself.</td>
+    <td>Used in T16.6 to read the current trace id</td></tr>
+<tr><td><strong>SDK</strong></td><td>The real implementation behind the API: collects spans, batches them, exports them.</td>
+    <td>Comes inside the Java agent</td></tr>
+<tr><td><strong>Java agent</strong></td><td>A jar that the JVM loads at start (<code>-javaagent</code>). It changes library code while it loads ("auto-instrumentation"), so HTTP, JDBC and Kafka calls create spans with <em>no code changes</em>.</td>
+    <td>Attached to all 4 apps (T16)</td></tr>
+<tr><td><strong>OTLP</strong></td><td>"OpenTelemetry Protocol": the wire format for sending telemetry. Port 4317 = gRPC, port 4318 = HTTP.</td>
+    <td>Agent → Collector</td></tr>
+<tr><td><strong>Collector</strong></td><td>A separate program that receives OTLP, can batch or filter it, and forwards it to backends.</td>
+    <td>Collector → Tempo (traces), → Loki (logs)</td></tr>
+</tbody></table></div>
+
+<div class="flow">
+  <div class="box project"><b>4 apps</b>gateway, core-app, registration, notification<br>each with the Java agent</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>OTel Collector</b>receives OTLP<br>batches</div>
+  <div class="arrow">→</div>
+  <div class="box"><b>Tempo</b> traces<br><b>Loki</b> logs</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>Grafana</b>one UI on :3000</div>
+</div>
+<p>Metrics take a different road: Prometheus <em>pulls</em> them from each app (section 7).</p>
+
+<div class="callout tip">
+  <span class="title">Why a Collector in the middle?</span>
+  The apps only need to know one address (the Collector). If we later change Tempo for another
+  backend, or add a second one, only the Collector config changes. No app is rebuilt.
+</div>
+
+<h2 id="traces">4. Traces, spans and <code>traceparent</code></h2>
+<p>A <strong>span</strong> is one timed piece of work: "handle HTTP GET /ping", "INSERT into
+event_publication", "send to Kafka". It has a name, a start time, a duration, some attributes
+(key/value facts) and a status (OK or error). Spans form a tree: each span (except the first) has
+a <strong>parent</strong>. All spans of one request share one <strong>trace id</strong>. The whole
+tree is the <strong>trace</strong>.</p>
+
+<pre class="diagram">Trace 4bf92f3577b34da6a3ce929d0e0e4736  (the B1 request, times are made up)
+
+gateway        GET /api/v1/platform/ping            |=================================|  41 ms
+core-app         GET /api/v1/platform/ping          |=========================|          30 ms
+core-app           INSERT platform.event_publication  |==|                               3 ms
+core-app           campus.events publish                    |====|   (after commit)      6 ms
+notification-svc     campus.events process                       |=======|               9 ms
+notification-svc       INSERT notification.processed_events        |=|                   1 ms</pre>
+
+<p>Tempo draws exactly this kind of picture (a "waterfall"). A long bar shows you where the time went.</p>
+
+<h3>How does the next app know the trace id?</h3>
+<p>Each app runs in its own process. The trace id must travel <em>with the message</em>. This is
+called <strong>context propagation</strong>. The standard way is the
+<strong>W3C Trace Context</strong> header named <code>traceparent</code>:</p>
+<pre data-file="One traceparent header"><code>traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             │  │                                │                └ flags: 01 = sampled (keep it)
+             │  │                                └ parent span id (16 hex chars)
+             │  └ trace id (32 hex chars), the same for the whole journey
+             └ version</code></pre>
+
+<div class="flow">
+  <div class="box"><b>Browser</b>GET /api/v1/platform/ping?emit=true</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>gateway</b>starts the trace<br>adds <code>traceparent</code> to the HTTP call</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>core-app</b>reads the header<br>adds <code>traceparent</code> to the <b>Kafka record headers</b></div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>notification-service</b>reads the Kafka header<br>continues the same trace</div>
+</div>
+
+<p>Kafka records have <strong>headers</strong> (small key/value pairs next to the key and value),
+just like HTTP. Spec decision <strong>D4</strong> says the trace context travels in Kafka headers,
+<strong>not in the event payload</strong>. The business data in <code>DomainEvent</code> stays
+clean, and a replayed event does not carry fake "business" fields (see
+<a href="08-outbox-idempotency.html">lesson 08</a>).</p>
+
+<div class="callout warn">
+  <span class="title">Outbox and traces: a thing T16 must check</span>
+  Our events are sent <em>after commit</em>, on a background thread (the outbox, lesson 08). The
+  agent normally carries the context into such threads, so the Kafka send joins the request's
+  trace. But an event that the <code>OutboxRetryJob</code> resends 30 seconds later runs in a
+  scheduled job, not in the request, so it will most likely appear as a separate trace. That is
+  fine; just do not be surprised by it.
+</div>
+
+<h2 id="agent">5. The Java agent, the Collector and Tempo</h2>
+<h3>Attaching the agent (T16.1 to T16.3)</h3>
+<p>The JVM option <code>-javaagent:&lt;path to jar&gt;</code> loads the agent before your
+<code>main</code> method. The plan has three steps:</p>
+<ol>
+  <li><strong>16.1</strong> Pin the agent version in the root <code>pom.xml</code>
+      <code>&lt;properties&gt;</code> and copy the jar (Maven artifact
+      <code>io.opentelemetry.javaagent:opentelemetry-javaagent</code>) to <code>target/otel/</code>
+      with <code>maven-dependency-plugin</code>. No manual download, and the version is in one place.</li>
+  <li><strong>16.2</strong> A Maven profile, active only when the env var
+      <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> is set, adds <code>-javaagent</code> to
+      <code>spring-boot:run</code> and sets <code>service.name</code> per app.</li>
+  <li><strong>16.3</strong> The shared Dockerfile copies the agent into the image. In the Compose
+      <code>apps</code> profile it is switched on with <code>JAVA_TOOL_OPTIONS</code>.</li>
+</ol>
+
+<pre data-file="infra/docker/spring-app.Dockerfile (planned in T15/T16, sketch)"><code><span class="c"># … stage 2: the runtime image …</span>
+COPY target/otel/opentelemetry-javaagent.jar /otel/opentelemetry-javaagent.jar
+<span class="c"># The agent is in the image, but only used when JAVA_TOOL_OPTIONS says so.</span></code></pre>
+
+<pre data-file="infra/docker-compose.yml, one app (planned, sketch)"><code>  core-app:
+    profiles: [apps]
+    environment:
+      JAVA_TOOL_OPTIONS: &gt;-
+        -XX:MaxRAMPercentage=75
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: core-app                        <span class="c"># the name you see in Tempo</span>
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318</code></pre>
+
+<p>The agent is configured with <code>OTEL_*</code> environment variables (or
+<code>-Dotel.*</code> system properties). The most important ones:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Setting</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>OTEL_SERVICE_NAME</code></td><td>The app's name in every span and log (<code>core-app</code>, <code>gateway</code>, …)</td></tr>
+<tr><td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></td><td>Where to send OTLP data (the Collector)</td></tr>
+<tr><td><code>OTEL_TRACES_EXPORTER</code>, <code>OTEL_LOGS_EXPORTER</code>, <code>OTEL_METRICS_EXPORTER</code></td>
+    <td>Which signals to send. Metrics in this project go through Prometheus instead, so T16/T18
+    will probably turn the agent's metric export off (check the agent docs for the default).</td></tr>
+</tbody></table></div>
+
+<div class="callout project">
+  <span class="title">"Builds and tests still pass with no collector running" (T16 Done when)</span>
+  This is why the agent is only attached when the endpoint is set. <code>./mvnw verify</code> and CI
+  never need the observability stack. Telemetry is a tool for running systems, not a build
+  dependency.
+</div>
+
+<h3>From our fake trace id to the real one (T16.6)</h3>
+<p>Since T8, <code>platform-starter</code> already gives every request a trace id. But it is
+<em>made up</em> by our own filter, because no tracing existed yet:</p>
+<pre data-file="backend/platform-starter/src/main/java/edu/campus/starter/trace/TraceIdFilter.java (part)"><code>String traceId = newTraceId();          <span class="c">// random UUID without dashes = 32 hex chars</span>
+MDC.put(MDC_KEY, traceId);              <span class="c">// "traceId" in the log context</span>
+response.setHeader(HEADER, traceId);    <span class="c">// X-Trace-Id response header</span>
+try {
+    chain.doFilter(request, response);
+} finally {
+    MDC.remove(MDC_KEY);                <span class="c">// the thread goes back to the pool</span>
+}</code></pre>
+<p>The problem handler asks a <code>TraceIdProvider</code> interface for the id, so it does not
+care where the id comes from. T16.6 swaps the implementation:</p>
+<pre data-file="T16.6 idea (sketch, not real code yet)"><code>public String traceId() {
+    SpanContext ctx = Span.current().getSpanContext();  <span class="c">// OpenTelemetry API</span>
+    return ctx.isValid() ? ctx.getTraceId()             <span class="c">// agent attached: the real id</span>
+                         : TraceIdFilter.newTraceId();  <span class="c">// no agent: old behaviour</span>
+}</code></pre>
+<p>Without the agent, the OTel API is a "no-op" (it does nothing) and returns an invalid, all-zero
+id. That is why there is a fallback. The format (32 hex chars) was chosen in T8 to match, so
+nothing else changes.</p>
+
+<h3>The Collector pipeline (T16.4)</h3>
+<p>A Collector config has <strong>receivers</strong> (data in), <strong>processors</strong> (change
+or batch it), <strong>exporters</strong> (data out), and <strong>pipelines</strong> that connect
+them, one pipeline per signal type.</p>
+<pre data-file="infra/otel/collector.yaml (planned, sketch: check component names for your Collector version)"><code>receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+      http: { endpoint: 0.0.0.0:4318 }
+processors:
+  batch: {}                         <span class="c"># send in groups, not one span at a time</span>
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317            <span class="c"># Tempo also speaks OTLP</span>
+    tls: { insecure: true }         <span class="c"># dev only, inside the Compose network</span>
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]
+    <span class="c"># logs: added in T17 (OTLP → Loki)</span></code></pre>
+
+<p>Grafana gets its data sources from a <strong>provisioned file</strong>, so nobody clicks them
+together by hand and the setup is in Git:</p>
+<pre data-file="infra/grafana/provisioning/datasources/datasources.yaml (planned, sketch)"><code>apiVersion: 1
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    url: http://tempo:3200
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    url: http://prometheus:9090</code></pre>
+
+<h2 id="logs">6. JSON logs, MDC and Loki</h2>
+<h3>Why JSON?</h3>
+<div class="compare">
+  <div class="poor"><h4>Plain text</h4>
+    <p><code>2026-11-24 08:00:01 ERROR [core-app] Section S1 full, trace 4bf9…</code></p>
+    <p>A human can read it. A machine must guess where each field starts. Multi-line stack traces
+    break into many "lines".</p></div>
+  <div class="good"><h4>Structured JSON, one line</h4>
+    <p><code>{"@timestamp":"…","log.level":"ERROR","service.name":"core-app",
+    "message":"Section S1 full","traceId":"4bf9…","spanId":"00f0…"}</code></p>
+    <p>Every field has a name. Loki and Grafana can filter by <code>traceId</code> or level
+    exactly. The stack trace is one field.</p></div>
+</div>
+<p>Spring Boot has <strong>built-in structured logging</strong>: one property switches the console
+output to JSON. No extra library is needed. T17.1 turns it on for non-test profiles, and T17.2 keeps
+plain text in tests so test output stays readable.</p>
+<pre data-file="platform-starter logging defaults (planned in T17, sketch)"><code>logging:
+  structured:
+    format:
+      console: ecs        <span class="c"># built-in formats: ecs, logstash, gelf</span></code></pre>
+<p>The exact field names depend on the format you pick (ECS, Logstash or GELF). Look at a real
+line after T17.1 and check that the names <code>traceId</code> and <code>spanId</code> are really
+there (that is a "Done when" of T17).</p>
+
+<h3>MDC: how <code>traceId</code> gets into every line</h3>
+<p><strong>MDC</strong> ("Mapped Diagnostic Context") is a small map that belongs to the current
+thread. Whatever you put into it, the logger can add to <em>every</em> line written by that thread.
+Think of a name badge: you put it on once at the door, and everyone you meet sees it.</p>
+<ul>
+  <li><strong>Today (T8):</strong> our <code>TraceIdFilter</code> puts <code>traceId</code> in the
+      MDC and removes it in <code>finally</code>. Threads are reused from a pool; forgetting
+      <code>remove</code> would give the <em>next</em> request the old id.</li>
+  <li><strong>After T16:</strong> the Java agent also writes the current trace and span id into the
+      logging MDC. By default the agent uses the keys <code>trace_id</code> and
+      <code>span_id</code> (check the agent's logger-MDC docs). T17.1 must make sure the JSON
+      lines end up with <code>traceId</code> and <code>spanId</code>, as B2 requires.</li>
+</ul>
+
+<h3>Loki and LogQL (T17.3 to T17.5)</h3>
+<p><strong>Loki</strong> stores logs cheaply. It does <em>not</em> index the full text. It indexes
+only a few <strong>labels</strong> (like <code>service_name</code>) and then scans the matching
+lines. In T17 the logs go app → (agent, OTLP) → Collector → Loki. Newer Loki versions accept OTLP
+directly; check the Loki and Collector docs for the exact exporter.</p>
+<p>A <strong>LogQL</strong> query has two parts: a <em>stream selector</em> in <code>{ }</code>
+(which labels), then optional <em>filters</em> after pipes:</p>
+<pre data-file="LogQL examples (label names: check them in Grafana's label browser)"><code><span class="c"># all lines of core-app that contain this trace id</span>
+{service_name="core-app"} |= "4bf92f3577b34da6a3ce929d0e0e4736"
+
+<span class="c"># parse JSON fields, then keep only errors</span>
+{service_name="core-app"} | json | level="ERROR"
+
+<span class="c"># number of error lines per minute, per app (LogQL can make metrics too)</span>
+sum by (service_name) (count_over_time({service_name=~".+"} |= "ERROR" [1m]))</code></pre>
+
+<p>T17.4 adds the links between the two UIs:</p>
+<ul>
+  <li><strong>Logs → trace:</strong> a "derived field" on the Loki data source finds the trace id in a
+      log line and turns it into a link to Tempo.</li>
+  <li><strong>Trace → logs:</strong> Tempo's "trace to logs" setting opens Loki filtered by this trace
+      id.</li>
+</ul>
+<p>So the user who got a problem JSON with <code>"traceId":"4bf9…"</code> can give you that id, and
+you go straight to the trace and all its log lines.</p>
+
+<h2 id="metrics">7. Metrics: Micrometer and Prometheus</h2>
+<h3>Micrometer: the metrics API of Spring</h3>
+<p><strong>Micrometer</strong> is to metrics what SLF4J is to logs: one API in your code, many
+possible backends. Spring Boot Actuator already records many metrics with it (HTTP requests, JVM
+memory, threads, Kafka clients, connection pool). You can add your own:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>What it measures</th><th>Smart Campus example</th></tr></thead>
+<tbody>
+<tr><td><strong>Counter</strong></td><td>Only goes up. Count of events.</td><td>Seat requests rejected with <code>SECTION_FULL</code> (registration module)</td></tr>
+<tr><td><strong>Gauge</strong></td><td>A value right now; can go up or down.</td><td>JVM heap used; outbox rows not yet completed</td></tr>
+<tr><td><strong>Timer</strong></td><td>How long something takes, plus how many times.</td><td>HTTP request time (<code>http.server.requests</code>, automatic)</td></tr>
+<tr><td><strong>Histogram</strong> (distribution)</td><td>Counts values in buckets (≤ 10 ms, ≤ 50 ms, …) so you can calculate percentiles later.</td><td>Request latency buckets for p95</td></tr>
+</tbody></table></div>
+<pre data-file="A counter in a future module (sketch)"><code>class SeatMetrics {
+    private final Counter sectionFull;
+
+    SeatMetrics(MeterRegistry registry) {
+        this.sectionFull = Counter.builder("campus.registration.section.full")
+                .description("Seat requests rejected because the section was full")
+                .register(registry);
+    }
+
+    void onSectionFull() { sectionFull.increment(); }
+}</code></pre>
+
+<h3>Prometheus pulls ("scrapes")</h3>
+<p><strong>Prometheus</strong> is a time-series database. Every few seconds it calls an HTTP
+endpoint on each app and saves the numbers. This is called a <strong>scrape</strong>. With the
+<code>micrometer-registry-prometheus</code> dependency, Actuator serves that endpoint at
+<code>/actuator/prometheus</code>. Today our apps expose only <code>health, info</code>; T18.1
+adds <code>prometheus</code> in the starter and turns on latency histograms for HTTP requests.</p>
+<pre data-file="T18.1 idea (sketch)"><code>management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true    <span class="c"># buckets, so p95 can be calculated in PromQL</span></code></pre>
+<pre data-file="infra/prometheus/prometheus.yml (planned in T18.2, sketch)"><code>scrape_configs:
+  - job_name: apps-local            <span class="c"># apps started with spring-boot:run on your PC</span>
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:8080", "host.docker.internal:8081",
+                  "host.docker.internal:8082", "host.docker.internal:8083"]
+  - job_name: apps-compose          <span class="c"># apps in the Compose "apps" profile</span>
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:8080", "core-app:8081",
+                  "registration-service:8082", "notification-service:8083"]</code></pre>
+<p>Only one of the two jobs will be <code>UP</code> at a time, depending on the run mode. That is
+expected. (Container names and ports above follow the spec; T15/T18 fix the real values.)</p>
+
+<h3>PromQL: <code>rate()</code> and <code>histogram_quantile()</code></h3>
+<p>Micrometer's HTTP timer appears in Prometheus as several series, for example
+<code>http_server_requests_seconds_count</code> (number of requests),
+<code>…_sum</code> (total seconds) and <code>…_bucket</code> (histogram buckets, with a label
+<code>le</code> = "less or equal"). Each has labels like <code>uri</code>, <code>method</code>,
+<code>status</code>.</p>
+<pre data-file="PromQL you will use in T18"><code><span class="c"># Request rate: requests per second, averaged over 5 minutes, per route</span>
+sum by (uri) (rate(http_server_requests_seconds_count[5m]))
+
+<span class="c"># 5xx ratio: errors / all requests (0.01 = 1%)</span>
+  sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+/ sum(rate(http_server_requests_seconds_count[5m]))
+
+<span class="c"># p95 latency per route, in seconds</span>
+histogram_quantile(0.95,
+  sum by (le, uri) (rate(http_server_requests_seconds_bucket[5m])))</code></pre>
+<ul>
+  <li>A counter only grows (12 000, 12 050, …). The raw number is useless. <code>rate(x[5m])</code>
+      turns it into "per second, over the last 5 minutes". Always <code>rate</code> a counter
+      before you <code>sum</code> it.</li>
+  <li><strong>p95</strong> ("95th percentile") = 95% of requests were faster than this. It is better
+      than the average: an average hides the slow 5% that make students angry. The Architecture
+      target is <em>p95 under 500 ms</em> during registration.</li>
+  <li><code>histogram_quantile</code> needs the <code>le</code> label kept in the <code>sum by</code>.
+      Forgetting <code>le</code> is the most common p95 mistake.</li>
+</ul>
+
+<h2 id="dashboards">8. Dashboards, alerts, RED and cardinality</h2>
+<h3>The RED method</h3>
+<p>For every service that answers requests, watch three things. They are easy to remember:</p>
+<div class="flow">
+  <div class="box accent"><b>R = Rate</b>How many requests per second?</div>
+  <div class="box bad"><b>E = Errors</b>How many of them fail (5xx)?</div>
+  <div class="box project"><b>D = Duration</b>How long do they take (p95)?</div>
+</div>
+<p>The "Platform overview" dashboard (T18.5) is RED plus a few platform signals: request rate,
+p95 per route, 5xx rate, <strong>429 rate</strong> (the gateway rate limiter, lesson
+<a href="11-gateway-rate-limit.html">11</a>), JVM heap, and Kafka consumer lag.</p>
+
+<h3>Dashboards as files</h3>
+<p>A Grafana dashboard is a JSON document. We do not build it by clicking and hope it survives. We
+save the JSON in Git and Grafana loads it at start (<strong>provisioning</strong>):</p>
+<pre data-file="infra/grafana/provisioning/dashboards/dashboards.yaml (planned, sketch)"><code>apiVersion: 1
+providers:
+  - name: smart-campus
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards     <span class="c"># infra/grafana/dashboards/ mounted here</span></code></pre>
+<p>A good workflow: build a panel in the UI, then use "Export → JSON" and save it as
+<code>infra/grafana/dashboards/platform-overview.json</code>.</p>
+
+<h3>Alert rules</h3>
+<p>Prometheus checks alert rules on a schedule. If the expression is true for the time in
+<code>for</code>, the alert fires. The Architecture asks for two platform alerts:</p>
+<pre data-file="infra/prometheus/alerts.yml (planned in T18.4, sketch)"><code>groups:
+  - name: platform
+    rules:
+      - alert: High5xxRate
+        expr: |
+            sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+          / sum(rate(http_server_requests_seconds_count[5m])) &gt; 0.01
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 1% of requests fail with 5xx"
+      <span class="c"># - alert: ConsumerLagHigh   lag &gt; 30 s, metric source decided in T18.3</span></code></pre>
+
+<div class="callout warn">
+  <span class="title">Consumer lag in seconds is an open decision (T18.3 🙋)</span>
+  Kafka clients report lag as a <em>number of messages</em> (a metric like
+  <code>records-lag-max</code>). The alert says <em>30 seconds</em>. 1 000 messages may be 1 second of
+  work or 10 minutes. Measuring lag in time probably needs an extra "lag exporter" container, and
+  adding a container is "ask first" in the spec. So this is decided with the human in T18.
+</div>
+<p>Before trusting the rules, T18.6 checks them with Prometheus's own tool:
+<code>promtool check rules infra/prometheus/alerts.yml</code> (run in a container).</p>
+
+<h3>The high-cardinality trap</h3>
+<p><strong>Cardinality</strong> = how many different label combinations a metric has. Each
+combination is a separate time series stored in memory. Labels must have a
+<strong>small, fixed</strong> set of values.</p>
+<div class="compare">
+  <div class="poor"><h4>Explodes</h4>
+    <p>A label <code>studentId</code>, <code>traceId</code>, <code>email</code>, or the raw URL
+    <code>/api/v1/sections/8f3c…</code>. 30 000 students × 20 routes × 5 statuses = 3 million
+    series. Prometheus runs out of memory.</p></div>
+  <div class="good"><h4>Safe</h4>
+    <p>Labels like <code>uri="/api/v1/sections/{id}"</code> (the <em>template</em>, which Spring
+    uses by default), <code>method</code>, <code>status</code>, <code>service</code>. Put ids in
+    <strong>logs and traces</strong>, not in metric labels.</p></div>
+</div>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Trace id per request (temporary)</td><td><code>backend/platform-starter/src/main/java/edu/campus/starter/trace/TraceIdFilter.java</code>, <code>MdcTraceIdProvider.java</code></td><td>T8 (done)</td></tr>
+<tr><td>Trace id interface used by problem JSON</td><td><code>.../starter/trace/TraceIdProvider.java</code>, <code>.../starter/problem/CampusProblemHandler.java</code></td><td>T8 (done), T16.6</td></tr>
+<tr><td>Agent version + download, run profile</td><td>root <code>pom.xml</code></td><td>T16.1–16.2</td></tr>
+<tr><td>Agent in the image</td><td><code>infra/docker/spring-app.Dockerfile</code> (planned)</td><td>T15, T16.3</td></tr>
+<tr><td>Collector config</td><td><code>infra/otel/collector.yaml</code> (planned)</td><td>T16.4, T17.3</td></tr>
+<tr><td>Grafana data sources (Tempo, Loki, Prometheus)</td><td><code>infra/grafana/provisioning/datasources/datasources.yaml</code> (planned)</td><td>T16.4, T17.4</td></tr>
+<tr><td>Test hook for B1</td><td><code>GET /api/v1/platform/ping?emit=true</code>, dev profile only (planned)</td><td>T16.5</td></tr>
+<tr><td>JSON logs</td><td>logging defaults in <code>platform-starter</code> (planned)</td><td>T17.1</td></tr>
+<tr><td>Scrape config, alert rules</td><td><code>infra/prometheus/prometheus.yml</code>, <code>alerts.yml</code> (planned)</td><td>T18.2, T18.4</td></tr>
+<tr><td>Dashboard</td><td><code>infra/grafana/dashboards/platform-overview.json</code> (planned)</td><td>T18.5</td></tr>
+<tr><td>Compose profile <code>observability</code></td><td><code>infra/docker-compose.yml</code> (the file exists; the profile is planned)</td><td>T16–T18</td></tr>
+<tr><td>Business metrics (seat success vs <code>SECTION_FULL</code>, seat-sync alert)</td><td><code>registration</code> module</td><td>module 5</td></tr>
+</tbody></table></div>
+<p>The learning note <a href="../learn/platform/task8.md">docs/learn/platform/task8.md</a> explains
+how the current trace id filter and problem handler work together.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Putting ids in metric labels.</strong> Student ids, trace ids and raw URLs belong in
+      logs and traces. Metric labels must have few values.</li>
+  <li><strong>Averages instead of percentiles.</strong> "Average 80 ms" can hide 5% of requests
+      taking 4 seconds. Use p95 (and p99 for the registration rush).</li>
+  <li><strong>Summing a counter without <code>rate()</code>.</strong> The result just grows forever
+      and resets to zero when an app restarts.</li>
+  <li><strong>Putting the trace id in the event payload.</strong> It goes in Kafka headers (D4). The
+      agent does this for you.</li>
+  <li><strong>Making the build depend on the Collector.</strong> Tests must pass with nothing
+      listening on port 4317/4318.</li>
+  <li><strong>Forgetting <code>MDC.remove</code></strong> in your own filters or async code. The next
+      request on that pooled thread gets the wrong id.</li>
+  <li><strong>Logging secrets or personal data.</strong> JSON logs are easy to search, for attackers
+      too. Never log passwords, tokens or full request bodies.</li>
+  <li><strong>Building the dashboard only in the UI.</strong> It is lost with
+      <code>docker compose down -v</code>. Export it to JSON in <code>infra/grafana/dashboards/</code>.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<p>Most of this is planned for T16 to T18. You can already do steps 1 and 2 today; do the others
+when those tasks are built.</p>
+<ol class="steps">
+  <li><p>Start core-app in the dev profile and look at today's trace id in the response header:</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app spring-boot:run "-Dspring-boot.run.profiles=dev"
+curl.exe -i localhost:8081/api/v1/platform/ping</code></pre>
+      <p>Find the <code>X-Trace-Id</code> header. Call a URL that does not exist and compare the
+      <code>traceId</code> in the problem JSON with the header. (In Windows PowerShell 5.1,
+      <code>curl</code> is a different built-in command, so type <code>curl.exe</code>. Run the
+      app in one terminal and curl in a second one.)</p></li>
+  <li><p>Read <code>TraceIdFilterTest</code> in
+      <code>backend/platform-starter/src/test/java/edu/campus/starter/trace/</code>. Why does the
+      filter set the header <em>before</em> calling the controller?</p></li>
+  <li><p>(After T16) Start the observability profile, call the B1 URL through the gateway, and find
+      the trace in Grafana → Explore → Tempo:</p>
+<pre><code>docker compose -f infra/docker-compose.yml --profile observability up -d --wait
+curl.exe -s "localhost:8080/api/v1/platform/ping?emit=true"</code></pre>
+      <p>Count the spans. Which app made each one?</p></li>
+  <li><p>(After T17) In Grafana → Explore → Loki, find all log lines of that trace. Then click from
+      a log line back to the trace.</p></li>
+  <li><p>(After T18) In Prometheus (Explore → Prometheus), write the p95 query from section 7 for
+      only the ping route. Then remove <code>le</code> from <code>sum by</code> and see what breaks.</p></li>
+  <li><p>On paper: for the registration module, list one counter, one gauge and one timer you would
+      add, with their labels. Check: does any label have more than about 50 possible values?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Observability</td><td>Being able to understand what a running system is doing from the data it sends out.</td></tr>
+<tr><td>Telemetry</td><td>The data itself: traces, metrics and logs.</td></tr>
+<tr><td>Trace</td><td>The full timed path of one request across all apps.</td></tr>
+<tr><td>Span</td><td>One timed step inside a trace, with a parent.</td></tr>
+<tr><td>Context propagation</td><td>Passing the trace id from one app to the next (HTTP or Kafka headers).</td></tr>
+<tr><td><code>traceparent</code></td><td>The W3C header that carries trace id, parent span id and flags.</td></tr>
+<tr><td>Instrumentation</td><td>Code that creates telemetry. "Auto" = added by the agent, no code changes.</td></tr>
+<tr><td>OTLP</td><td>OpenTelemetry's protocol for sending telemetry (ports 4317 gRPC, 4318 HTTP).</td></tr>
+<tr><td>Collector</td><td>A relay that receives telemetry and forwards it to the right storage.</td></tr>
+<tr><td>MDC</td><td>A per-thread map whose values the logger adds to every line.</td></tr>
+<tr><td>Structured log</td><td>A log line with named fields (here JSON), easy for machines to filter.</td></tr>
+<tr><td>Scrape</td><td>Prometheus pulling metrics from an app's HTTP endpoint.</td></tr>
+<tr><td>Percentile (p95)</td><td>The value that 95% of measurements are below.</td></tr>
+<tr><td>Cardinality</td><td>The number of different label combinations (time series) of a metric.</td></tr>
+<tr><td>Consumer lag</td><td>How far a Kafka consumer is behind the newest message.</td></tr>
+<tr><td>Provisioning</td><td>Loading Grafana data sources and dashboards from files at start.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do we need traces at all, when every app already writes logs?</summary>
+    <p>Logs are per app. Without a shared id you cannot tell which gateway line, which core-app
+    line and which notification line belong to the same request, and you cannot see where the time
+    went. A trace links them and shows the duration of every step.</p></details>
+  <details><summary>2. Why does the trace context go in Kafka headers and not in the <code>DomainEvent</code> payload?</summary>
+    <p>The payload is business data, versioned with <code>schemaVersion</code> and replayed later.
+    Trace data is technical and only matters for this delivery. Keeping them apart keeps the event
+    contract clean (spec D4), and the agent can handle headers with no code in our events.</p></details>
+  <details><summary>3. Why is the agent attached only when <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> is set?</summary>
+    <p>So that builds, tests and CI never depend on a running Collector. T16 requires that
+    <code>./mvnw verify</code> passes with observability off. Developers who do not need traces also
+    start faster.</p></details>
+  <details><summary>4. Why use p95 and not the average latency?</summary>
+    <p>An average mixes many fast requests with a few very slow ones and hides the slow ones. p95
+    tells you what the slowest 5% of users experience, which is what the 500 ms registration target
+    is about.</p></details>
+  <details><summary>5. A teammate adds <code>studentId</code> as a label on a request counter. What happens, and what should they do instead?</summary>
+    <p>Each student creates new time series, so memory in Prometheus grows with the number of
+    students (high cardinality) and queries get slow. Put the student id in logs or span
+    attributes, and keep metric labels to small, fixed sets.</p></details>
+  <details><summary>6. Why must the consumer-lag alert be measured in seconds, and why is that hard?</summary>
+    <p>The rule "lag over 30 s" is about how late users get their result, which is time. Kafka
+    clients report lag as a count of messages, and the time per message changes. Turning lag into
+    time needs another tool (likely an extra exporter container), which is a decision for T18.3.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://opentelemetry.io/docs/concepts/">OpenTelemetry docs: Concepts</a>: signals, context propagation, the Collector.</li>
+  <li><a href="https://opentelemetry.io/docs/zero-code/java/agent/">OpenTelemetry: Java agent</a>: attaching it and its configuration.</li>
+  <li><a href="https://www.w3.org/TR/trace-context/">W3C Trace Context</a>: the <code>traceparent</code> header.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/features/logging.html">Spring Boot reference: Logging</a>: structured logging formats.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/actuator/metrics.html">Spring Boot reference: Actuator metrics</a>: Micrometer, Prometheus endpoint, histograms.</li>
+  <li><a href="https://docs.micrometer.io/micrometer/reference/concepts.html">Micrometer concepts</a>: counters, gauges, timers, distribution summaries.</li>
+  <li><a href="https://prometheus.io/docs/prometheus/latest/querying/basics/">Prometheus: Querying basics</a> and <a href="https://prometheus.io/docs/practices/histograms/">Histograms and summaries</a>.</li>
+  <li><a href="https://grafana.com/docs/loki/latest/query/">Grafana Loki: LogQL</a>, <a href="https://grafana.com/docs/tempo/latest/">Grafana Tempo</a>, <a href="https://grafana.com/docs/grafana/latest/administration/provisioning/">Grafana provisioning</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

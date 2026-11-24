@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read Models Lesson</title>
+<meta name="description" content="Smart Campus lesson 22: commands vs queries, projections built from events, out-of-order and duplicate events, replay, and iCalendar export for the timetable module.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="22">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 22 · Part 2: Feature modules</div>
+<h1>Read models, CQRS and iCal</h1>
+<p class="lede">A student's weekly timetable needs data from two modules: which sections they
+are in (<code>registration</code>) and when and where those sections meet (<code>course</code>).
+We are not allowed to join across schemas. So <code>timetable</code> keeps its own copy, built
+from events. This lesson shows how to build that copy correctly, and how to export it to Google
+Calendar.</p>
+
+<div class="meta">
+  <span class="badge module">timetable</span>
+  <span class="badge module">search (later)</span>
+  <span class="badge task">TT-1</span>
+  <span class="badge task">TT-3</span>
+  <span class="badge task">TT-6</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="08-outbox-idempotency.html">08 (idempotent consumers, replay)</a> and
+  <a href="19-domain-modeling.html">19 (<code>SectionChanged</code>, <code>ScheduleChanged</code>,
+  versions)</a>. Lesson <a href="20-redis-concurrency.html">20</a> explains where
+  <code>EnrollmentConfirmed</code> comes from.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  <code>timetable</code> is module 6 and has no spec yet. Table names, payload fields and
+  endpoint paths here are <strong>proposals</strong>. What already exists: the
+  <code>timetable</code> schema, the topics and keys in <code>Topics</code>, and the rules in
+  <code>SPEC-platform.md</code> (D2, D5, D6).
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#cqrs">Commands vs queries (CQRS)</a></li>
+    <li><a href="#projections">Projections and table design</a></li>
+    <li><a href="#ordering">Out-of-order and duplicate events</a></li>
+    <li><a href="#consistency">Eventual consistency in the UI</a></li>
+    <li><a href="#replay">Replay: throw it away and rebuild</a></li>
+    <li><a href="#ical">iCalendar export</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>The <code>timetable</code> stories:</p>
+<ul>
+  <li><strong>TT-1</strong> (Must): a student sees their weekly timetable built from their
+      enrolled sections, "so I know where and when to go".</li>
+  <li><strong>TT-3</strong> (Must): a lecturer sees their teaching schedule and rooms.</li>
+  <li><strong>TT-6</strong> (Could): a student exports their timetable to Google Calendar (iCal).</li>
+</ul>
+<p>The data lives in other modules. In one big database you would write a single SQL join over
+<code>registration.enrollments</code>, <code>course.sections</code> and
+<code>course.section_meetings</code>. We cannot:</p>
+<ul>
+  <li><strong>C4 / ADR-6</strong>: no cross-schema foreign keys, and no module reads another
+      module's tables. "No cross-module joins; read models needed" is the trade-off the Arch
+      accepted.</li>
+  <li><code>registration</code> runs in a <strong>different app</strong>, with a database user that
+      can only see its own schema (spec D3).</li>
+</ul>
+<p>The Arch's answer (§4): "The timetable and search modules hold no source data of their own:
+they are read models rebuilt from events, so they can be dropped and replayed at any time."</p>
+
+<h2 id="cqrs">2. Commands vs queries (CQRS)</h2>
+<p>A <strong>command</strong> asks the system to <em>change</em> something: "register me for
+CS101-01", "move Monday's class to room B4-305". A <strong>query</strong> only <em>asks</em>:
+"what is my week?". <strong>CQRS</strong> (Command Query Responsibility Segregation) means
+using <strong>different models</strong> for the two:</p>
+<div class="compare">
+  <div class="good"><h4>Write side (commands)</h4>
+    <p><code>course</code> and <code>registration</code>. Rich aggregates that protect rules
+    (lesson 19). Normalized tables. Optimized for <em>correct changes</em>.</p></div>
+  <div class="good"><h4>Read side (queries)</h4>
+    <p><code>timetable</code>. Tables shaped exactly like the screen. No business rules, just
+    copies. Optimized for <em>fast, simple reads</em>.</p></div>
+</div>
+<div class="flow">
+  <div class="box project"><b>course</b>publishes <code>SectionChanged</code>, <code>ScheduleChanged</code> → <code>course.events</code> (key sectionId)</div>
+  <div class="box project"><b>registration</b>publishes <code>EnrollmentConfirmed</code>, <code>EnrollmentDropped</code> → <code>registration.events</code> (key studentId)</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>timetable consumers</b>update local tables, idempotently</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>GET /api/v1/timetable/…</b>one query in one schema</div>
+</div>
+<p>An analogy: the write side is the official land registry; the read side is the city map
+printed from it. The map is easy to read, may be a little behind, and can always be printed
+again. Note: CQRS does <strong>not</strong> mean "event sourcing". Our write side still stores
+normal rows; events are only how the read side learns about changes.</p>
+
+<h2 id="projections">3. Projections and table design</h2>
+<p>A <strong>projection</strong> is code that reads events and writes a read model. It is a
+Kafka consumer in <code>timetable</code>, with the usual idempotency
+(<code>timetable.processed_events</code>, spec D2,
+<a href="08-outbox-idempotency.html#idempotent">lesson 08</a>). Even though
+<code>course</code> and <code>timetable</code> both run in <code>core-app</code>, the projection
+reads from <strong>Kafka</strong>, not from an in-process listener (spec D5, C16), so it can be
+replayed.</p>
+
+<h3>Proposed tables (all in schema <code>timetable</code>)</h3>
+<pre data-file="Planned migration: backend/core-app/.../db/migration/timetable/V…__read_model.sql"><code><span class="c">-- From SectionChanged (course.events)</span>
+CREATE TABLE timetable.sections (
+    section_id        UUID PRIMARY KEY,
+    course_code       TEXT NOT NULL,
+    course_name       TEXT NOT NULL,
+    lecturer_id       UUID,
+    status            TEXT NOT NULL,
+    section_version   BIGINT NOT NULL,      <span class="c">-- newest SectionChanged we applied</span>
+    schedule_version  BIGINT NOT NULL DEFAULT 0,
+    updated_at        TIMESTAMPTZ NOT NULL
+);
+
+<span class="c">-- From ScheduleChanged (course.events): the list is replaced as a whole</span>
+CREATE TABLE timetable.section_meetings (
+    id          UUID PRIMARY KEY,           <span class="c">-- the meeting id from course</span>
+    section_id  UUID NOT NULL,
+    starts_at   TIMESTAMPTZ NOT NULL,
+    ends_at     TIMESTAMPTZ NOT NULL,
+    room_code   TEXT NOT NULL,
+    status      TEXT NOT NULL               <span class="c">-- SCHEDULED / CANCELLED</span>
+);
+CREATE INDEX ON timetable.section_meetings (section_id, starts_at);
+
+<span class="c">-- From EnrollmentConfirmed / EnrollmentDropped (registration.events)</span>
+CREATE TABLE timetable.student_sections (
+    student_id  UUID NOT NULL,
+    section_id  UUID NOT NULL,
+    status      TEXT NOT NULL,              <span class="c">-- ENROLLED / DROPPED</span>
+    updated_at  TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (student_id, section_id)
+);</code></pre>
+<p>Notice: <strong>no foreign keys</strong>, not even inside the <code>timetable</code> schema.
+Events from two topics arrive in any order (next section). An enrollment may arrive before
+the section it points to. A foreign key would reject it, and the consumer would get stuck.</p>
+
+<h3>The query for TT-1</h3>
+<pre data-file="Planned: a student's week (one schema, a normal local join)"><code>SELECT s.course_code, s.course_name, m.starts_at, m.ends_at, m.room_code, m.status
+  FROM timetable.student_sections ss
+  LEFT JOIN timetable.sections s          ON s.section_id = ss.section_id
+  LEFT JOIN timetable.section_meetings m  ON m.section_id = ss.section_id
+                                         AND m.starts_at &gt;= :weekStart
+                                         AND m.starts_at &lt;  :weekEnd
+ WHERE ss.student_id = :studentId
+   AND ss.status = 'ENROLLED'
+ ORDER BY m.starts_at;</code></pre>
+<p>Joins <em>inside</em> one module's schema are fine. The <code>LEFT JOIN</code>s mean "show
+the enrollment even if we have not received the section details yet". The UI then shows
+"details are on their way" for that row.</p>
+
+<h3>How flat should a read model be?</h3>
+<div class="compare">
+  <div class="good"><h4>Small tables + local join (proposed)</h4>
+    <p>A room change updates <strong>one</strong> section's meetings, not every student's rows.
+    Reads are a three-table join on indexed columns: still fast for a few dozen rows per
+    student.</p></div>
+  <div class="poor"><h4>One fully flat row per student per meeting</h4>
+    <p>Reads are a plain <code>SELECT</code>. But a room change for a section with 200 students
+    must update 200 × 15 rows. Use this only if measurements show reads are the bottleneck.</p></div>
+</div>
+
+<h3>The lecturer view (TT-3)</h3>
+<p>The same tables answer TT-3: <code>SELECT … FROM timetable.sections s JOIN
+timetable.section_meetings m … WHERE s.lecturer_id = :lecturerId</code>. The lecturer id comes
+from <code>SectionChanged</code>. A bonus: <code>timetable</code> can count
+<code>student_sections</code> rows to show "38 students" next to each class. That count is
+<em>local</em> data, so it does not break C17 (which only forbids <code>course</code> from
+storing enrolled counts).</p>
+
+<h2 id="ordering">4. Out-of-order and duplicate events</h2>
+<p>Kafka keeps order only <strong>per key, inside one topic</strong>
+(<a href="07-kafka.html">lesson 07</a>). Here is what that means for our projection:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Events</th><th>Order guaranteed?</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Two <code>SectionChanged</code> for section X</td><td>Yes</td><td>Same topic, same key (sectionId)</td></tr>
+<tr><td><code>EnrollmentConfirmed</code> then <code>EnrollmentDropped</code> for student Lan</td><td>Yes</td><td>Same topic, same key (studentId)</td></tr>
+<tr><td><code>SectionChanged</code> for X and <code>EnrollmentConfirmed</code> into X</td><td><strong>No</strong></td><td>Different topics, different keys, different consumers</td></tr>
+<tr><td>Any event delivered twice</td><td>It happens</td><td>At-least-once delivery (lesson 08, spec O3)</td></tr>
+</tbody></table></div>
+<p>Three tools keep the read model right:</p>
+<ol>
+  <li><strong>Dedupe by <code>eventId</code></strong> (<code>processed_events</code>, D2): a repeat is skipped.</li>
+  <li><strong>Tolerate missing data</strong>: write what you know; <code>LEFT JOIN</code> the rest.</li>
+  <li><strong>Version checks</strong>: keep the newest state, ignore older state. Events from
+      <code>course</code> carry the section's <code>version</code> (lesson 19).</li>
+</ol>
+<p>PostgreSQL's <strong>upsert</strong> (<code>INSERT … ON CONFLICT … DO UPDATE</code>) does
+"insert or update" in one statement. Adding a <code>WHERE</code> makes it "update only if
+newer":</p>
+<pre data-file="Planned: applying SectionChanged idempotently"><code>INSERT INTO timetable.sections AS t
+       (section_id, course_code, course_name, lecturer_id, status, section_version, updated_at)
+VALUES (:sectionId, :courseCode, :courseName, :lecturerId, :status, :version, :now)
+ON CONFLICT (section_id) DO UPDATE
+   SET course_code     = EXCLUDED.course_code,
+       course_name     = EXCLUDED.course_name,
+       lecturer_id     = EXCLUDED.lecturer_id,
+       status          = EXCLUDED.status,
+       section_version = EXCLUDED.section_version,
+       updated_at      = EXCLUDED.updated_at
+ WHERE t.section_version &lt; EXCLUDED.section_version;   <span class="c">-- older or same version: no change</span></code></pre>
+<p><code>EXCLUDED</code> means "the row I tried to insert". Apply this statement once, twice or
+ten times: the result is the same. That is idempotent <em>by design</em>, a second safety net
+next to <code>processed_events</code>.</p>
+<pre data-file="Planned: the consumer (shortened)"><code><span class="k">@KafkaListener</span>(topics = "course.events", groupId = "timetable")
+<span class="k">@Transactional</span>
+void onCourseEvent(DomainEvent&lt;?&gt; event) {
+    if (!processedEvents.tryInsert(event.eventId())) {
+        return;                                          <span class="c">// seen before</span>
+    }
+    switch (event.type()) {
+        case "SectionChanged"  -&gt; sections.upsert(payload(event, SectionChanged.class));
+        case "ScheduleChanged" -&gt; meetings.replaceIfNewer(payload(event, ScheduleChanged.class));
+        default -&gt; { }                                   <span class="c">// other course events: not needed here</span>
+    }
+}</code></pre>
+<p><code>replaceIfNewer</code> first runs <code>UPDATE timetable.sections SET schedule_version =
+:v WHERE section_id = :id AND schedule_version &lt; :v</code>. Only if that changed one row does
+it delete the section's meetings and insert the new list, all in the same transaction.</p>
+<div class="callout tip">
+  <span class="title">Unknown event types</span>
+  <code>course.events</code> will carry more event types over time. A consumer should ignore
+  types it does not need (and still mark them processed), not crash. A changed payload shape
+  comes with a higher <code>schemaVersion</code> (spec D4).
+</div>
+
+<h2 id="consistency">5. Eventual consistency in the UI</h2>
+<p><strong>Eventual consistency</strong> means: the read model will match the write side
+<em>soon</em>, but not at the exact same moment. Normally the delay is milliseconds to a few
+seconds. If the consumer is down, it can be minutes (the platform alert fires when consumer lag
+is over 30 seconds, Arch §8).</p>
+<p>Good UI for this:</p>
+<ul>
+  <li>After "Registration confirmed" (lesson 20), show a short note: "Your timetable updates in
+      a few seconds". Do not show an error if the new class is not there yet.</li>
+  <li>Let the timetable query refetch when the page gets focus, or a few seconds after a
+      confirmed registration (TanStack Query, <a href="14-frontend-api-testing.html">lesson 14</a>).</li>
+  <li>Show "Last updated 08:01" from <code>updated_at</code>, so users know how fresh the data
+      is.</li>
+  <li>For rows with missing section details (the <code>LEFT JOIN</code> case), show a
+      placeholder, not an empty cell.</li>
+</ul>
+<div class="callout warn">
+  <span class="title">Never make decisions from a read model</span>
+  The read model is for showing. <code>registration</code>'s clash check (REG-3) must use its
+  own data, not ask <code>timetable</code>, which may be seconds behind.
+</div>
+
+<h2 id="replay">6. Replay: throw it away and rebuild</h2>
+<p>Because <code>course.events</code> and <code>registration.events</code> keep all history
+(<code>retention.ms=-1</code>) and are marked replayable in <code>Topics</code>, the timetable
+read model can be deleted and rebuilt (spec D5, C16, built by platform T12):</p>
+<ol class="steps">
+  <li>Stop the <code>timetable</code> consumers.</li>
+  <li>Delete <code>timetable.*</code> rows <em>and</em> <code>timetable.processed_events</code>.</li>
+  <li>Reset the consumer groups to the earliest offset.</li>
+  <li>Start again; every event is applied from the beginning.</li>
+</ol>
+<p>Replay is how you fix a projection bug: fix the code, replay, and the data is right again.
+It only works if your consumer is <strong>deterministic</strong> (same events → same rows) and
+does <strong>not</strong> do outside side effects. Sending "your class moved" emails belongs to
+<code>notification</code>, which is not replayable. Read the full procedure in
+<a href="08-outbox-idempotency.html#replay">lesson 08</a>. The <code>search</code> module
+(<a href="29-opensearch.html">lesson 29</a>) is the same pattern with OpenSearch instead of
+PostgreSQL tables.</p>
+
+<h2 id="ical">7. iCalendar export (TT-6)</h2>
+<p><strong>iCalendar</strong> (RFC 5545) is the text format that Google Calendar, Outlook and
+Apple Calendar all understand. Files end in <code>.ics</code>; the media type is
+<code>text/calendar</code>.</p>
+<pre data-file="Example: one weekly class in an .ics file"><code>BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Smart Campus//Timetable//EN
+CALSCALE:GREGORIAN
+BEGIN:VTIMEZONE
+TZID:Asia/Ho_Chi_Minh
+BEGIN:STANDARD
+DTSTART:19700101T000000
+TZOFFSETFROM:+0700
+TZOFFSETTO:+0700
+TZNAME:ICT
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:section-3f1c9a2e-slot-1@campus.edu
+DTSTAMP:20270102T010000Z
+DTSTART;TZID=Asia/Ho_Chi_Minh:20270104T073000
+DTEND;TZID=Asia/Ho_Chi_Minh:20270104T093000
+RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20270425T165959Z
+EXDATE;TZID=Asia/Ho_Chi_Minh:20270201T073000
+SUMMARY:CS101 Introduction to Programming
+LOCATION:B4-201
+SEQUENCE:3
+END:VEVENT
+END:VCALENDAR</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Line</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>VCALENDAR</code> / <code>VEVENT</code></td><td>The file, and one event inside it. <code>VERSION:2.0</code> and <code>PRODID</code> are required.</td></tr>
+<tr><td><code>VTIMEZONE</code></td><td>Describes the time zone named in <code>TZID</code>. Vietnam is UTC+7 all year (no daylight saving), so it is short.</td></tr>
+<tr><td><code>DTSTART;TZID=Asia/Ho_Chi_Minh:20270104T073000</code></td><td>Monday 4 January 2027, 07:30 Vietnam time.</td></tr>
+<tr><td><code>RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=…</code></td><td>Repeat every Monday until the end of the semester. When <code>DTSTART</code> has a <code>TZID</code>, <code>UNTIL</code> must be written in UTC (the <code>Z</code>): 25 Apr 23:59:59 in Vietnam = 16:59:59Z.</td></tr>
+<tr><td><code>EXDATE</code></td><td>Skip this date: the class on 1 Feb is cancelled (TT-4).</td></tr>
+<tr><td><code>UID</code></td><td>The event's permanent identity. It must be <strong>stable</strong>: the same section slot gets the same UID in every export, so calendar apps update the event instead of adding a copy.</td></tr>
+<tr><td><code>SEQUENCE</code></td><td>Goes up each time the event changes (we can use the schedule version).</td></tr>
+<tr><td><code>DTSTAMP</code></td><td>When this file was made, in UTC. Required in every <code>VEVENT</code>.</td></tr>
+</tbody></table></div>
+<p>A moved single class can be written as its own <code>VEVENT</code> with the same
+<code>UID</code> and a <code>RECURRENCE-ID</code>, or (simpler) we can export one
+<code>VEVENT</code> per real meeting from <code>timetable.section_meetings</code>, each with its
+own stable UID (the meeting id). The spec picks one; the second is easier to get right.</p>
+<h3>Writing the file safely</h3>
+<ul>
+  <li>Lines end with <strong>CRLF</strong> (<code>\r\n</code>), not just <code>\n</code>.</li>
+  <li>Lines longer than 75 octets must be <strong>folded</strong>: break, then start the next
+      line with one space. Count bytes, not characters: Vietnamese letters use several bytes in
+      UTF-8.</li>
+  <li>In text values, escape <code>\</code>, <code>;</code>, <code>,</code> and new lines
+      (<code>\\</code>, <code>\;</code>, <code>\,</code>, <code>\n</code>). A course name like
+      "Data, Algorithms" would otherwise break the line.</li>
+  <li>A library such as ical4j handles all of this, but it is a new dependency, which the spec
+      says to "ask first" about. A small, well-tested writer for our few fields is also fine.</li>
+</ul>
+
+<h3>The subscription URL</h3>
+<p>A one-time download goes stale. A <strong>subscription</strong> lets Google Calendar fetch the
+file again by itself. But calendar apps cannot log in with Keycloak or send a JWT. So the URL
+itself carries a secret:</p>
+<pre data-file="Planned endpoint"><code>GET /api/v1/timetable/ical/8Jx2…long-random-token….ics
+
+HTTP/1.1 200 OK
+Content-Type: text/calendar; charset=utf-8
+Cache-Control: private, max-age=900</code></pre>
+<ul>
+  <li>The token is long and random (for example 32 random bytes, Base64URL). It acts like a
+      password, so store only its <strong>hash</strong>, as you would a password.</li>
+  <li>The student can <strong>regenerate</strong> it (the old URL stops working) if it leaks.</li>
+  <li>The gateway route for this path must accept requests without a JWT (an exception to plan
+      with the <code>identity</code> spec), and the per-IP rate limit still applies.</li>
+  <li>Put only what the student needs in the file: course, time, room. No grades, no ids of
+      other students.</li>
+  <li>You cannot control how often Google refreshes a subscribed calendar; it can take hours.
+      Tell users that the app is always the most up-to-date view.</li>
+</ul>
+
+<h2 id="in-project">8. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td><code>timetable</code> schema</td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>exists, empty</td></tr>
+<tr><td>Topics, keys, replayable flag</td><td><code>backend/shared-kernel/.../kernel/event/Topics.java</code></td><td>exists (T5)</td></tr>
+<tr><td>Event envelope</td><td><code>.../kernel/event/DomainEvent.java</code>, <code>EventTypes.java</code></td><td>exists (T5)</td></tr>
+<tr><td><code>processed_events</code> pattern, replay script</td><td>platform-starter (T11), <code>infra/replay.sh</code> (T12)</td><td>planned</td></tr>
+<tr><td>Projections, query endpoints, iCal</td><td><code>backend/core-app/src/main/java/edu/campus/timetable/</code></td><td>planned (module 6)</td></tr>
+<tr><td>Source events</td><td><code>SectionChanged</code>, <code>ScheduleChanged</code> (module 4); <code>EnrollmentConfirmed</code>, <code>EnrollmentDropped</code> (module 5)</td><td>planned</td></tr>
+<tr><td>Week view UI</td><td><code>frontend/web/src/modules/timetable/</code></td><td>planned</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">9. Common mistakes</h2>
+<ul>
+  <li><strong>Joining another module's schema "just for reading".</strong> It breaks C4 and
+      fails at runtime for <code>registration</code>'s data anyway (D3).</li>
+  <li><strong>Foreign keys in a read model.</strong> Events arrive out of order; the consumer
+      gets stuck on the first missing parent.</li>
+  <li><strong>Applying deltas</strong> ("seats −1") instead of state. Repeats and replays make
+      them wrong.</li>
+  <li><strong>Overwriting newer data with older events.</strong> Always compare versions.</li>
+  <li><strong>Crashing on an unknown event type.</strong> Skip it and move on.</li>
+  <li><strong>Using a random <code>UID</code> per export.</strong> Every refresh then duplicates
+      every class in the user's calendar.</li>
+  <li><strong>Forgetting the time zone</strong> in <code>DTSTART</code>, or writing
+      <code>UNTIL</code> in local time.</li>
+  <li><strong>Sending emails from a projection.</strong> A replay would send them all again.</li>
+</ul>
+
+<h2 id="practice">10. Practice</h2>
+<ol class="steps">
+  <li><p>In a scratch table, try the versioned upsert:</p>
+<pre><code>CREATE TEMP TABLE s (id INT PRIMARY KEY, name TEXT, version INT);
+INSERT INTO s AS t VALUES (1, 'v2', 2)
+  ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, version = EXCLUDED.version
+  WHERE t.version &lt; EXCLUDED.version;
+-- now run it with ('v1', 1), then with ('v3', 3). Which ones change the row?
+SELECT * FROM s;</code></pre></li>
+  <li><p>Write down the events (with topic and key) for this story, then shuffle them across
+      topics and check your projection still ends right: Lan enrolls in CS101-01; the admin
+      creates CS101-01's schedule; Lan drops; Lan enrolls again; Monday's class moves room.</p></li>
+  <li><p>Write the <code>.ics</code> for a class every Thursday 13:00–15:00 in room A2-104,
+      from 7 January to 22 April 2027. Import it into a calendar app and check the times.</p></li>
+  <li><p>Write a Java method that escapes an iCal text value and a test for
+      <code>"Data, Algorithms; Part 1"</code>.</p></li>
+  <li><p>On paper: what should the week view show for a section whose
+      <code>SectionChanged</code> has not arrived yet?</p></li>
+</ol>
+
+<h2 id="words">11. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Command</td><td>A request to change something.</td></tr>
+<tr><td>Query</td><td>A request to read something, with no change.</td></tr>
+<tr><td>CQRS</td><td>Using different models for changing data and for reading it.</td></tr>
+<tr><td>Read model</td><td>Tables built from events, shaped for fast reading.</td></tr>
+<tr><td>Projection</td><td>The consumer code that turns events into a read model.</td></tr>
+<tr><td>Eventual consistency</td><td>The copy will match the source soon, not instantly.</td></tr>
+<tr><td>Upsert</td><td>Insert, or update if the row already exists (<code>ON CONFLICT</code>).</td></tr>
+<tr><td>Denormalized</td><td>Data copied into the shape the reader needs, even if repeated.</td></tr>
+<tr><td>iCalendar (.ics)</td><td>The standard calendar text format, RFC 5545.</td></tr>
+<tr><td>RRULE</td><td>An iCal rule for repeating events, e.g. every Monday.</td></tr>
+<tr><td>UID</td><td>The permanent id of a calendar event.</td></tr>
+<tr><td>Subscription URL</td><td>A link a calendar app fetches again and again.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">12. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why can't <code>timetable</code> simply join <code>registration.enrollments</code> with <code>course.sections</code>?</summary>
+    <p>No module reads another module's tables (C4, ADR-6), and <code>registration</code> runs in
+    a separate app whose schema <code>core-app</code> is not meant to touch. Joins would also tie
+    the modules together, so one could not change or move its tables alone.</p></details>
+  <details><summary>2. Why does the read model have no foreign keys, even inside its own schema?</summary>
+    <p>Events from different topics have no order between them. An enrollment can arrive before
+    its section. A foreign key would reject that row and block the consumer, while the right
+    behaviour is to store it and fill in the details later.</p></details>
+  <details><summary>3. <code>processed_events</code> already removes duplicates. Why also add a version check?</summary>
+    <p>Defense in depth. The version check also protects against old state arriving after
+    newer state for other reasons (for example a bug, or a replay of a partly cleaned read
+    model), and makes each write safe on its own.</p></details>
+  <details><summary>4. Why must the projection have no side effects like emails?</summary>
+    <p>Replay runs every event again from the start. Writing rows again gives the same rows;
+    sending emails again spams every student. Side effects belong to non-replayable consumers
+    such as <code>notification</code>.</p></details>
+  <details><summary>5. Why must the iCal <code>UID</code> be stable?</summary>
+    <p>Calendar apps use the UID to know "this is the same event". With a stable UID, a
+    refreshed subscription updates the class. With a new UID each time, the app adds a second
+    copy of every class.</p></details>
+  <details><summary>6. Why is the subscription URL protected by a secret token instead of a JWT?</summary>
+    <p>Google Calendar fetches the URL by itself and cannot log in to Keycloak or refresh a
+    5-minute token. A long random token in the URL works like a password that the student can
+    revoke by regenerating it.</p></details>
+</div>
+
+<h2 id="more">13. Learn more</h2>
+<ul>
+  <li><a href="https://martinfowler.com/bliki/CQRS.html">Martin Fowler: CQRS</a>: the idea, and when not to use it.</li>
+  <li><a href="https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT">PostgreSQL docs: INSERT … ON CONFLICT</a>: upserts and <code>EXCLUDED</code>.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc5545">RFC 5545: iCalendar</a>: see 3.1 (line folding), 3.3.10 (RRULE), 3.6.5 (VTIMEZONE), 3.8.4.7 (UID).</li>
+  <li><a href="https://kafka.apache.org/documentation/#intro_concepts_and_terms">Apache Kafka docs: Concepts</a>: ordering per partition.</li>
+  <li><a href="https://microservices.io/patterns/data/cqrs.html">microservices.io: CQRS</a>: the pattern with a database per service.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reliable Events Lesson</title>
+<meta name="description" content="Smart Campus lesson 08: the transactional outbox, idempotent consumers, and replay.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="08">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 08 · Part 1: Foundations</div>
+<h1>Reliable events: outbox, dedupe, replay</h1>
+<p class="lede">How do we save data in PostgreSQL <em>and</em> tell other modules about it through
+Kafka, without ever losing a message or acting on it twice? This is the most important idea in
+the Smart Campus backend.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module that sends events</span>
+  <span class="badge task">T7 (done)</span>
+  <span class="badge task">T11</span>
+  <span class="badge task">T12</span>
+  <span class="badge time">~60 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="04-postgres-flyway.html">04 (transactions)</a> and
+  <a href="07-kafka.html">07 (Kafka topics, keys, consumer groups)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#dual-write">The dual-write problem</a></li>
+    <li><a href="#outbox">The transactional outbox</a></li>
+    <li><a href="#modulith">The outbox in Spring Modulith</a></li>
+    <li><a href="#at-least-once">At least once, never exactly once</a></li>
+    <li><a href="#idempotent">The idempotent consumer</a></li>
+    <li><a href="#envelope">The event envelope and keys</a></li>
+    <li><a href="#replay">Replay: rebuilding a read model</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Smart Campus modules do not call each other's tables. When something important happens, a
+module <strong>publishes an event</strong> (a short message that says "this happened"). Other
+modules listen and react. For example:</p>
+<ul>
+  <li><code>registration</code> confirms a seat → publishes <code>EnrollmentConfirmed</code> →
+      <code>timetable</code> adds the class to the student's week, and <code>notification</code>
+      sends "You got the seat!".</li>
+  <li><code>course</code> moves a class to another room → publishes <code>ScheduleChanged</code>
+      → <code>timetable</code> updates, students get a message.</li>
+  <li><code>payment</code> gets money for a club event → publishes <code>PaymentConfirmed</code>
+      → <code>club</code> creates the ticket.</li>
+</ul>
+<p>If one of these events is <strong>lost</strong>, a student pays and gets no ticket. If an
+event is <strong>sent for a change that never happened</strong>, a student sees a class they are
+not in. If it is <strong>applied twice</strong>, a student gets two emails or two tickets. This
+lesson shows the three tools that stop all three problems.</p>
+
+<h2 id="dual-write">2. The dual-write problem</h2>
+<p>The simple way looks like this:</p>
+<pre data-file="The naive way (do NOT do this)"><code><span class="k">@Transactional</span>
+void confirm(Enrollment e) {
+    repository.save(e);                          <span class="c">// 1. write to PostgreSQL</span>
+    kafkaTemplate.send("registration.events", …); <span class="c">// 2. write to Kafka</span>
+}                                                <span class="c">// 3. COMMIT</span></code></pre>
+<p>This is a <strong>dual write</strong>: two writes to two different systems. There is no
+transaction that covers both PostgreSQL and Kafka. So things can go wrong in the gaps:</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>What goes wrong</th><th>Result</th><th>Name</th></tr></thead>
+<tbody>
+<tr><td>Kafka send works, then the COMMIT fails (for example a constraint error)</td>
+    <td>Other modules react to an enrollment that does not exist</td><td>Phantom event</td></tr>
+<tr><td>COMMIT works, but Kafka is down, or the app crashes before the send</td>
+    <td>The enrollment exists, but nobody hears about it</td><td>Lost event</td></tr>
+<tr><td>You move the send after the commit</td>
+    <td>Fixes phantoms, but a crash between commit and send still loses the event</td><td>Lost event</td></tr>
+</tbody></table></div>
+
+<div class="callout warn">
+  <span class="title">Key point</span>
+  You cannot make two different systems commit together "by being careful". You need a design
+  where there is only <strong>one</strong> write that matters.
+</div>
+
+<h2 id="outbox">3. The transactional outbox</h2>
+<p>The idea: <strong>do not send to Kafka inside the business transaction. Save the event in a
+database table instead</strong>, in the same transaction as the business data. That table is the
+"outbox", like the tray on an office desk where you put letters to be posted later.</p>
+
+<div class="flow">
+  <div class="box project"><b>1. Business transaction</b>INSERT enrollment<br>INSERT event into outbox table<br>COMMIT (both or neither)</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>2. Relay (after commit)</b>Read unsent events<br>Send each to Kafka</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>3. Kafka acknowledges</b>Mark the outbox row <em>completed</em></div>
+</div>
+
+<p>Now look at the failure cases again:</p>
+<ul>
+  <li><strong>Rollback</strong> → the outbox row is rolled back too → nothing is ever sent. No phantom.</li>
+  <li><strong>Kafka down or app crash after commit</strong> → the row is still in the table,
+      not completed → the relay tries again later. Nothing is lost.</li>
+</ul>
+<p>The only write that "decides" is the single database commit. Everything after it is retry
+work.</p>
+
+<h2 id="modulith">4. The outbox in Spring Modulith</h2>
+<p>We do not write our own outbox table and relay. Spring Modulith already has one, called the
+<strong>Event Publication Registry</strong>. This is spec decision <strong>D1</strong>, and task
+T7 tested it with a real PostgreSQL and a real Kafka.</p>
+
+<pre data-file="backend/core-app/.../platform/internal/OutboxProbeService.java"><code><span class="k">@Transactional</span>
+UUID create(String note) {
+    Instant now = clock.instant();
+    OutboxProbe probe = new OutboxProbe(UUID.randomUUID(), note, now);
+
+    jdbc.update("INSERT INTO platform.outbox_probe (id, note, created_at) VALUES (?, ?, ?)",
+            probe.id(), probe.note(), Timestamp.from(probe.createdAt()));   <span class="c">// business row</span>
+
+    events.publishEvent(new DomainEvent&lt;&gt;(                                 <span class="c">// Modulith saves this</span>
+            UUID.randomUUID(), EVENT_TYPE, 1, now, probe.id().toString(), probe)); <span class="c">// in event_publication</span>
+
+    return probe.id();
+}</code></pre>
+
+<p>What happens, step by step:</p>
+<ol>
+  <li><code>publishEvent(...)</code> is a normal Spring call. Modulith catches it and writes one
+      row into <code>platform.event_publication</code>, using the <strong>same database
+      connection</strong>, so it is part of the same transaction.</li>
+  <li>The method ends → Spring commits. Both rows are saved, or neither.</li>
+  <li>After the commit, a background thread sends the event to Kafka with
+      <code>KafkaTemplate</code>.</li>
+  <li>When Kafka says "stored" (<code>acks=all</code>), the row gets a
+      <code>completion_date</code> and status <code>COMPLETED</code>.</li>
+  <li>If Kafka does not answer, the row becomes <code>FAILED</code>. Our
+      <code>OutboxRetryJob</code> sends FAILED rows again every 30 seconds. At startup, all
+      unfinished rows are sent again too.</li>
+</ol>
+
+<pre class="diagram">Status of one row in platform.event_publication
+
+  PUBLISHED ──► PROCESSING ──► COMPLETED        (happy path)
+                    │
+                    └──► FAILED ──► RESUBMITTED ──► PROCESSING ──► COMPLETED
+                         (Kafka down,            (OutboxRetryJob,
+                          or stuck &gt; 5 min)       every 30 s)</pre>
+
+<p>The settings for all of this live in one place, so every app gets the same behavior:</p>
+<pre data-file="backend/platform-starter/src/main/resources/campus-platform-defaults.yml (part)"><code>spring:
+  modulith:
+    events:
+      jdbc:
+        schema-initialization:
+          enabled: false          <span class="c"># Flyway creates the table, not Modulith (T7 trap)</span>
+      republish-outstanding-events-on-restart: true
+      staleness:
+        processing: 5m            <span class="c"># stuck "in flight" too long → FAILED → retried</span>
+  kafka:
+    producer:
+      acks: all                   <span class="c"># "done" only when Kafka really stored it</span>
+campus:
+  outbox:
+    retry-interval: 30s</code></pre>
+
+<h2 id="at-least-once">5. At least once, never exactly once</h2>
+<p>The outbox guarantees <strong>no lost events</strong> and <strong>no phantom events</strong>.
+It does <em>not</em> guarantee "exactly one copy". T7 proved this with a real test:</p>
+<ol>
+  <li>The app sends the event. Kafka is frozen (<code>docker pause</code>) and does not answer.</li>
+  <li>After the producer timeout, the row is marked FAILED.</li>
+  <li>Kafka wakes up and stores the request it was holding → <strong>copy 1</strong>.</li>
+  <li>The retry job sends the FAILED row again → <strong>copy 2</strong>, with the same <code>eventId</code>.</li>
+</ol>
+<p>This is not a bug in Modulith. <strong>Any</strong> system that retries after a timeout has
+this problem: when you get no answer, you cannot know if the other side got the message. So the
+rule in distributed systems is:</p>
+
+<div class="callout project">
+  <span class="title">Smart Campus rule (spec O3, decided at Checkpoint B)</span>
+  Delivery is <strong>at least once</strong>. Every copy of an event has the
+  <strong>same <code>eventId</code></strong>. Consumers must make repeats harmless.
+</div>
+
+<h2 id="idempotent">6. The idempotent consumer</h2>
+<p><strong>Idempotent</strong> means "doing it twice has the same result as doing it once".
+Pressing a lift button five times still calls the lift once. Our consumers become idempotent by
+remembering which events they already handled (spec <strong>D2</strong>, built in T11):</p>
+
+<pre data-file="Each consuming module has a table like this (planned in T11)"><code>CREATE TABLE notification.processed_events (
+    event_id     UUID PRIMARY KEY,         <span class="c">-- the eventId from the envelope</span>
+    processed_at TIMESTAMPTZ NOT NULL
+);</code></pre>
+
+<pre data-file="The pattern (simplified)"><code><span class="k">@KafkaListener</span>(topics = "registration.events", groupId = "notification")
+<span class="k">@Transactional</span>
+void on(DomainEvent&lt;EnrollmentConfirmed&gt; event) {
+    boolean firstTime = processedEvents.tryInsert(event.eventId());  <span class="c">// INSERT … ON CONFLICT DO NOTHING</span>
+    if (!firstTime) {
+        return;                       <span class="c">// seen before: skip, but still acknowledge</span>
+    }
+    inbox.add(event.payload().studentId(), "You got the seat!");      <span class="c">// the side effect</span>
+}                                     <span class="c">// COMMIT: marker row + side effect together</span></code></pre>
+
+<p>Why it works: the "I have seen this" row and the side effect are saved in the <strong>same
+transaction</strong>. Either both are saved, or neither. So:</p>
+<ul>
+  <li>Copy 2 arrives → the insert hits the primary key → we skip. Side effect happened once.</li>
+  <li>The app crashes in the middle → both are rolled back → Kafka gives the event again →
+      we process it for the first time. Still once.</li>
+</ul>
+
+<div class="compare">
+  <div class="poor"><h4>Not idempotent</h4>
+    <p><code>UPDATE seats SET taken = taken + 1</code> on every event. Two copies → two seats taken.</p></div>
+  <div class="good"><h4>Idempotent</h4>
+    <p>Check <code>processed_events</code> first, or write absolute values:
+    <code>INSERT … ON CONFLICT (enrollment_id) DO NOTHING</code>.</p></div>
+</div>
+
+<div class="callout warn">
+  <span class="title">Emails and push messages</span>
+  An email cannot be "rolled back". If the app crashes after sending the email but before the
+  commit, the student may get the email twice. That is why notification sending is designed
+  as "save to inbox and outbox first, then send" and is marked <em>not replayable</em> (next section).
+</div>
+
+<h2 id="envelope">7. The event envelope and keys</h2>
+<p>Every event in Smart Campus is wrapped in the same "envelope", from <code>shared-kernel</code>:</p>
+<pre data-file="backend/shared-kernel/.../kernel/event/DomainEvent.java"><code>public record DomainEvent&lt;P&gt;(
+        UUID eventId,        <span class="c">// unique per event; the dedupe key (D2)</span>
+        String type,         <span class="c">// "EnrollmentConfirmed": past tense</span>
+        int schemaVersion,   <span class="c">// raise it when the payload changes in a breaking way (D4)</span>
+        Instant occurredAt,
+        String aggregateId,  <span class="c">// which thing changed, e.g. a section id</span>
+        P payload) { … }</code></pre>
+<p>The <strong>Kafka message key</strong> decides ordering: Kafka keeps messages in order only
+inside one partition, and the key picks the partition. So the key is chosen per topic, in
+<code>Topics</code> (spec <strong>D6</strong>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Topic</th><th>Partitions</th><th>Key</th><th>Why this key</th></tr></thead>
+<tbody>
+<tr><td><code>registration.requests</code></td><td>12</td><td>sectionId</td><td>Requests for one section are handled in arrival order (fair waitlist)</td></tr>
+<tr><td><code>registration.events</code></td><td>6</td><td>studentId</td><td>One student's enroll/drop events stay in order</td></tr>
+<tr><td><code>course.events</code></td><td>3</td><td>sectionId</td><td>Changes to one section stay in order</td></tr>
+<tr><td><code>grade.events</code></td><td>3</td><td>studentId</td><td>One student's grades stay in order</td></tr>
+<tr><td><code>campus.events</code></td><td>3</td><td>aggregateId</td><td>Everything else</td></tr>
+</tbody></table></div>
+<p>Trace information (<code>traceparent</code>) travels in Kafka <strong>headers</strong>, not in
+the payload, so business data stays clean (<a href="12-observability.html">lesson 12</a>).</p>
+
+<h2 id="replay">8. Replay: rebuilding a read model</h2>
+<p>Some modules keep a <strong>read model</strong>: a copy of data from other modules, shaped for
+fast reading. <code>timetable</code> (a student's week) and <code>search</code> are read models.
+Because our event topics keep <strong>all history</strong> (<code>retention.ms=-1</code>), we can
+throw a read model away and build it again from the start of the topic (spec <strong>D5</strong>,
+built in T12):</p>
+<ol class="steps">
+  <li>Stop the consumer.</li>
+  <li>Delete its derived tables <em>and</em> its <code>processed_events</code> rows.</li>
+  <li>Reset its Kafka consumer group to the earliest offset.</li>
+  <li>Start it again. It reads every event from the beginning and rebuilds the same rows.</li>
+</ol>
+<p>Two rules make replay safe:</p>
+<ul>
+  <li><strong>Cross-module events always come from Kafka</strong>, even between two modules in
+      the same <code>core-app</code>. An in-process Spring listener cannot be replayed. An ArchUnit
+      test will fail the build if someone listens in-process to another module's event.</li>
+  <li><strong>Only read-model consumers are replayable.</strong> A consumer that sends emails is
+      registered as non-replayable, otherwise a replay would email every student again.
+      <code>registration.requests</code> is also non-replayable: it holds commands
+      ("give me a seat"), not facts.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Envelope</td><td><code>backend/shared-kernel/.../kernel/event/DomainEvent.java</code></td><td>T5</td></tr>
+<tr><td>Topics + keys</td><td><code>backend/shared-kernel/.../kernel/event/Topics.java</code></td><td>T5, T12</td></tr>
+<tr><td>Outbox table</td><td><code>core-app/.../db/migration/platform/V202611220100__event_publication.sql</code></td><td>T7</td></tr>
+<tr><td>Probe (example producer)</td><td><code>core-app/.../platform/internal/OutboxProbeService.java</code></td><td>T7</td></tr>
+<tr><td>Retry job + shared settings</td><td><code>platform-starter/.../starter/outbox/</code>, <code>campus-platform-defaults.yml</code></td><td>T8</td></tr>
+<tr><td>Idempotent consumer + <code>processed_events</code></td><td><code>notification-service</code> (planned)</td><td>T11</td></tr>
+<tr><td>Topic creation, retention, replay script</td><td><code>infra/replay.sh</code> (planned)</td><td>T12</td></tr>
+<tr><td>Real events</td><td><code>EnrollmentConfirmed</code>, <code>SectionChanged</code>, <code>PaymentConfirmed</code>, …</td><td>modules 4–14</td></tr>
+</tbody></table></div>
+<p>Also read the learning note <a href="../learn/platform/task7.md">docs/learn/platform/task7.md</a>,
+which explains every file of the T7 spike.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Calling <code>kafkaTemplate.send</code> inside business code.</strong> Always use
+      <code>publishEvent</code>, so the outbox is used.</li>
+  <li><strong>Publishing outside a transaction.</strong> Without <code>@Transactional</code>, the
+      event and the data are not saved together.</li>
+  <li><strong>Using a new random <code>eventId</code> on retry.</strong> Then consumers cannot see
+      that it is a repeat. The id is set once, when the event is created.</li>
+  <li><strong>Doing the dedupe check and the side effect in two transactions.</strong> A crash
+      between them loses the event or doubles it.</li>
+  <li><strong>Putting whole entities from another module in the payload.</strong> Send ids and
+      the facts that changed.</li>
+  <li><strong>Letting Modulith create its own table.</strong> Flyway owns all tables. Keep
+      <code>schema-initialization.enabled: false</code>.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infrastructure and core-app in the dev profile:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+.\mvnw.cmd -pl backend/core-app spring-boot:run "-Dspring-boot.run.profiles=dev"</code></pre></li>
+  <li><p>Create a probe (dev profile only; see <code>OutboxProbeController</code> for the body
+      it expects), then look at the outbox table:</p>
+<pre><code>curl.exe -X POST localhost:8081/api/v1/platform/outbox-probe …
+docker compose -f infra/docker-compose.yml exec postgres psql -U postgres -d campus -c "SELECT event_type, status, completion_date FROM platform.event_publication ORDER BY publication_date DESC LIMIT 5;"</code></pre>
+      <p>(User and database names come from your <code>infra/.env</code>. In Windows PowerShell,
+      write <code>curl.exe</code>: plain <code>curl</code> there is a different command.)</p></li>
+  <li><p>Pause Kafka, create a probe, and watch the status stay incomplete. Then unpause and
+      wait about 30 seconds:</p>
+<pre><code>docker compose -f infra/docker-compose.yml pause kafka
+# create a probe, run the SELECT again
+docker compose -f infra/docker-compose.yml unpause kafka</code></pre></li>
+  <li><p>Read <code>OutboxIT</code> in <code>backend/core-app/src/test/java/edu/campus/platform/internal/</code>. Find the
+      test for each of O1, O2 and O3, and say in one sentence what each one proves.</p></li>
+  <li><p>On paper: design the <code>processed_events</code> check for the timetable consumer.
+      What happens if the same <code>EnrollmentConfirmed</code> arrives three times? What if the
+      app crashes after the INSERT but before the COMMIT?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Dual write</td><td>Writing the same change to two systems with no shared transaction. Unsafe.</td></tr>
+<tr><td>Outbox</td><td>A database table where events wait until they are sent to Kafka.</td></tr>
+<tr><td>Relay</td><td>The background worker that reads the outbox and sends to Kafka.</td></tr>
+<tr><td>Event Publication Registry</td><td>Spring Modulith's built-in outbox (<code>event_publication</code> table).</td></tr>
+<tr><td>Externalization</td><td>Modulith's word for "send this event to an outside broker like Kafka".</td></tr>
+<tr><td>Acknowledge (ack)</td><td>Kafka's answer "I stored it".</td></tr>
+<tr><td>At-least-once</td><td>Every event arrives, but maybe more than once.</td></tr>
+<tr><td>Idempotent</td><td>Doing it again changes nothing more.</td></tr>
+<tr><td>Read model</td><td>A copy of data built from events, shaped for fast reads.</td></tr>
+<tr><td>Replay</td><td>Reading a topic again from the start to rebuild a read model.</td></tr>
+<tr><td>Phantom event</td><td>An event about a change that was rolled back.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why is it not enough to call <code>kafkaTemplate.send</code> after the commit?</summary>
+    <p>The app can crash (or Kafka can be down) between the commit and the send. The data is
+    saved but the event is lost forever, because nothing remembers that it still has to be sent.</p></details>
+  <details><summary>2. A transaction saves an enrollment and calls <code>publishEvent</code>, then throws. What reaches Kafka?</summary>
+    <p>Nothing. The <code>event_publication</code> row was written in the same transaction, so it
+    is rolled back with the enrollment. There is nothing for the relay to send (spec O2).</p></details>
+  <details><summary>3. Why can't the outbox promise exactly one copy?</summary>
+    <p>When Kafka does not answer in time, the sender cannot know if Kafka stored the message or
+    not. To avoid losing it, it sends again, which can create a second copy. Only the consumer can
+    remove repeats.</p></details>
+  <details><summary>4. Why must the <code>processed_events</code> insert be in the same transaction as the side effect?</summary>
+    <p>If they are separate, a crash between them either marks an event "done" without doing it
+    (lost) or does it without marking it (done twice on retry). Together, they are all-or-nothing.</p></details>
+  <details><summary>5. Why must <code>timetable</code> read <code>course.events</code> from Kafka even though both modules run inside core-app?</summary>
+    <p>Because only Kafka keeps the history. An in-process listener cannot be replayed, so the
+    read model could never be rebuilt. One delivery path is also simpler to reason about (spec D5).</p></details>
+  <details><summary>6. Why is <code>registration.requests</code> keyed by <code>sectionId</code> and not by <code>studentId</code>?</summary>
+    <p>Kafka keeps order per key. Keying by section puts all requests for one section in one
+    partition, in arrival order, so seats and the waitlist are given out fairly.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/events.html">Spring Modulith reference: Working with application events</a>: the Event Publication Registry and externalization.</li>
+  <li><a href="https://microservices.io/patterns/data/transactional-outbox.html">microservices.io: Transactional outbox</a>: the pattern in one page.</li>
+  <li><a href="https://microservices.io/patterns/communication-style/idempotent-consumer.html">microservices.io: Idempotent consumer</a>: the consumer side.</li>
+  <li><a href="https://kafka.apache.org/documentation/#semantics">Apache Kafka docs: Message delivery semantics</a>: at-most, at-least, exactly once.</li>
+  <li><a href="https://docs.spring.io/spring-kafka/reference/">Spring for Apache Kafka reference</a>: <code>KafkaTemplate</code> and <code>@KafkaListener</code>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

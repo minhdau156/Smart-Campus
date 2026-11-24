@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TypeScript and React</title>
+<meta name="description" content="Smart Campus lesson 13: TypeScript types, React components and state, and the Vite dev server for the frontend/web app.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="13">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 13 · Part 1: Foundations</div>
+<h1>TypeScript, React and Vite</h1>
+<p class="lede">Students, lecturers and admins only ever see one thing of Smart Campus: the
+website. This lesson teaches the three tools it is built with: TypeScript for safe code, React for
+the screens, and Vite to run and build it.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">shell</span>
+  <span class="badge module">every module's screens</span>
+  <span class="badge task">T19</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core skill</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  You should know basic JavaScript: variables, functions, arrays, objects, arrow functions
+  (<code>(x) =&gt; x + 1</code>) and <code>import</code>/<code>export</code>. You need Node 24 and
+  npm (both already installed on this machine, see the spec's Tech Stack). Read
+  <a href="14-frontend-api-testing.html">lesson 14</a> right after this one.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#ts-basics">TypeScript basics and strict mode</a></li>
+    <li><a href="#ts-unions">Unions, narrowing, <code>unknown</code>, generics</a></li>
+    <li><a href="#components">Components, JSX and props</a></li>
+    <li><a href="#state">State, events and forms</a></li>
+    <li><a href="#lists">Lists, keys, composition, context</a></li>
+    <li><a href="#effects"><code>useEffect</code> and data fetching</a></li>
+    <li><a href="#vite">Vite and the project layout</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Smart Campus is <strong>website only</strong>: there is no mobile app (decided 2026-11-20).
+Phones use the same responsive website. So every one of the 14 modules ends with screens in one
+React app, <code>frontend/web</code>:</p>
+<ul>
+  <li><strong>T19</strong> (platform) creates the empty app: Vite + React + TypeScript, lint, tests,
+      the <code>/api</code> proxy, and a home page that calls <code>/api/v1/platform/ping</code>.</li>
+  <li><strong>shell</strong> (module 3) adds the menu, lazy-loaded module routes and vi/en
+      translations (<a href="18-shell-frontend.html">lesson 18</a>).</li>
+  <li><strong>course, registration, timetable, grade, …</strong> each add their screens under
+      <code>src/modules/&lt;id&gt;/</code>.</li>
+</ul>
+<div class="callout warn">
+  <span class="title">Status</span>
+  <code>frontend/web</code> does <strong>not exist yet</strong>. It is planned in T19. Every file
+  path in this lesson under <code>frontend/web</code> is what the plan describes, not code you can
+  open today.
+</div>
+
+<h2 id="ts-basics">2. TypeScript basics and strict mode</h2>
+<p><strong>TypeScript</strong> (TS) is JavaScript plus <strong>types</strong>. A type says what
+shape a value has. The TypeScript compiler checks your code <em>before</em> it runs, then removes
+the types. The browser only ever sees plain JavaScript. A good picture: types are a spell checker
+for your data.</p>
+<pre data-file="Basic types"><code>let credits: number = 3;
+const code: string = "CS101";
+let isOpen: boolean = true;
+const tags: string[] = ["core", "year-1"];
+
+function totalCredits(sections: { credits: number }[]): number {
+  return sections.reduce((sum, s) =&gt; sum + s.credits, 0);
+}
+
+totalCredits([{ credits: 3 }, { credits: "4" }]);
+<span class="c">//                                ^^^ error: string is not assignable to number</span></code></pre>
+<p>Often you do not write the type: TS <strong>infers</strong> it. <code>const code = "CS101"</code>
+already has type <code>"CS101"</code>. Write types on function parameters and on exported things;
+let TS infer the rest.</p>
+
+<h3><code>interface</code> or <code>type</code>?</h3>
+<p>Both give a name to an object shape:</p>
+<pre data-file="Two ways to name a shape"><code>interface Section {
+  id: string;
+  code: string;
+  capacity: number;
+  room?: string;          <span class="c">// ? = optional: string or undefined</span>
+  readonly createdAt: string;
+}
+
+type SectionId = string;                      <span class="c">// type can name ANY type…</span>
+type SeatStatus = "OPEN" | "FULL" | "CLOSED"; <span class="c">// …including a union (next section)</span></code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th><code>interface</code></th><th><code>type</code></th></tr></thead>
+<tbody>
+<tr><td>Object shapes</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Unions, tuples, primitives</td><td>No</td><td>Yes</td></tr>
+<tr><td>Extend</td><td><code>interface A extends B</code></td><td><code>type A = B &amp; { … }</code></td></tr>
+</tbody></table></div>
+<p>A simple rule: use <code>type</code> by default (it can do everything you need here), and use
+<code>interface</code> when you want to say "this is an object contract". Be consistent inside one
+module. Most of our API types will be <em>generated</em> anyway (lesson 14).</p>
+
+<h3>Strict mode</h3>
+<p>The spec rule is <code>strict: true</code> in <code>tsconfig.json</code> and <strong>no
+<code>any</code></strong>. Strict mode turns on many checks. The most important one is
+<strong><code>strictNullChecks</code></strong>: <code>null</code> and <code>undefined</code> are
+not hidden inside every type.</p>
+<pre data-file="strictNullChecks catches a real bug"><code>function roomLabel(s: Section): string {
+  return s.room.toUpperCase();
+  <span class="c">//     ^^^^^^ error: 's.room' is possibly 'undefined'</span>
+}
+
+function roomLabelFixed(s: Section): string {
+  return s.room?.toUpperCase() ?? "Room not set";   <span class="c">// ?. and ?? handle undefined</span>
+}</code></pre>
+<p>Without strict mode this compiles, and the page crashes for every section that has no room yet.</p>
+
+<h2 id="ts-unions">3. Unions, narrowing, <code>unknown</code>, generics</h2>
+<h3>Union types and narrowing</h3>
+<p>A <strong>union</strong> <code>A | B</code> means "either A or B". TS then forces you to check
+which one you have before you use it. That check is called <strong>narrowing</strong>.</p>
+<pre data-file="A discriminated union: one field tells which case it is"><code>type RegistrationResult =
+  | { status: "ENROLLED"; sectionId: string }
+  | { status: "WAITLISTED"; position: number }
+  | { status: "REJECTED"; code: string };
+
+function message(r: RegistrationResult): string {
+  switch (r.status) {
+    case "ENROLLED":
+      return `You got a seat in ${r.sectionId}`;   <span class="c">// here TS knows sectionId exists</span>
+    case "WAITLISTED":
+      return `You are number ${r.position} on the waitlist`;
+    case "REJECTED":
+      return `Not possible: ${r.code}`;
+  }
+}</code></pre>
+<p>If someone later adds a fourth status, TS reports that <code>message</code> no longer returns a
+string in every case. The compiler helps you find every place to update. Other ways to narrow:
+<code>typeof x === "string"</code>, <code>x instanceof ProblemError</code>, <code>"field" in x</code>,
+and <code>if (x)</code> for null checks.</p>
+
+<h3><code>unknown</code> instead of <code>any</code></h3>
+<div class="compare">
+  <div class="poor"><h4><code>any</code>: turns checking off</h4>
+<pre><code>const body: any = await res.json();
+body.sectoinId.trim();   <span class="c">// typo, no error, crash at runtime</span></code></pre></div>
+  <div class="good"><h4><code>unknown</code>: "check before use"</h4>
+<pre><code>const body: unknown = await res.json();
+if (isProblem(body)) {
+  show(body.code);        <span class="c">// safe after the check</span>
+}</code></pre></div>
+</div>
+<p>Data from outside (JSON from the network, <code>localStorage</code>, a caught error) is
+<code>unknown</code> until you check it. A <strong>type guard</strong> is a function that does the
+check and tells TS the result:</p>
+<pre data-file="A type guard"><code>function isProblem(x: unknown): x is { code: string; status: number } {
+  return typeof x === "object" &amp;&amp; x !== null &amp;&amp; "code" in x &amp;&amp; "status" in x;
+}</code></pre>
+
+<h3>Generics</h3>
+<p>A <strong>generic</strong> is a type with a parameter, written in angle brackets. It lets one
+function or type work for many types, without losing information. You already know
+<code>Array&lt;string&gt;</code> (same as <code>string[]</code>).</p>
+<pre data-file="A generic page type for our paginated APIs"><code>type Page&lt;T&gt; = {
+  items: T[];
+  page: number;
+  totalItems: number;
+};
+
+function firstItem&lt;T&gt;(page: Page&lt;T&gt;): T | undefined {
+  return page.items[0];
+}
+
+const sections: Page&lt;Section&gt; = await loadSections();
+const s = firstItem(sections);   <span class="c">// TS infers T = Section, so s is Section | undefined</span></code></pre>
+<p>The backend has the same idea: <code>DomainEvent&lt;P&gt;</code> in <code>shared-kernel</code> is
+generic in its payload type (<a href="08-outbox-idempotency.html">lesson 08</a>).</p>
+
+<h2 id="components">4. Components, JSX and props</h2>
+<p><strong>React</strong> builds a page from <strong>components</strong>. A component is a
+function that returns what should be on screen. Like LEGO bricks: small pieces, combined into
+bigger ones. The spec says: <strong>function components only</strong>.</p>
+<pre data-file="src/modules/course/section-card.tsx (example)"><code>type SectionCardProps = {
+  code: string;
+  title: string;
+  seatsLeft: number;
+};
+
+export function SectionCard({ code, title, seatsLeft }: SectionCardProps) {
+  return (
+    &lt;article className="section-card"&gt;
+      &lt;h3&gt;{code}: {title}&lt;/h3&gt;
+      {seatsLeft &gt; 0
+        ? &lt;p&gt;{seatsLeft} seats left&lt;/p&gt;
+        : &lt;p className="full"&gt;Full&lt;/p&gt;}
+    &lt;/article&gt;
+  );
+}</code></pre>
+<ul>
+  <li><strong>JSX</strong> is the HTML-like syntax inside JavaScript. It is turned into normal
+      function calls at build time. Files with JSX end in <code>.tsx</code>.</li>
+  <li><code>{ }</code> inside JSX means "a JavaScript expression here". You cannot write an
+      <code>if</code> statement inside; use <code>? :</code> or <code>&amp;&amp;</code>.</li>
+  <li>Use <code>className</code>, not <code>class</code> (a reserved word in JavaScript).</li>
+  <li>A component name starts with a <strong>capital letter</strong>: <code>&lt;SectionCard /&gt;</code>
+      is a component, <code>&lt;section&gt;</code> is an HTML tag.</li>
+</ul>
+<p><strong>Props</strong> ("properties") are the inputs of a component, like the parameters of a
+function. They flow <strong>down</strong>, from parent to child, and the child must
+<strong>not</strong> change them.</p>
+<pre data-file="Using the component"><code>&lt;SectionCard code="CS101" title="Programming 1" seatsLeft={12} /&gt;
+&lt;SectionCard code="CS102" title="Data structures" seatsLeft="12" /&gt;
+<span class="c">{/*                                               ^^^^ error: string is not number */}</span></code></pre>
+
+<h2 id="state">5. State, events and forms</h2>
+<p><strong>State</strong> is data that belongs to a component and can change over time, like the
+text in a search box. When state changes, React calls your component again and updates the screen.
+You create state with the <code>useState</code> <strong>hook</strong> (hooks are functions whose
+names start with <code>use</code>; they give components extra powers).</p>
+<pre data-file="A counter"><code>import { useState } from "react";
+
+export function SeatPicker() {
+  const [seats, setSeats] = useState(1);      <span class="c">// current value + a function to change it</span>
+  return (
+    &lt;div&gt;
+      &lt;button type="button" onClick={() =&gt; setSeats(seats - 1)} disabled={seats &lt;= 1}&gt;−&lt;/button&gt;
+      &lt;span&gt;{seats}&lt;/span&gt;
+      &lt;button type="button" onClick={() =&gt; setSeats(seats + 1)}&gt;+&lt;/button&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+<p>Rules of hooks: call them only at the <strong>top level</strong> of a component (not inside
+<code>if</code> or loops), and only from components or other hooks. ESLint checks this for you.</p>
+<p>Never change state directly (<code>seats++</code> or <code>list.push(x)</code>). Always call the
+setter with a <strong>new</strong> value: <code>setList([...list, x])</code>. React compares the old
+and new value to decide what to redraw.</p>
+
+<h3>Controlled forms</h3>
+<p>In a <strong>controlled</strong> input, React state is the single source of truth: the input
+shows the state, and every key press updates the state.</p>
+<pre data-file="src/modules/lostfound/report-form.tsx (example)"><code>import { useState } from "react";
+
+type ReportFormProps = { onSubmit: (title: string) =&gt; void };
+
+export function ReportForm({ onSubmit }: ReportFormProps) {
+  const [title, setTitle] = useState("");
+  const tooShort = title.trim().length &lt; 3;
+
+  return (
+    &lt;form
+      onSubmit={(e) =&gt; {
+        e.preventDefault();          <span class="c">// stop the browser from reloading the page</span>
+        onSubmit(title.trim());
+        setTitle("");
+      }}
+    &gt;
+      &lt;label&gt;
+        What did you lose?
+        &lt;input value={title} onChange={(e) =&gt; setTitle(e.target.value)} /&gt;
+      &lt;/label&gt;
+      &lt;button type="submit" disabled={tooShort}&gt;Report&lt;/button&gt;
+    &lt;/form&gt;
+  );
+}</code></pre>
+<p>Notice two things. <code>tooShort</code> is not state: it is <strong>derived</strong> from
+<code>title</code>, so it is just calculated on each render. And the form does not call the API
+itself; it gives the value to its parent through the <code>onSubmit</code> prop, which makes it easy
+to test (lesson 14).</p>
+
+<h2 id="lists">6. Lists, keys, composition, context</h2>
+<h3>Lists and keys</h3>
+<pre data-file="Rendering a list"><code>export function SectionList({ sections }: { sections: Section[] }) {
+  if (sections.length === 0) return &lt;p&gt;No sections found.&lt;/p&gt;;
+  return (
+    &lt;ul&gt;
+      {sections.map((s) =&gt; (
+        &lt;li key={s.id}&gt;{s.code}&lt;/li&gt;     <span class="c">{/* key: a stable, unique id */}</span>
+      ))}
+    &lt;/ul&gt;
+  );
+}</code></pre>
+<p>The <code>key</code> tells React which item is which between renders. Use the database id (our
+ids are UUIDs). Do <strong>not</strong> use the array index: when a student drops a section from
+the middle of the list, the indexes shift and React can show the wrong data in the wrong row.</p>
+
+<h3>Composition with <code>children</code></h3>
+<p>Instead of one giant component with many options, build small ones and put them inside each
+other. The special prop <code>children</code> is whatever you put between the tags:</p>
+<pre data-file="src/shared/ui/card.tsx (example)"><code>import type { ReactNode } from "react";
+
+export function Card({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    &lt;section className="card"&gt;
+      &lt;h2&gt;{title}&lt;/h2&gt;
+      {children}
+    &lt;/section&gt;
+  );
+}
+
+<span class="c">// usage</span>
+&lt;Card title="My week"&gt;
+  &lt;SectionList sections={mySections} /&gt;
+&lt;/Card&gt;</code></pre>
+
+<h3>Context: data many components need</h3>
+<p>Passing the same prop through five levels ("prop drilling") is tiring. <strong>Context</strong>
+lets a parent provide a value that any child below can read. Use it for things that are truly
+global for a part of the page: the current user, the language, the theme. Do not use it for every
+piece of state.</p>
+<pre data-file="A typed context (example; the real ones come with identity and shell)"><code>import { createContext, useContext } from "react";
+import type { ReactNode } from "react";
+
+type Locale = "vi" | "en";
+const LocaleContext = createContext&lt;Locale | null&gt;(null);
+
+export function LocaleProvider({ locale, children }: { locale: Locale; children: ReactNode }) {
+  return &lt;LocaleContext.Provider value={locale}&gt;{children}&lt;/LocaleContext.Provider&gt;;
+}
+
+export function useLocale(): Locale {
+  const locale = useContext(LocaleContext);
+  if (locale === null) throw new Error("useLocale must be used inside LocaleProvider");
+  return locale;
+}</code></pre>
+<p>The small hook <code>useLocale</code> hides the <code>null</code> check, so every caller gets a
+real <code>Locale</code> and a clear error if the provider is missing.</p>
+
+<h2 id="effects">7. <code>useEffect</code> and data fetching</h2>
+<p><code>useEffect</code> runs code <strong>after</strong> React has drawn the screen. It is for
+<strong>synchronising with something outside React</strong>: a browser API, a timer, a WebSocket
+subscription, the page title.</p>
+<pre data-file="A good use of useEffect"><code>useEffect(() =&gt; {
+  document.title = `${unread} new messages`;
+}, [unread]);           <span class="c">// dependency list: run again only when unread changes</span>
+
+useEffect(() =&gt; {
+  const id = setInterval(refreshClock, 1000);
+  return () =&gt; clearInterval(id);    <span class="c">// cleanup: runs before the next effect and on unmount</span>
+}, []);</code></pre>
+
+<p>Many tutorials load data with <code>useEffect</code>. It works for a demo, but look at what you
+must write to do it correctly:</p>
+<pre data-file="Fetching with useEffect (do NOT copy this into Smart Campus)"><code>const [data, setData] = useState&lt;Ping | null&gt;(null);
+const [error, setError] = useState&lt;unknown&gt;(null);
+const [loading, setLoading] = useState(true);
+
+useEffect(() =&gt; {
+  let ignore = false;                       <span class="c">// avoid a race: old answer arriving late</span>
+  fetch("/api/v1/platform/ping")
+    .then((r) =&gt; r.json())
+    .then((d) =&gt; { if (!ignore) setData(d); })
+    .catch((e) =&gt; { if (!ignore) setError(e); })
+    .finally(() =&gt; { if (!ignore) setLoading(false); });
+  return () =&gt; { ignore = true; };
+}, []);</code></pre>
+<div class="callout bad">
+  <span class="title">Why not to fetch data in useEffect</span>
+  <ul>
+    <li><strong>No cache:</strong> every component that needs the same data asks the server again;
+        going back to a page shows a spinner again.</li>
+    <li><strong>Races:</strong> without the <code>ignore</code> flag, a slow old answer can overwrite a
+        newer one.</li>
+    <li><strong>Boilerplate:</strong> loading, error, retry and refresh logic, copied into every screen.</li>
+    <li><strong>Double calls in development:</strong> React's <code>StrictMode</code> mounts components
+        twice in dev on purpose, so you see two requests.</li>
+  </ul>
+  The Smart Campus stack (Capability Map, assumption 6) uses <strong>TanStack Query</strong> for
+  server data instead. It solves all four problems. See
+  <a href="14-frontend-api-testing.html">lesson 14</a>.
+</div>
+
+<h2 id="vite">8. Vite and the project layout</h2>
+<p><strong>Vite</strong> is the build tool. It has two jobs:</p>
+<div class="flow">
+  <div class="box accent"><b><code>npm run dev</code></b>A dev server on <code>http://localhost:5173</code>. Very fast start; when you save a file the page updates at once (hot module replacement).</div>
+  <div class="box ok"><b><code>npm run build</code></b>Type-checks, then bundles and minifies everything into <code>dist/</code>: small static files any web server can serve.</div>
+</div>
+
+<h3>The <code>/api</code> proxy</h3>
+<p>In development the page comes from Vite (:5173) but the API is the gateway (:8080). A browser
+treats two ports as two different <em>origins</em> and would block the calls (CORS). The fix is a
+<strong>proxy</strong>: the page calls <code>/api/…</code> on Vite, and Vite forwards the request to
+the gateway. For the browser it is all one origin.</p>
+<pre data-file="frontend/web/vite.config.ts (planned in T19.4, sketch)"><code>import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      "/api": "http://localhost:8080",     <span class="c">// the gateway: the single entry point</span>
+    },
+  },
+});</code></pre>
+<div class="flow">
+  <div class="box"><b>Browser</b><code>fetch("/api/v1/platform/ping")</code></div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>Vite :5173</b>path starts with <code>/api</code> → forward</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>gateway :8080</b>routes to core-app :8081</div>
+</div>
+<p>Because the code always uses relative URLs like <code>/api/v1/…</code>, the same build also works
+in production, where a web server sits in front of the gateway.</p>
+
+<h3><code>VITE_</code> environment variables</h3>
+<p>Vite reads <code>.env</code> files and gives your code only the variables whose names start with
+<code>VITE_</code>, through <code>import.meta.env</code>:</p>
+<pre data-file="frontend/web/.env (example)"><code>VITE_APP_NAME=Smart Campus</code></pre>
+<pre data-file="Reading it"><code>const appName = import.meta.env.VITE_APP_NAME;
+if (import.meta.env.DEV) console.debug("dev mode");</code></pre>
+<div class="callout warn">
+  <span class="title">Never put a secret in a <code>VITE_</code> variable</span>
+  The value is copied into the JavaScript bundle at build time. Anyone can read it with "View
+  source". API keys, passwords and client secrets stay on the server. (The <code>VITE_</code>
+  prefix exists exactly so that other env vars on your machine are not leaked by accident.)
+</div>
+
+<h3>Folders, file names, exports</h3>
+<pre class="diagram">frontend/web/                   (planned in T19)
+├── package.json               scripts + pinned versions
+├── vite.config.ts             React plugin, /api proxy, Vitest settings
+├── tsconfig.json              strict: true
+└── src/
+    ├── main.tsx               entry point: renders the app into index.html
+    ├── shell/                 menu, layout, routes, i18n         (module 3: shell)
+    ├── modules/
+    │   ├── course/            one folder per module id, e.g.
+    │   └── registration/      section-list.tsx, use-sections.ts …
+    └── shared/
+        ├── api/
+        │   ├── http.ts        fetch client + ProblemError       (T19.6, lesson 14)
+        │   └── generated/     openapi-typescript output, DO NOT EDIT
+        └── ui/                buttons, cards, form fields</pre>
+<p>This follows the Architecture's <code>src/{shell, modules/&lt;id&gt;, shared}</code>. A module
+folder uses the same id as the backend module and the API prefix, so
+<code>/api/v1/course/…</code> ↔ <code>src/modules/course/</code>.</p>
+<ul>
+  <li><strong>kebab-case file names</strong> (spec rule): <code>section-card.tsx</code>,
+      <code>use-sections.ts</code>. Windows does not care about upper/lower case in file names, but
+      Linux CI does; all-lowercase names avoid "works on my machine" import errors.</li>
+  <li><strong>Named exports</strong> (spec rule): <code>export function SectionCard</code>, then
+      <code>import { SectionCard } from "./section-card"</code>. The name is the same everywhere, and
+      rename tools and search work. (React's <code>lazy()</code> expects a default export; lesson 18
+      shows the small adapter the shell uses.)</li>
+  <li><strong><code>import type</code></strong> for things that are only types:
+      <code>import type { ReactNode } from "react"</code>. The import disappears from the output.</li>
+</ul>
+
+<h3>npm scripts</h3>
+<p>Every command goes through <code>package.json</code> scripts, so CI and you run exactly the same
+thing. From the repo root, add <code>--prefix frontend/web</code>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>What it does</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td><code>npm ci</code></td><td>Install exactly the versions in <code>package-lock.json</code> (use this, not <code>npm install</code>, in CI and after a pull)</td><td>T19</td></tr>
+<tr><td><code>npm run dev</code></td><td>Vite dev server on :5173 with the proxy</td><td>T19.4</td></tr>
+<tr><td><code>npm run gen:api</code></td><td>Generate TS types from <code>docs/api/*.json</code></td><td>T19.5</td></tr>
+<tr><td><code>npm run lint</code> / <code>format</code></td><td>ESLint / Prettier</td><td>T19.2</td></tr>
+<tr><td><code>npm run test</code></td><td>Vitest, once (<code>vitest run</code>)</td><td>T19.3</td></tr>
+<tr><td><code>npm run build</code></td><td>Type-check + production bundle in <code>dist/</code></td><td>T19.1</td></tr>
+</tbody></table></div>
+<p>The spec pins exact versions: no <code>^</code> on major versions, no <code>latest</code>.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Scaffold, strict TS, pinned versions</td><td><code>frontend/web/package.json</code>, <code>tsconfig.json</code> (planned)</td><td>T19.1</td></tr>
+<tr><td>Proxy <code>/api</code> → :8080, empty <code>shell</code>/<code>modules</code>/<code>shared</code></td><td><code>frontend/web/vite.config.ts</code>, <code>src/</code> (planned)</td><td>T19.4</td></tr>
+<tr><td>Entry point and home page calling ping</td><td><code>frontend/web/src/main.tsx</code> (planned)</td><td>T19.7</td></tr>
+<tr><td>The API it calls</td><td><code>backend/core-app/src/main/java/edu/campus/platform/PingController.java</code> (exists)</td><td>T6</td></tr>
+<tr><td>TS rules: strict, no <code>any</code>, function components, named exports, kebab-case</td><td><code>SPEC-platform.md</code>, Code Style</td><td>all</td></tr>
+<tr><td>Menu, routing, lazy modules, i18n</td><td><code>frontend/web/src/shell/</code></td><td>module 3 (shell)</td></tr>
+<tr><td>Screens</td><td><code>frontend/web/src/modules/&lt;id&gt;/</code></td><td>modules 4–14</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Using <code>any</code> to "make the error go away".</strong> Use <code>unknown</code>
+      and narrow, or fix the type. The spec forbids <code>any</code>.</li>
+  <li><strong>Changing state in place</strong> (<code>list.push</code>, <code>obj.x = 1</code>). React
+      may not redraw. Create a new array or object.</li>
+  <li><strong>Storing derived values in state</strong> (for example <code>isValid</code> next to
+      <code>title</code>). They get out of sync. Calculate them during render.</li>
+  <li><strong>Using the array index as <code>key</code></strong> in lists that can change order.</li>
+  <li><strong>Fetching data in <code>useEffect</code></strong> in feature code. Use TanStack Query.</li>
+  <li><strong>Writing <code>http://localhost:8080</code> in components.</strong> Always use
+      relative <code>/api/…</code> URLs; the proxy handles dev.</li>
+  <li><strong>Secrets in <code>VITE_</code> variables.</strong> They end up in the public bundle.</li>
+  <li><strong>Editing files in <code>src/shared/api/generated/</code>.</strong> The next
+      <code>gen:api</code> overwrites them, and CI fails because the files differ.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<p>You can do steps 1 to 4 today in a throw-away folder outside the repo. Do steps 5 and 6 once T19
+is built.</p>
+<ol class="steps">
+  <li><p>Create a practice app with the official Vite template (outside <code>C:\Smart Campus</code>):</p>
+<pre><code>npm create vite@latest ts-practice -- --template react-ts
+cd ts-practice
+npm install
+npm run dev</code></pre>
+      <p>Open <code>tsconfig.app.json</code> and find <code>"strict": true</code>. (In the real
+      project, versions are pinned; here it is only practice.)</p></li>
+  <li><p>Write the <code>RegistrationResult</code> union from section 3 and the
+      <code>message</code> function. Add a fourth status <code>"PENDING"</code> and read the error TS
+      gives you.</p></li>
+  <li><p>Build <code>SectionCard</code> and <code>SectionList</code> with three hard-coded
+      sections. Remove one with a button (use <code>filter</code> to make a <em>new</em> array).</p></li>
+  <li><p>Build the <code>ReportForm</code>. Make the button disabled until the text has 3 characters.
+      Do not store "disabled" in state.</p></li>
+  <li><p>(After T19) Start the gateway and core-app, then <code>npm --prefix frontend/web run dev</code>.
+      Open the browser's Network tab: the ping request goes to :5173, not :8080. Why does it still
+      work?</p></li>
+  <li><p>(After T19) Add <code>VITE_APP_NAME</code> to a <code>.env.local</code> file, show it in
+      the header, run <code>npm run build</code>, and search for the value inside <code>dist/</code>.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Type</td><td>A description of what shape a value has.</td></tr>
+<tr><td>Inference</td><td>TypeScript guessing a type from the code, so you do not write it.</td></tr>
+<tr><td>Union</td><td>"One of these types": <code>A | B</code>.</td></tr>
+<tr><td>Narrowing</td><td>A check that tells TS which case of a union you have.</td></tr>
+<tr><td><code>unknown</code></td><td>"Could be anything; check it before use." The safe opposite of <code>any</code>.</td></tr>
+<tr><td>Generic</td><td>A type with a type parameter, like <code>Page&lt;T&gt;</code>.</td></tr>
+<tr><td>Component</td><td>A function that returns part of the screen.</td></tr>
+<tr><td>JSX</td><td>HTML-like syntax inside JavaScript/TypeScript (<code>.tsx</code> files).</td></tr>
+<tr><td>Props</td><td>The inputs a parent gives to a child component.</td></tr>
+<tr><td>State</td><td>Data owned by a component that can change and triggers a redraw.</td></tr>
+<tr><td>Hook</td><td>A function starting with <code>use</code> that adds a React feature to a component.</td></tr>
+<tr><td>Controlled input</td><td>An input whose value always comes from React state.</td></tr>
+<tr><td>Context</td><td>A value a parent provides to all components below it.</td></tr>
+<tr><td>Proxy (dev)</td><td>Vite forwarding <code>/api</code> calls to the gateway, so the browser sees one origin.</td></tr>
+<tr><td>Bundle</td><td>The small, combined JavaScript files that <code>npm run build</code> makes.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why does the spec forbid <code>any</code> but allow <code>unknown</code>?</summary>
+    <p><code>any</code> switches type checking off, so typos and wrong shapes crash only at runtime.
+    <code>unknown</code> also accepts any value, but TS forces you to check it before use, so the
+    check happens in the code where it belongs.</p></details>
+  <details><summary>2. Why is a discriminated union (<code>status: "ENROLLED" | …</code>) better than one object with many optional fields?</summary>
+    <p>Each case says exactly which fields exist. After a <code>switch</code> on <code>status</code>,
+    TS knows the fields, and when a new case is added, the compiler shows every place that does not
+    handle it yet. Optional fields allow impossible mixes, like a rejected result with a seat.</p></details>
+  <details><summary>3. Why must list items have a stable <code>key</code>, and why not the index?</summary>
+    <p>React uses the key to match items between renders. If an item is removed in the middle,
+    indexes shift, so React may reuse the wrong row (with its input text or focus). A database id
+    stays with the same item.</p></details>
+  <details><summary>4. Why do we not load server data in <code>useEffect</code> in Smart Campus?</summary>
+    <p>You would have to write caching, race protection, loading/error state and retries by hand on
+    every screen, and StrictMode makes extra calls in dev. TanStack Query does all of this in one
+    tested place.</p></details>
+  <details><summary>5. Why does the frontend call <code>/api/v1/…</code> and not <code>http://localhost:8080/api/v1/…</code>?</summary>
+    <p>A relative URL keeps the browser on one origin, so there are no CORS problems. In dev the Vite
+    proxy forwards it to the gateway; in production the web server does. The same code works in both
+    without changes.</p></details>
+  <details><summary>6. Why kebab-case file names and named exports?</summary>
+    <p>Windows ignores letter case in file names but Linux CI does not, so mixed-case names can work
+    locally and fail in CI. Named exports keep one name for each thing in every file, which makes
+    search, rename and auto-import reliable.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://www.typescriptlang.org/docs/handbook/intro.html">The TypeScript Handbook</a>: especially "Everyday Types", "Narrowing" and "Generics".</li>
+  <li><a href="https://www.typescriptlang.org/tsconfig/#strict">TSConfig reference: strict</a>: what strict mode turns on.</li>
+  <li><a href="https://react.dev/learn">react.dev: Learn React</a>: components, props, state, lists and keys.</li>
+  <li><a href="https://react.dev/learn/you-might-not-need-an-effect">react.dev: You Might Not Need an Effect</a>: when not to use <code>useEffect</code>.</li>
+  <li><a href="https://react.dev/learn/passing-data-deeply-with-context">react.dev: Passing data deeply with context</a>.</li>
+  <li><a href="https://vite.dev/guide/">Vite guide</a>, <a href="https://vite.dev/config/server-options.html#server-proxy">server.proxy</a> and <a href="https://vite.dev/guide/env-and-mode.html">Env variables and modes</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

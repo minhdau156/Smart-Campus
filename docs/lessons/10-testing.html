@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backend Testing Lesson</title>
+<meta name="description" content="Smart Campus lesson 10: testing with JUnit 5, AssertJ, Spring test slices, Testcontainers, Awaitility, ArchUnit, JaCoCo and TDD.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="10">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 10 · Part 1: Foundations</div>
+<h1>Testing: JUnit, Testcontainers, ArchUnit</h1>
+<p class="lede">In Smart Campus a task is "done" only when <code>./mvnw verify</code> is green.
+This lesson shows the kinds of tests we write, the tools for each, and the rules that keep the
+tests honest.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module</span>
+  <span class="badge task">every task</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Core skill</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="02-maven.html">02 (Maven phases, surefire, failsafe)</a>,
+  <a href="03-spring-boot.html">03 (beans, profiles)</a> and
+  <a href="05-docker-compose.html">05 (Docker)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#pyramid">The test pyramid: Test vs IT</a></li>
+    <li><a href="#junit">JUnit 5 and AssertJ</a></li>
+    <li><a href="#control">Control time and helpers: Clock, fakes, mocks</a></li>
+    <li><a href="#spring">Spring tests: slices and full app</a></li>
+    <li><a href="#containers">Real infrastructure: Testcontainers, Awaitility</a></li>
+    <li><a href="#arch">Architecture tests</a></li>
+    <li><a href="#tdd">TDD, coverage and flaky tests</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Many Smart Campus promises cannot be seen by clicking around: "an event is never lost", "a
+student is never enrolled twice", "a module never reads another module's tables". The only way to
+know they hold, today and after every change, is a test that <strong>fails</strong> when they break.</p>
+<p>The project's Definition of Done (<code>tasks/todo.md</code>): <code>./mvnw verify</code> is
+green, with <strong>no new suppressions and no disabled tests</strong>. So tests are not extra
+work at the end; they are how a task is finished.</p>
+
+<h2 id="pyramid">2. The test pyramid: Test vs IT</h2>
+<pre class="diagram">              ▲  few, slow, real everything
+             ╱ ╲      smoke script (curl through the gateway)          infra/smoke.sh (planned)
+            ╱   ╲
+           ╱ IT  ╲    integration tests: real Postgres/Kafka/Redis    *IT  → failsafe
+          ╱───────╲
+         ╱  unit   ╲  plain Java, Spring slices, architecture rules   *Test → surefire
+        ╱───────────╲
+       many, fast (milliseconds), no Docker</pre>
+<p>Write <strong>many</strong> fast unit tests and <strong>fewer</strong> slow integration tests.
+A unit test tells you exactly which method broke. An integration test tells you the pieces really
+work together (SQL is valid, Kafka really gets the record).</p>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>Unit test</th><th>Integration test</th></tr></thead>
+<tbody>
+<tr><td>Class name</td><td><code>…Test</code></td><td><code>…IT</code></td></tr>
+<tr><td>Maven plugin</td><td><code>maven-surefire-plugin</code>, phase <code>test</code></td><td><code>maven-failsafe-plugin</code>, phases <code>integration-test</code> + <code>verify</code></td></tr>
+<tr><td>Needs Docker?</td><td>No</td><td>Usually yes (Testcontainers)</td></tr>
+<tr><td>Examples</td><td><code>TopicsTest</code>, <code>PingControllerTest</code>, <code>ModularityTest</code></td><td><code>OutboxIT</code>, <code>ProblemJsonIT</code>, <code>OpenApiExportIT</code></td></tr>
+</tbody></table></div>
+<pre data-file="Commands (Windows)"><code>.\mvnw.cmd test                 <span class="c"># unit tests only: fast, no Docker</span>
+.\mvnw.cmd verify               <span class="c"># unit + ITs + spotless:check + coverage gate</span>
+.\mvnw.cmd verify -DskipUTs     <span class="c"># only the ITs (our own switch in the root pom)</span>
+.\mvnw.cmd -pl backend/core-app -am test "-Dtest=TopicsTest" "-Dsurefire.failIfNoSpecifiedTests=false"</code></pre>
+<p>Both kinds live in <code>src/test/java</code>. Only the name decides who runs them.</p>
+
+<h2 id="junit">3. JUnit 5 and AssertJ</h2>
+<p><strong>JUnit 5</strong> (JUnit Jupiter) runs the tests. <strong>AssertJ</strong> writes the
+checks in a readable, chained style. A good test has three parts: <strong>arrange</strong> (set
+up), <strong>act</strong> (call one thing), <strong>assert</strong> (check the result).</p>
+<pre data-file="backend/shared-kernel/src/test/java/edu/campus/kernel/event/TopicsTest.java (part)"><code><span class="k">@Test</span>
+void byNameFailsForAnUnknownTopic() {
+    assertThatIllegalArgumentException()
+            .isThrownBy(() -&gt; Topics.byName(<span class="s">"grades"</span>))
+            .withMessageContaining(<span class="s">"grades"</span>);
+}</code></pre>
+
+<h3>Many cases, one test: <code>@ParameterizedTest</code></h3>
+<p>One method, run once per row. Great for tables, like the Arch §6 topic table:</p>
+<pre data-file="TopicsTest.java (part)"><code><span class="k">@ParameterizedTest</span>
+<span class="k">@CsvSource</span>({
+    <span class="s">"REGISTRATION_REQUESTS, registration.requests, 12, sectionId,   false"</span>,
+    <span class="s">"REGISTRATION_EVENTS,   registration.events,    6, studentId,   true"</span>,
+    …
+})
+void topicMatchesTheArchitectureTable(
+        Topics topic, String name, int partitions, String keyField, boolean replayable) {
+    assertThat(topic.topicName()).isEqualTo(name);
+    assertThat(topic.partitions()).isEqualTo(partitions);
+    …
+}</code></pre>
+<p>JUnit converts each CSV value to the parameter type (here even the enum <code>Topics</code>).</p>
+
+<h3>Grouping: <code>@Nested</code></h3>
+<p>An inner class marked <code>@Nested</code> groups tests about one situation, and the report
+reads like a sentence. Our code does not use it yet; it is handy once a domain class has many rules:</p>
+<pre data-file="Example (planned style for a feature module)"><code>class SectionTest {
+    <span class="k">@Nested</span>
+    class WhenFull {
+        <span class="k">@Test</span> void refusesANewStudent() { … }
+        <span class="k">@Test</span> void putsTheStudentOnTheWaitlist() { … }
+    }
+}</code></pre>
+
+<div class="callout tip">
+  <span class="title">Name tests as facts</span>
+  Our names say what must be true: <code>aRolledBackProbeIsNeverPublished</code>,
+  <code>sharedKernelIsALibraryNotAModule</code>. When one fails, the name alone tells you which
+  promise broke.
+</div>
+
+<h2 id="control">4. Control time and helpers: Clock, fakes, mocks</h2>
+<h3>A fixed Clock</h3>
+<p>Project rule: never call <code>Instant.now()</code>; ask for a <code>Clock</code>. In a test you
+pass a clock that never moves, so the result is the same on every run:</p>
+<pre data-file="backend/shared-kernel/src/test/java/edu/campus/kernel/testing/Clocks.java (part)"><code>public static Clock fixedAt(String isoInstant) {
+    return Clock.fixed(Instant.parse(isoInstant), ZoneOffset.UTC);
+}</code></pre>
+<p><code>Clocks</code> is shared with other modules through the shared-kernel <strong>test-jar</strong>.
+<code>PingControllerTest</code> does the same with a test bean and then checks the exact time
+<code>"2026-09-07T08:00:00Z"</code> in the answer.</p>
+
+<h3>Fakes vs mocks</h3>
+<div class="compare">
+  <div><h4>Fake</h4>
+    <p>A small, real, simple version of a dependency, e.g. an in-memory repository built on a
+    <code>HashMap</code>. You check the <em>result</em>.</p></div>
+  <div><h4>Mock</h4>
+    <p>A generated stand-in (Mockito) that you program ("when called with X, return Y") and then ask
+    "were you called?". You check the <em>interaction</em>.</p></div>
+</div>
+<p>Mockito comes with <code>spring-boot-starter-test</code>, but <strong>no Smart Campus test uses
+it yet</strong>. The project prefers real objects, a fixed <code>Clock</code>, small fakes, and real
+infrastructure in Testcontainers. Mocks are fine at a boundary you cannot run, like a payment
+gateway or a push service. Too many mocks test your guesses about the code, not the code. (In a
+Spring test, Spring's <code>@MockitoBean</code> replaces a bean with a mock; the older
+<code>@MockBean</code> is not used in Boot 4.)</p>
+
+<h2 id="spring">5. Spring tests: slices and full app</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Kind</th><th>What starts</th><th>Speed</th><th>Smart Campus example</th></tr></thead>
+<tbody>
+<tr><td>Plain JUnit</td><td>Nothing; you call <code>new</code></td><td>Fastest</td><td><code>TopicsTest</code>, <code>ProbeTopicTest</code>, <code>ModularityTest</code></td></tr>
+<tr><td>Slice: <code>@WebMvcTest</code></td><td>Only the web layer for one controller; no DB</td><td>Fast</td><td><code>PingControllerTest</code></td></tr>
+<tr><td><code>@SpringBootTest</code></td><td>The whole app (here on a random port)</td><td>Slow</td><td><code>CoreApplicationIT</code>, <code>OutboxIT</code></td></tr>
+</tbody></table></div>
+<pre data-file="backend/core-app/src/test/java/edu/campus/platform/PingControllerTest.java (part)"><code><span class="k">@WebMvcTest</span>(PingController.class)        <span class="c">// org.springframework.boot.webmvc.test.autoconfigure</span>
+class PingControllerTest {
+
+    <span class="k">@TestConfiguration</span>
+    static class FixedClock {
+        <span class="k">@Bean</span> Clock clock() { return Clock.fixed(Instant.parse(<span class="s">"2026-09-07T08:00:00Z"</span>), ZoneOffset.UTC); }
+    }
+
+    <span class="k">@Autowired</span> private MockMvcTester mvc;        <span class="c">// AssertJ-style MockMvc: no real HTTP</span>
+
+    <span class="k">@Test</span>
+    void pingReturnsAppVersionAndTime() {
+        var result = mvc.get().uri(<span class="s">"/api/v1/platform/ping"</span>).exchange();
+        assertThat(result).hasStatusOk();
+        assertThat(result).bodyJson().extractingPath(<span class="s">"$.time"</span>).isEqualTo(<span class="s">"2026-09-07T08:00:00Z"</span>);
+    }
+}</code></pre>
+<div class="callout warn">
+  <span class="title">Boot 4 moved the test slices</span>
+  In Spring Boot 4 each slice comes from its own test starter and package. <code>@WebMvcTest</code>
+  needs <code>spring-boot-starter-webmvc-test</code> and lives in
+  <code>org.springframework.boot.webmvc.test.autoconfigure</code>. Old Boot 3 tutorials show other
+  package names; trust the code in this repo.
+</div>
+<p><strong>Context caching</strong>: Spring keeps a started app context and reuses it for every test
+class with the <em>same</em> configuration. That is why <code>OutboxIT</code> uses exactly the same
+annotations as <code>CoreApplicationIT</code>: the app and its containers start once for both. A
+small difference (another profile, an extra bean) means a second, slow start.</p>
+
+<h2 id="containers">6. Real infrastructure: Testcontainers, Awaitility</h2>
+<h3>Testcontainers + <code>@ServiceConnection</code></h3>
+<p><strong>Testcontainers</strong> starts real Docker containers from a test. No shared test
+database, no "works on my machine": every run gets a fresh PostgreSQL and Kafka, with the
+<strong>same image tags</strong> as <code>infra/docker-compose.yml</code>.</p>
+<pre data-file="backend/core-app/src/test/java/edu/campus/TestcontainersConfiguration.java"><code><span class="k">@TestConfiguration</span>(proxyBeanMethods = false)
+public class TestcontainersConfiguration {
+
+    <span class="k">@Bean</span>
+    <span class="k">@ServiceConnection</span>                       <span class="c">// Spring reads URL, user, password from it</span>
+    PostgreSQLContainer postgres() {
+        return new PostgreSQLContainer(<span class="s">"postgres:19.0-alpine3.24"</span>);
+    }
+
+    <span class="k">@Bean</span>
+    <span class="k">@ServiceConnection</span>                       <span class="c">// sets the Kafka bootstrap servers</span>
+    KafkaContainer kafka() {
+        return new KafkaContainer(<span class="s">"apache/kafka:4.4.0"</span>);
+    }
+}</code></pre>
+<pre data-file="Using it (CoreApplicationIT, OutboxIT)"><code><span class="k">@SpringBootTest</span>(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+<span class="k">@ActiveProfiles</span>(<span class="s">"test"</span>)
+<span class="k">@Import</span>(TestcontainersConfiguration.class)
+class CoreApplicationIT { … }</code></pre>
+<p><code>@ServiceConnection</code> means the <code>test</code> profile needs <strong>no</strong>
+datasource URL or Kafka address. Redis comes the same way when the gateway tests need it (T14).
+One trap from T7: the Testcontainers DB user is a superuser, so a permission problem that would
+fail against Compose can hide in tests. <code>CoreApplicationIT.modulithDoesNotCreateTablesItself</code>
+guards that one case.</p>
+
+<h3>Waiting for async results: Awaitility</h3>
+<p>The outbox sends to Kafka <em>after</em> the commit, on another thread. A test cannot check
+right away, and <code>Thread.sleep(5000)</code> is both slow and flaky. <strong>Awaitility</strong>
+checks again and again until the condition is true, or fails after a limit:</p>
+<pre data-file="backend/core-app/src/test/java/edu/campus/platform/internal/OutboxIT.java (part)"><code><span class="c">// wait until the publication is marked complete, at most 10 s</span>
+await().atMost(Duration.ofSeconds(10)).until(() -&gt; completionDate(id) != null);
+
+<span class="c">// O2: for the WHOLE period, nothing may arrive (proves an absence)</span>
+await().during(twoRelayIntervals())
+       .atMost(twoRelayIntervals().plusSeconds(10))
+       .until(() -&gt; topic.recordsWithKey(id.toString()).isEmpty());</code></pre>
+<p><code>atMost</code> = "wait until it becomes true". <code>during</code> = "it must stay true for this
+long". The second one is how you test "nothing happens".</p>
+
+<h2 id="arch">7. Architecture tests</h2>
+<p>Some rules are about the <strong>shape of the code</strong>, not its behavior. These tests read
+the compiled classes and fail the build if the shape is wrong.</p>
+<ul>
+  <li><strong>Spring Modulith <code>verify()</code></strong> (<code>ModularityTest</code>): no module
+      uses another module's internals; no cycles (<a href="06-spring-modulith.html">lesson 06</a>).</li>
+  <li><strong>ArchUnit</strong>: a library for writing your own rules in Java. Our
+      <code>InternalPackageRule</code> says "no class may use a package named <code>internal</code> of
+      another module".</li>
+</ul>
+<pre data-file="backend/core-app/src/test/java/edu/campus/architecture/InternalPackageRule.java (part)"><code>static ArchRule noAccessToOtherModulesInternals(String root) {
+    return classes()
+            .that().resideInAPackage(root + <span class="s">".."</span>)
+            .should(notUseOtherModulesInternals(root))     <span class="c">// a custom ArchCondition</span>
+            .as(<span class="s">"classes should not use another module's internal package"</span>);
+}</code></pre>
+<p>A rule that never fails proves nothing, so <code>BoundaryViolationTest</code> runs both checks
+against a fixture that is <strong>wrong on purpose</strong> and asserts they throw (spec P3). The
+small helper methods are also unit-tested with a <code>@ParameterizedTest</code>
+(<code>InternalPackageRuleTest</code>). T12 (planned) adds the next rule the same way: no in-process
+listener on another module's events (D5), with its own violation fixture.</p>
+<p>Two more "shape" tests in core-app: <code>NoOwnPlatformConfigTest</code> (core-app must not
+repeat the starter's outbox settings) and <code>OpenApiExportIT</code> (the committed API docs match
+the code). Rules written as tests cannot be forgotten.</p>
+
+<h2 id="tdd">8. TDD, coverage and flaky tests</h2>
+<h3>Red, green, refactor</h3>
+<div class="flow">
+  <div class="box bad"><b>1. Red</b>Write a small test for the next behavior. Run it. See it fail for the right reason.</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>2. Green</b>Write the simplest code that makes it pass.</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>3. Refactor</b>Clean up names and duplication. Tests stay green.</div>
+</div>
+<p>Seeing the test fail first matters: it proves the test can fail. The task notes record this
+habit, for example in T5 "golden test and table test both seen failing", and in T9 the export check
+was "seen failing with a tampered file".</p>
+
+<h3>Coverage with JaCoCo</h3>
+<p><strong>JaCoCo</strong> records which lines the tests ran. Every build writes a report to
+<code>target/site/jacoco/index.html</code> in each module (root <code>pom.xml</code>).
+<code>shared-kernel</code> has a gate: under <strong>90% line coverage</strong> the build fails
+(T4.6). Other modules set their own gate in their spec. Coverage shows what is <em>not</em> tested;
+a high number does not prove the tests check the right things.</p>
+
+<h3>The rules that keep tests honest</h3>
+<div class="callout bad">
+  <span class="title">Never (spec "Boundaries")</span>
+  Never delete a failing test, or add <code>@Disabled</code>, to get to green. Never lower a coverage
+  gate without asking first.
+</div>
+<p>A <strong>flaky test</strong> passes sometimes and fails sometimes with no code change. The
+causes are almost always time (<code>Instant.now()</code>, <code>sleep</code>), order (tests sharing
+data), or async work. The spec's policy: a flaky test is <strong>fixed</strong>, or quarantined with
+an issue link; it is never silently deleted. Typical fixes in this project: a fixed <code>Clock</code>,
+Awaitility instead of sleep, and a unique key per test (each <code>OutboxIT</code> test uses its
+own probe id, so tests do not see each other's records).</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>surefire / failsafe / JaCoCo / <code>skipUTs</code></td><td>root <code>pom.xml</code></td><td>T2</td></tr>
+<tr><td>Coverage gate 90%</td><td><code>backend/shared-kernel/pom.xml</code></td><td>T4</td></tr>
+<tr><td>Test clocks (shared test-jar)</td><td><code>backend/shared-kernel/src/test/java/edu/campus/kernel/testing/Clocks.java</code></td><td>T4</td></tr>
+<tr><td>Table and golden-file tests</td><td><code>TopicsTest</code>, <code>DomainEventJsonTest</code> + <code>src/test/resources/golden/domain-event.json</code></td><td>T5</td></tr>
+<tr><td>Web slice test</td><td><code>backend/core-app/src/test/java/edu/campus/platform/PingControllerTest.java</code></td><td>T6, T8</td></tr>
+<tr><td>Containers</td><td><code>backend/core-app/src/test/java/edu/campus/TestcontainersConfiguration.java</code></td><td>T6, T7</td></tr>
+<tr><td>Async + Kafka ITs</td><td><code>backend/core-app/src/test/java/edu/campus/platform/internal/OutboxIT.java</code>, <code>KafkaTestConsumer.java</code></td><td>T7</td></tr>
+<tr><td>Architecture tests</td><td><code>ModularityTest</code>, <code>backend/core-app/src/test/java/edu/campus/architecture/</code></td><td>T6</td></tr>
+<tr><td>Full-app HTTP tests</td><td><code>CoreApplicationIT</code>, <code>ProblemJsonIT</code>, <code>OpenApiExportIT</code></td><td>T6, T8, T9</td></tr>
+<tr><td>Gateway + Redis ITs, smoke script</td><td><code>GatewayRoutingIT</code>, <code>RateLimitIT</code>, <code>infra/smoke.sh</code> (planned)</td><td>T13, T14</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Naming an integration test <code>…Test</code>.</strong> Surefire runs it in the fast
+      phase, and <code>.\mvnw.cmd test</code> suddenly needs Docker.</li>
+  <li><strong><code>Thread.sleep</code> in tests.</strong> Use Awaitility.</li>
+  <li><strong><code>Instant.now()</code> in code under test.</strong> Inject a <code>Clock</code>.</li>
+  <li><strong>Tests that depend on each other's data.</strong> Use unique ids per test.</li>
+  <li><strong>Small config differences between IT classes.</strong> Each difference starts another
+      app context and more containers.</li>
+  <li><strong>Mocking everything.</strong> Then the test only repeats the code. Prefer real objects
+      and real infrastructure.</li>
+  <li><strong>A rule test with no failing example.</strong> Keep a fixture that proves it fails.</li>
+  <li><strong>Making a test green by weakening it.</strong> Fix the code, or change the spec first.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Run the fast tests, then open a coverage report:</p>
+<pre><code>.\mvnw.cmd test
+start backend\shared-kernel\target\site\jacoco\index.html</code></pre></li>
+  <li><p>Red on purpose: in <code>TopicsTest</code>, change <code>12</code> to <code>13</code> in the
+      CSV row for <code>REGISTRATION_REQUESTS</code>. Run the test and read the AssertJ message. Undo
+      it.</p></li>
+  <li><p>With Docker running, run only core-app's ITs and watch the containers start:</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app -am verify -DskipUTs
+docker ps</code></pre></li>
+  <li><p>Read <code>OutboxIT.o2_aRolledBackProbeIsNeverPublished</code>. Why does it use
+      <code>during(...)</code> and not just <code>atMost(...)</code>?</p></li>
+  <li><p>TDD exercise (scratch branch): add a method <code>Topics.replayableTopics()</code> that
+      returns the names of the replayable topics. Write the test first, see it fail, then make it
+      pass. Throw the branch away afterwards (changing <code>Topics</code> is a spec change).</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Unit test</td><td>A fast test of a small piece of code, no Docker.</td></tr>
+<tr><td>Integration test (IT)</td><td>A test with real pieces working together (DB, Kafka, HTTP).</td></tr>
+<tr><td>Surefire / failsafe</td><td>The Maven plugins that run <code>*Test</code> / <code>*IT</code>.</td></tr>
+<tr><td>Assertion</td><td>A check; if it is false, the test fails.</td></tr>
+<tr><td>Parameterized test</td><td>One test method run with many input rows.</td></tr>
+<tr><td>Fake</td><td>A small working stand-in for a dependency.</td></tr>
+<tr><td>Mock</td><td>A programmed stand-in that records how it was called.</td></tr>
+<tr><td>Test slice</td><td>A Spring test that starts only one layer (e.g. web).</td></tr>
+<tr><td>Context caching</td><td>Spring reusing a started app across test classes with the same setup.</td></tr>
+<tr><td>Testcontainers</td><td>A library that starts real Docker containers for tests.</td></tr>
+<tr><td>ServiceConnection</td><td>Passes a container's address and login to Spring automatically.</td></tr>
+<tr><td>Awaitility</td><td>Waits for an async condition without sleeping a fixed time.</td></tr>
+<tr><td>ArchUnit</td><td>A library for tests about code structure.</td></tr>
+<tr><td>Coverage</td><td>The share of lines the tests ran (JaCoCo measures it).</td></tr>
+<tr><td>Flaky test</td><td>A test that passes or fails at random.</td></tr>
+<tr><td>TDD</td><td>Test first: red, green, refactor.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why are integration tests named <code>*IT</code> and run by a different plugin?</summary>
+    <p>So <code>.\mvnw.cmd test</code> stays fast and needs no Docker, while <code>verify</code> still
+    runs everything. Failsafe also lets the build clean up after the ITs before it reports failure.</p></details>
+  <details><summary>2. Why does the project test against a real PostgreSQL and Kafka instead of mocks?</summary>
+    <p>The risky parts are exactly the interactions: SQL, transactions, Kafka acknowledgements. A mock
+    only returns what you told it, so it cannot find those bugs. T7 found a real duplicate this way.</p></details>
+  <details><summary>3. Why should a test never call <code>Thread.sleep(5000)</code> to wait for Kafka?</summary>
+    <p>On a fast machine it wastes time; on a slow CI machine 5 s may not be enough and the test
+    becomes flaky. Awaitility waits only as long as needed, up to a limit.</p></details>
+  <details><summary>4. What does <code>BoundaryViolationTest</code> prove that <code>ModularityTest</code> cannot?</summary>
+    <p>That the checks really fail on a violation. A passing <code>verify()</code> on clean code could
+    also mean the check is switched off or misconfigured.</p></details>
+  <details><summary>5. Why do <code>OutboxIT</code> and <code>CoreApplicationIT</code> use exactly the same annotations?</summary>
+    <p>Spring caches the application context by its configuration. Same configuration = the app and
+    its containers start once and are reused, which saves a lot of time.</p></details>
+  <details><summary>6. A test fails sometimes on CI. Why is <code>@Disabled</code> not allowed?</summary>
+    <p>It hides a real problem (in the test or the code) and removes a safety net silently. The rule is
+    to fix it, or quarantine it with an issue link so it is tracked.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.junit.org/current/user-guide/">JUnit User Guide</a>: <code>@ParameterizedTest</code>, <code>@Nested</code>.</li>
+  <li><a href="https://assertj.github.io/doc/">AssertJ documentation</a>.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/testing/index.html">Spring Boot reference: Testing</a>: slices, <code>@SpringBootTest</code>, Testcontainers and <code>@ServiceConnection</code>.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/testing.html">Spring Framework reference: Testing</a>: context caching, <code>MockMvcTester</code>.</li>
+  <li><a href="https://java.testcontainers.org/">Testcontainers for Java</a>.</li>
+  <li><a href="https://github.com/awaitility/awaitility/wiki/Usage">Awaitility usage guide</a>.</li>
+  <li><a href="https://www.archunit.org/userguide/html/000_Index.html">ArchUnit user guide</a>.</li>
+  <li><a href="https://www.jacoco.org/jacoco/trunk/doc/">JaCoCo documentation</a>.</li>
+  <li><a href="https://maven.apache.org/surefire/maven-failsafe-plugin/">Maven Failsafe plugin</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

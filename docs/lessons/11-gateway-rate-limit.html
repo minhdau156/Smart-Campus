@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway and Rate Limits</title>
+<meta name="description" content="Smart Campus lesson 11: the API gateway pattern with Spring Cloud Gateway, reactive basics, rate-limiting algorithms and a Redis-backed per-IP limit with 429 problem JSON.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="11">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 11 · Part 1: Foundations</div>
+<h1>API gateway and rate limiting</h1>
+<p class="lede">The website talks to one address, <code>localhost:8080</code>. Behind it, a gateway
+sends each request to the right app and stops anyone who sends too many. This lesson explains how,
+and why the counter lives in Redis.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">registration (per-user limit)</span>
+  <span class="badge task">T13</span>
+  <span class="badge task">T14</span>
+  <span class="badge time">~60 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="03-spring-boot.html">03 (configuration, beans)</a> and
+  <a href="09-rest-problem-openapi.html">09 (status codes, problem JSON)</a>.
+  Redis itself is covered later in <a href="20-redis-concurrency.html">lesson 20</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">Status: planned</span>
+  The gateway does not exist in the repo yet. T13 builds <code>backend/gateway</code> and T14 adds
+  the rate limit. Code here shows the <em>shape</em> of that work. Spring Cloud 2025.x changed
+  gateway artifact and property names, so always check YAML keys against the official docs for our
+  version (Spring Cloud <code>2025.1.5</code>, pinned in the root <code>pom.xml</code>).
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why a gateway</a></li>
+    <li><a href="#scg">Routes, predicates, filters</a></li>
+    <li><a href="#order">Route order, WebSocket and errors</a></li>
+    <li><a href="#reactive">Reactive basics: never block</a></li>
+    <li><a href="#algorithms">Rate-limiting algorithms</a></li>
+    <li><a href="#redis">RequestRateLimiter with Redis</a></li>
+    <li><a href="#key">Whose limit? The key resolver</a></li>
+    <li><a href="#response">The 429 answer and per-user limits</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why a gateway</h2>
+<p>Smart Campus has three backend apps: <code>core-app</code> (:8081),
+<code>registration-service</code> (:8082) and <code>notification-service</code> (:8083). The
+website should not know that. An <strong>API gateway</strong> is a single front door: it receives
+every request and forwards it to the right app. Think of a hotel reception: guests talk to one
+desk, and the desk calls the right department.</p>
+<div class="flow">
+  <div class="box"><b>Browser</b>website on :5173 (dev)</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>gateway :8080</b>route · rate limit · (later) check JWT · problem JSON</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>core-app :8081</b><code>/api/v1/**</code></div>
+  <div class="box ok"><b>registration :8082</b><code>/api/v1/registration/**</code></div>
+  <div class="box ok"><b>notification :8083</b><code>/api/v1/notification/**</code>, <code>/ws/**</code></div>
+</div>
+<p>Things the gateway does once, for everyone:</p>
+<ul>
+  <li><strong>Routing</strong>: one public address; apps can move or scale behind it (T13).</li>
+  <li><strong>Rate limiting</strong>: stop floods before they reach the apps (T14, Arch §7).</li>
+  <li><strong>Token check</strong>: verify the Keycloak JWT signature (planned in <code>identity</code>,
+      <a href="17-spring-security.html">lesson 17</a>). Each service checks roles again (defence in depth).</li>
+  <li><strong>Hiding disabled modules</strong>: a filter answers 404 (planned in <code>shell</code>).</li>
+  <li><strong>Same error shape</strong>: problem JSON even when a backend is down (T13).</li>
+</ul>
+
+<h2 id="scg">2. Routes, predicates, filters</h2>
+<p>We use <strong>Spring Cloud Gateway</strong>, the "server-webflux" variant (spec Tech Stack). It
+has three building blocks:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Block</th><th>Question it answers</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td><strong>Route</strong></td><td>Where does this request go?</td><td>id <code>registration</code>, uri <code>http://localhost:8082</code></td></tr>
+<tr><td><strong>Predicate</strong></td><td>Does this route match the request?</td><td><code>Path=/api/v1/registration/**</code></td></tr>
+<tr><td><strong>Filter</strong></td><td>What to change or check on the way in or out?</td><td>add a header, rate-limit, rewrite the path</td></tr>
+</tbody></table></div>
+<pre data-file="Shape of backend/gateway/src/main/resources/application.yml (planned, T13: check key names in the docs)"><code>server:
+  port: 8080
+
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:                       <span class="c"># the 2025.x prefix for the WebFlux gateway</span>
+          routes:
+            - id: registration
+              uri: ${REGISTRATION_URI:http://localhost:8082}   <span class="c"># env var, so containers can override</span>
+              predicates:
+                - Path=/api/v1/registration/**
+            - id: notification
+              uri: ${NOTIFICATION_URI:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/notification/**,/ws/**
+            - id: core
+              uri: ${CORE_URI:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/**          <span class="c"># the catch-all: must be LAST</span></code></pre>
+<p>The <code>${NAME:default}</code> form reads an environment variable and falls back to the
+default. In the Compose <code>apps</code> profile (T15) the variables point to container names
+instead of <code>localhost</code>.</p>
+
+<h2 id="order">3. Route order, WebSocket and errors</h2>
+<h3>The first match wins</h3>
+<p><code>/api/v1/registration/requests</code> matches <strong>both</strong>
+<code>/api/v1/registration/**</code> and <code>/api/v1/**</code>. The gateway checks routes in
+order and uses the first one that matches. So the specific routes must come
+<strong>before</strong> the catch-all.</p>
+<div class="compare">
+  <div class="poor"><h4>Catch-all first</h4>
+    <p><code>/api/v1/**</code> → core-app is checked first. Every registration request goes to
+    core-app, which answers 404. Registration is "down" and nothing logs an error.</p></div>
+  <div class="good"><h4>Specific first</h4>
+    <p><code>/api/v1/registration/**</code> and <code>/api/v1/notification/**</code> first,
+    <code>/api/v1/**</code> last. To be safe, give the catch-all a higher <code>order</code> value
+    too, and cover each route in <code>GatewayRoutingIT</code>.</p></div>
+</div>
+
+<h3>WebSocket: <code>/ws/**</code></h3>
+<p>A <strong>WebSocket</strong> starts as a normal HTTP request with an <code>Upgrade</code> header,
+then stays open so the server can push messages. The gateway can forward it like any route
+(T13 adds the route now). Nothing serves it until the <code>notification</code> module adds the
+STOMP endpoint (<a href="24-realtime-notifications.html">lesson 24</a>).</p>
+
+<h3>Errors at the gateway</h3>
+<p>The gateway is a separate app, so <code>platform-starter</code>'s Spring MVC problem handler does not
+run there (the gateway is WebFlux). T13 writes a reactive handler with the same JSON shape:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>What happened</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>No route matches</td><td>404 problem JSON</td></tr>
+<tr><td>Backend refuses the connection (app down)</td><td>503 problem JSON</td></tr>
+<tr><td>Backend too slow</td><td>504 problem JSON</td></tr>
+<tr><td>Too many requests</td><td>429 problem JSON, code <code>RATE_LIMITED</code> (T14)</td></tr>
+</tbody></table></div>
+<p>Never an HTML error page: the website can always parse the answer.</p>
+
+<h2 id="reactive">4. Reactive basics: never block</h2>
+<p>The gateway runs on <strong>Spring WebFlux</strong> with the Netty server. Instead of one thread
+per request (like Spring MVC in our other apps), a few <strong>event-loop</strong> threads serve
+thousands of requests. A thread starts some I/O (like calling a backend), and instead of waiting,
+it goes to serve other requests. When the answer arrives, the work continues.</p>
+<p>A waiter picture: an MVC waiter takes your order and stands in the kitchen until the food is
+ready. A reactive waiter takes your order, serves other tables, and comes back when the kitchen
+rings the bell. Few waiters, many tables, but <strong>only if no waiter ever stands and
+waits</strong>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>Mono&lt;T&gt;</code></td><td>Zero or one value, arriving later (like a promise)</td></tr>
+<tr><td><code>Flux&lt;T&gt;</code></td><td>Zero to many values, arriving over time (a stream)</td></tr>
+</tbody></table></div>
+<pre data-file="Example: a gateway filter that adds a header (shape)"><code><span class="k">@Component</span>
+class GatewayHeaderFilter implements GlobalFilter {
+
+    <span class="k">@Override</span>
+    public Mono&lt;Void&gt; filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        ServerHttpRequest request = exchange.getRequest().mutate()
+                .header(<span class="s">"X-Gateway"</span>, <span class="s">"smart-campus"</span>)
+                .build();
+        return chain.filter(exchange.mutate().request(request).build());  <span class="c">// returns at once</span>
+    }
+}</code></pre>
+<div class="callout bad">
+  <span class="title">Never block an event-loop thread</span>
+  No <code>Thread.sleep</code>, no JDBC, no blocking HTTP client, no <code>.block()</code> inside a
+  filter. One blocked thread stops many requests at once. Reactor even throws an error if you call
+  <code>block()</code> on a Netty thread. Use reactive clients (the reactive Redis client, for
+  example) and chain with <code>map</code> / <code>flatMap</code>.
+</div>
+
+<h2 id="algorithms">5. Rate-limiting algorithms</h2>
+<p><strong>Rate limiting</strong> means: each caller may send at most N requests per time unit.
+Above that, the gateway answers <code>429 Too Many Requests</code> without calling the backend. It
+protects the apps from bots, bugs (a frontend stuck in a loop) and floods. Three classic ways:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Algorithm</th><th>How it counts</th><th>Weak spot</th></tr></thead>
+<tbody>
+<tr><td><strong>Fixed window</strong></td><td>A counter per caller per second (or minute). Reset at the start of each window.</td>
+    <td>Bursts at the edge: 20 requests at 0.99 s and 20 more at 1.01 s = 40 in 20 ms.</td></tr>
+<tr><td><strong>Sliding window</strong></td><td>Count requests in the last N seconds, moving with time (exactly, or estimated from two windows).</td>
+    <td>Smoother, but more data or math per caller.</td></tr>
+<tr><td><strong>Token bucket</strong></td><td>Each caller has a bucket of tokens. Each request takes a token. Tokens refill at a steady rate, up to a maximum.</td>
+    <td>Allows a short burst on purpose, which is usually what you want.</td></tr>
+</tbody></table></div>
+<pre class="diagram">Token bucket for one IP: refill 20 tokens/s, bucket size 40
+
+ idle for a while    → bucket full: 40 tokens
+ page load: 30 calls → 30 taken, 10 left      (burst allowed, all OK)
+ next second         → +20 refilled → 30
+ a bot: 100 calls/s  → 20/s get a token, the other 80/s get 429</pre>
+<p>Spring Cloud Gateway's Redis limiter uses the <strong>token bucket</strong>. Our defaults (spec
+R1): <strong>replenish rate 20 per second, burst 40</strong>, set in config.</p>
+
+<h2 id="redis">6. RequestRateLimiter with Redis</h2>
+<p>The gateway's <code>RequestRateLimiter</code> filter asks a <strong>rate limiter</strong> "may
+this key make a request?" and a <strong>key resolver</strong> "who is this caller?". With
+<code>RedisRateLimiter</code>, each bucket lives in Redis and is updated by a small Lua script, so
+the "read tokens, take one, write back" step is atomic.</p>
+<pre data-file="Shape of the T14 route filter (planned: check names in the docs)"><code>filters:
+  - name: RequestRateLimiter
+    args:
+      redis-rate-limiter.replenishRate: 20     <span class="c"># tokens added per second</span>
+      redis-rate-limiter.burstCapacity: 40     <span class="c"># bucket size = biggest burst</span>
+      redis-rate-limiter.requestedTokens: 1    <span class="c"># cost of one request</span>
+      key-resolver: "#{@trustedProxyIpKeyResolver}"   <span class="c"># a bean, by name (SpEL)</span></code></pre>
+<ul>
+  <li><code>burstCapacity: 0</code> blocks every request. <code>requestedTokens</code> above 1 makes a
+      request "cost more", which lets you go below one request per second.</li>
+  <li>It needs the reactive Redis starter, <code>spring-boot-starter-data-redis-reactive</code>.</li>
+  <li>T14.3 applies it to all <code>/api/v1/**</code> routes as a <strong>default filter</strong>
+      (a filter that every route gets), with the numbers read from config.</li>
+</ul>
+<div class="callout project">
+  <span class="title">Why the state is in Redis, not in the gateway's memory</span>
+  In production the gateway runs as 2 to 4 replicas (Arch §8). With in-memory counters, each
+  replica has its own bucket, so a caller gets 2 to 4 times the limit by spreading requests. With
+  Redis, all replicas share <strong>one</strong> bucket per caller (spec R1).
+  <code>RateLimitIT</code> proves it: two gateway instances, one budget.
+</div>
+
+<h2 id="key">7. Whose limit? The key resolver</h2>
+<p>A <code>KeyResolver</code> turns a request into a key string. Same key = same bucket. For
+<code>platform</code> the key is the <strong>client IP address</strong>.</p>
+<pre data-file="Simplest IP key resolver (shape; not good enough behind a proxy)"><code><span class="k">@Bean</span>
+KeyResolver remoteIpKeyResolver() {
+    return exchange -&gt; Mono.justOrEmpty(exchange.getRequest().getRemoteAddress())
+            .map(address -&gt; address.getAddress().getHostAddress());   <span class="c">// "203.0.113.7"</span>
+}</code></pre>
+<p>If the resolver gives no key, the filter <strong>denies</strong> the request by default (a
+setting can change this). Better to refuse than to let an unknown caller in without a limit.</p>
+
+<h3>The <code>X-Forwarded-For</code> trust problem</h3>
+<p>In production, a load balancer or ingress sits in front of the gateway. Then the "remote
+address" is the <strong>proxy's</strong> IP, the same for every student, and everyone shares one
+bucket. Proxies add the real client IP in the <code>X-Forwarded-For</code> header:</p>
+<pre class="diagram">X-Forwarded-For: 198.51.100.4, 10.0.0.12
+                 └ client ─┘   └ proxy ┘   (each proxy appends the address it saw)</pre>
+<p>But <strong>anyone can send that header</strong>. A bot that writes a random
+<code>X-Forwarded-For</code> on every request would get a fresh bucket every time, and the limit
+would mean nothing.</p>
+<div class="compare">
+  <div class="poor"><h4>Trust the header always</h4>
+    <p>Key = first value of <code>X-Forwarded-For</code>. A bot sets it to random IPs and is never
+    limited.</p></div>
+  <div class="good"><h4>Trust only known proxies (T14.2)</h4>
+    <p><code>TrustedProxyIpKeyResolver</code>: use the remote address. Read
+    <code>X-Forwarded-For</code> <strong>only</strong> if the remote address is in a configured
+    trusted-proxy range, and then take the nearest address that is not a trusted proxy.</p></div>
+</div>
+<p><code>RateLimitIT</code> covers this: a spoofed <code>X-Forwarded-For</code> from an untrusted source
+is ignored. (Spring Cloud Gateway also ships an <code>XForwardedRemoteAddressResolver</code> with a
+"max trusted index" option; T14 may build on it or write its own.)</p>
+
+<h2 id="response">8. The 429 answer and per-user limits</h2>
+<p>The Redis limiter answers <strong>429</strong> by default, but not in our problem JSON shape and
+without telling the client <em>when</em> to try again. T14.4 adds <code>RateLimitedProblemFilter</code>
+to fix both:</p>
+<pre data-file="Target response (spec R1)"><code>HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+Content-Type: application/problem+json
+
+{
+  "type": "https://campus.edu/problems/rate-limited",
+  "title": "Rate limited",
+  "status": 429,
+  "detail": "Too many requests. Try again in 1 second(s).",
+  "code": "RATE_LIMITED",
+  "traceId": "…"
+}</code></pre>
+<ul>
+  <li><strong><code>Retry-After</code></strong> is a standard HTTP header. Here it holds whole
+      <strong>seconds</strong>, at least 1. A good client (our website) waits that long before
+      trying again, instead of hammering the server.</li>
+  <li><code>RATE_LIMITED</code> already exists in <code>ProblemCode</code> (shared-kernel), so the
+      frontend can show "Please slow down" for every module the same way.</li>
+  <li>Requests <strong>under</strong> the limit are not changed at all, and another IP is not affected
+      by your limit. Both are cases in <code>RateLimitIT</code>.</li>
+</ul>
+
+<h3>Per-user limits for registration (planned)</h3>
+<p>Arch §7: "registration endpoints are limited <strong>per user</strong>, others per IP". Why? A
+whole dormitory may share one public IP, and during the rush hundreds of honest students would share
+one bucket. After <code>identity</code> exists, the key can be the user id from the JWT. The
+<code>registration</code> module adds that limit for its routes (map C14), together with the waiting
+room. T14.3 documents how a route replaces the default per-IP limit with its own.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where (all planned unless marked)</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Gateway app on :8080</td><td><code>backend/gateway/</code>, <code>GatewayApplication.java</code></td><td>T13</td></tr>
+<tr><td>Routes from env vars</td><td><code>backend/gateway/src/main/resources/application.yml</code></td><td>T13</td></tr>
+<tr><td>Reactive problem handler (404/503/504)</td><td><code>GatewayProblemHandler.java</code></td><td>T13</td></tr>
+<tr><td>Routing tests with stub backends</td><td><code>GatewayRoutingIT.java</code></td><td>T13</td></tr>
+<tr><td>Smoke script</td><td><code>infra/smoke.sh</code></td><td>T13</td></tr>
+<tr><td>Redis limiter, IP key, 429 problem</td><td><code>RateLimitConfig</code>, <code>TrustedProxyIpKeyResolver</code>, <code>RateLimitedProblemFilter</code></td><td>T14</td></tr>
+<tr><td>Rate-limit tests (Testcontainers Redis)</td><td><code>RateLimitIT.java</code></td><td>T14</td></tr>
+<tr><td><code>RATE_LIMITED</code> code (exists)</td><td><code>backend/shared-kernel/src/main/java/edu/campus/kernel/error/ProblemCode.java</code></td><td>T4</td></tr>
+<tr><td>Redis container (exists)</td><td><code>infra/docker-compose.yml</code> service <code>redis</code> (:6379)</td><td>T3</td></tr>
+<tr><td>Spring Cloud version (exists)</td><td>root <code>pom.xml</code>, <code>spring-cloud.version</code> 2025.1.5</td><td>T1</td></tr>
+<tr><td>JWT check, module 404 filter, per-user limit</td><td>gateway, later modules</td><td>identity, shell, registration</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Catch-all route first.</strong> Registration and notification become unreachable.</li>
+  <li><strong>Blocking in a gateway filter.</strong> JDBC, <code>sleep</code> or <code>.block()</code>
+      freezes an event-loop thread.</li>
+  <li><strong>Trusting <code>X-Forwarded-For</code> from anyone.</strong> The limit becomes useless.</li>
+  <li><strong>In-memory rate limits with several replicas.</strong> Each replica gives the full budget.</li>
+  <li><strong>A 429 without <code>Retry-After</code>.</strong> Clients guess and often retry at once,
+      which makes the flood worse.</li>
+  <li><strong>Copying Boot 3 / older gateway YAML.</strong> Keys and artifacts changed in Spring Cloud
+      2025.x; check the docs for our version.</li>
+  <li><strong>Hard-coding <code>localhost</code> backend URLs.</strong> In containers the hosts are
+      service names; read them from env vars.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Before T13: list the three backends and their ports from <code>SPEC-platform.md</code>
+      ("Commands"). Write down which app each of these URLs should reach:
+      <code>/api/v1/platform/ping</code>, <code>/api/v1/registration/ping</code>,
+      <code>/api/v1/notification/ping</code>, <code>/ws/stomp</code>, <code>/api/v2/x</code>.</p></li>
+  <li><p>Token bucket on paper: replenish 20/s, burst 40. A client is idle, then sends 50 requests in
+      0.1 s, then 1 request every 40 ms for 2 s. How many 429 answers does it get?</p></li>
+  <li><p>Look inside Redis while you think about keys (Redis runs in Compose already):</p>
+<pre><code>docker compose -f infra/docker-compose.yml exec redis redis-cli ping
+docker compose -f infra/docker-compose.yml exec redis redis-cli --scan --pattern "*rate*"</code></pre>
+      <p>After T14, send a burst through the gateway and run the scan again to see the limiter's keys.</p></li>
+  <li><p>After T13 and T14, with all apps running, use the smoke script and then trigger the limit
+      (Git Bash):</p>
+<pre><code>bash infra/smoke.sh
+for i in $(seq 1 60); do curl -s -o /dev/null -w "%{http_code} " localhost:8080/api/v1/platform/ping; done
+curl -i localhost:8080/api/v1/platform/ping</code></pre>
+      <p>Find the first 429. Read its <code>Retry-After</code> header and its <code>code</code>.</p></li>
+  <li><p>Spoof test: send <code>-H "X-Forwarded-For: 1.2.3.4"</code> with the burst. Does it give you
+      a new bucket? It must not, because your machine is not a trusted proxy.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>API gateway</td><td>The single front door that forwards requests to the right app.</td></tr>
+<tr><td>Route</td><td>A rule "these requests go to that app".</td></tr>
+<tr><td>Predicate</td><td>A test that decides if a route matches (e.g. the path).</td></tr>
+<tr><td>Filter</td><td>A step that changes or checks a request or response on the way.</td></tr>
+<tr><td>Default filter</td><td>A filter added to every route.</td></tr>
+<tr><td>Reactive</td><td>A style where threads never wait; work continues when data arrives.</td></tr>
+<tr><td>Mono / Flux</td><td>A later value / a stream of later values (Project Reactor).</td></tr>
+<tr><td>Event loop</td><td>A small set of threads that serve many requests without blocking.</td></tr>
+<tr><td>Rate limit</td><td>A maximum number of requests per time per caller.</td></tr>
+<tr><td>Token bucket</td><td>Tokens refill at a steady rate; each request spends one; the bucket size allows bursts.</td></tr>
+<tr><td>Replenish rate / burst capacity</td><td>Tokens added per second / the bucket's size.</td></tr>
+<tr><td>Key resolver</td><td>Decides who the caller is (IP, user id), i.e. which bucket.</td></tr>
+<tr><td>X-Forwarded-For</td><td>A header where proxies write the client's IP. Easy to fake.</td></tr>
+<tr><td>Retry-After</td><td>A header that says how many seconds to wait before trying again.</td></tr>
+<tr><td>Smoke test</td><td>A quick "is everything alive?" check.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why must <code>/api/v1/registration/**</code> come before <code>/api/v1/**</code>?</summary>
+    <p>The gateway uses the first matching route. The catch-all also matches registration URLs, so if
+    it came first, every registration request would go to core-app and get a 404.</p></details>
+  <details><summary>2. Why is calling JDBC inside a gateway filter so harmful?</summary>
+    <p>The gateway serves many requests on a few event-loop threads. A blocking call holds one of
+    them, so all the requests waiting on that thread stop too. Under load the whole gateway freezes.</p></details>
+  <details><summary>3. Why does Smart Campus prefer a token bucket over a fixed window?</summary>
+    <p>A page load makes a short burst of calls, which a token bucket allows up to the burst size,
+    while still holding the long-term rate. A fixed window can let through double the limit at the
+    edge between two windows.</p></details>
+  <details><summary>4. Why is the limiter state kept in Redis?</summary>
+    <p>The gateway runs as several replicas. Counters in memory would give each replica its own
+    budget. Redis gives all replicas one shared bucket per caller, and its Lua script makes each
+    update atomic.</p></details>
+  <details><summary>5. Why read <code>X-Forwarded-For</code> only from trusted proxies?</summary>
+    <p>Any client can write that header. If it were always trusted, a bot could pick a new fake IP
+    for every request and never be limited.</p></details>
+  <details><summary>6. Why will registration use a per-user limit instead of per IP?</summary>
+    <p>Many students can share one public IP (a dormitory, the campus Wi-Fi). During the rush a
+    per-IP limit would block honest students. A per-user key, from the login token, is fair to each
+    student and still stops one user's bot.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux.html">Spring Cloud Gateway reference: Server WebFlux</a>: routes, predicates, filters, configuration keys.</li>
+  <li><a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/requestratelimiter-factory.html">Spring Cloud Gateway: RequestRateLimiter filter</a>: Redis limiter and key resolvers.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/web/webflux.html">Spring Framework reference: Spring WebFlux</a>.</li>
+  <li><a href="https://projectreactor.io/docs/core/release/reference/">Project Reactor reference</a>: <code>Mono</code> and <code>Flux</code>.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc6585#section-4">RFC 6585 §4: 429 Too Many Requests</a> and <a href="https://www.rfc-editor.org/rfc/rfc9110#name-retry-after">RFC 9110: Retry-After</a>.</li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For">MDN: X-Forwarded-For</a>: the header and its security problems.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

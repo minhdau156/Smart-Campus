@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes and Helm</title>
+<meta name="description" content="Smart Campus lesson 31: shipping to Kubernetes with Helm. Pods, Deployments, Services, Ingress, ConfigMaps and Secrets, probes, rolling updates, HPA, image registries, Flyway and expand/contract migrations.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="31">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 31 · Part 2: Feature modules</div>
+<h1>Shipping: Kubernetes and Helm</h1>
+<p class="lede">Docker Compose runs Smart Campus on one laptop. Production must survive a crashed
+machine, grow to 20 registration servers at 08:00 on registration day, and get new versions
+without students noticing. This lesson shows how Kubernetes and Helm do that, and what our Spring
+apps must do to help.</p>
+
+<div class="meta">
+  <span class="badge module">shipping phase</span>
+  <span class="badge task">NFR-6</span>
+  <span class="badge task">map C18</span>
+  <span class="badge task">assumption 2</span>
+  <span class="badge time">~90 min</span>
+  <span class="badge level">Later phase</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="05-docker-compose.html">05 (Docker, Compose, Dockerfiles)</a>,
+  <a href="04-postgres-flyway.html">04 (Flyway)</a>,
+  <a href="12-observability.html">12 (metrics and health)</a> and
+  <a href="15-git-ci-adr.html">15 (CI)</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">This is the last phase, and it is all planned</span>
+  Map assumption 2: Docker Compose is the "done" environment for every module. Kubernetes, Helm,
+  HPA, image push and zero-downtime deploys (<strong>NFR-6</strong>, "deploy a module without
+  downtime") come in a <strong>shipping phase after all 14 modules</strong> (map C18, spec
+  out-of-scope list). No Kubernetes file exists yet. The Arch §9 repo tree reserves
+  <code>infra/helm/</code> for it.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">From Compose to Kubernetes</a></li>
+    <li><a href="#objects">Pods, Deployments, Services, Ingress</a></li>
+    <li><a href="#config">ConfigMap and Secret</a></li>
+    <li><a href="#probes">Probes and Actuator health groups</a></li>
+    <li><a href="#rolling">Rolling updates and graceful shutdown</a></li>
+    <li><a href="#hpa">Autoscaling for the registration rush</a></li>
+    <li><a href="#helm">Images, registries and Helm</a></li>
+    <li><a href="#data">Migrations and the data layer</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. From Compose to Kubernetes</h2>
+<p>Compose starts containers on <em>one</em> machine, and you tell it what to do. <strong>Kubernetes</strong>
+(often "K8s") runs containers on a <em>group</em> of machines (a <strong>cluster</strong>), and you
+tell it what you <em>want</em>: "always 2 copies of registration-service, version 3f9c2ab". A
+controller then works all the time to make reality match. If a machine dies, it starts the lost
+copies elsewhere. This style is called <strong>declarative</strong>: you describe the goal, not
+the steps. A thermostat is the same idea: you set 22 °C and it keeps working to reach it.</p>
+<p>The Arch (§8) gives the production picture:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Component</th><th>Dev (Compose)</th><th>Prod (Kubernetes), from Arch §8</th></tr></thead>
+<tbody>
+<tr><td>Web SPA</td><td>Vite dev server</td><td>Nginx container behind Ingress, assets on a CDN</td></tr>
+<tr><td>Gateway</td><td>1 container</td><td>Deployment, 2–4 replicas</td></tr>
+<tr><td>core-app</td><td>1 container</td><td>Deployment, 2–4 replicas, HPA on CPU</td></tr>
+<tr><td>registration-service</td><td>1 container</td><td>2 replicas normally; HPA up to 20 on CPU + Kafka lag; pre-scaled before each window</td></tr>
+<tr><td>notification-service</td><td>1 container</td><td>Deployment, 2 replicas</td></tr>
+<tr><td>Keycloak</td><td>1 container</td><td>2 replicas, own PostgreSQL</td></tr>
+<tr><td>PostgreSQL / Redis / Kafka</td><td>1 container each</td><td>Managed or operator-run, with replicas (section 8)</td></tr>
+</tbody></table></div>
+
+<h3>Compose words → Kubernetes words</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>In <code>infra/docker-compose.yml</code></th><th>In Kubernetes</th></tr></thead>
+<tbody>
+<tr><td>a <code>service:</code> with an <code>image:</code></td><td>a <strong>Deployment</strong> (which makes <strong>Pods</strong>)</td></tr>
+<tr><td>service name as host name (<code>postgres:5432</code>)</td><td>a <strong>Service</strong> gives a stable DNS name</td></tr>
+<tr><td><code>ports: "127.0.0.1:8080:8080"</code></td><td>an <strong>Ingress</strong> (or Gateway API) for traffic from outside</td></tr>
+<tr><td><code>environment:</code></td><td>a <strong>ConfigMap</strong></td></tr>
+<tr><td><code>infra/.env</code> passwords</td><td>a <strong>Secret</strong> (or Vault)</td></tr>
+<tr><td><code>healthcheck:</code></td><td><strong>probes</strong>: startup, liveness, readiness</td></tr>
+<tr><td><code>depends_on: condition: service_healthy</code></td><td><em>nothing</em>: apps must retry until their dependencies are ready</td></tr>
+<tr><td><code>volumes:</code> (named)</td><td>a <strong>PersistentVolumeClaim</strong></td></tr>
+<tr><td>profiles (<code>apps</code>, <code>observability</code>)</td><td>Helm values that switch parts on or off</td></tr>
+<tr><td><code>docker compose up -d --wait</code></td><td><code>helm upgrade --install … --wait</code></td></tr>
+</tbody></table></div>
+
+<h2 id="objects">2. Pods, Deployments, Services, Ingress</h2>
+<pre class="diagram">  internet
+     │  https://campus.example.edu
+     ▼
+ ┌─────────┐   /        → web (Nginx, the SPA)
+ │ Ingress │   /api/**  → gateway        (also /ws/** for WebSocket)
+ └────┬────┘
+      ▼
+ ┌──────────────┐   stable name + load balancing      ┌──── Pod ────┐
+ │ Service      │ ──────────────────────────────────► │ gateway     │
+ │ "gateway"    │                                      └─────────────┘
+ └──────────────┘                                      ┌──── Pod ────┐
+                                                       │ gateway     │  ← both made by the
+                                                       └─────────────┘    "gateway" Deployment
+      gateway → Service "core-app" → core-app Pods, Service "registration-service" → …</pre>
+<ul>
+  <li><strong>Pod</strong>: the smallest unit; one or more containers that run together on one
+      machine and share a network address. Usually one app container per Pod. Pods are
+      <em>disposable</em>: they get new names and addresses when replaced.</li>
+  <li><strong>Deployment</strong>: "keep N Pods of this template running". It also does rolling
+      updates (section 5).</li>
+  <li><strong>Service</strong>: a fixed name and address in front of a changing set of Pods. The
+      gateway calls <code>http://core-app:8081</code> and never needs to know Pod addresses.
+      This is why our gateway reads backend URLs from env (platform T13.2).</li>
+  <li><strong>Ingress</strong>: rules for traffic from outside the cluster (host names, paths,
+      TLS). An <em>ingress controller</em> must be installed to make them work. Newer clusters
+      may use the <strong>Gateway API</strong>, the successor to Ingress; check what your cluster
+      offers.</li>
+</ul>
+<pre data-file="infra/helm/campus/templates/registration-deployment.yaml (planned, rendered, shortened)"><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registration-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: registration-service }
+  template:                                   <span class="c"># the Pod template</span>
+    metadata:
+      labels: { app: registration-service }
+    spec:
+      containers:
+        - name: app
+          image: registry.example.edu/campus/registration-service:3f9c2ab   <span class="c"># git SHA, never "latest"</span>
+          ports: [{ containerPort: 8082 }]
+          resources:
+            requests: { cpu: 500m, memory: 768Mi }  <span class="c"># what the scheduler reserves</span>
+            limits:   { memory: 768Mi }             <span class="c"># above this the container is killed</span>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registration-service
+spec:
+  selector: { app: registration-service }     <span class="c"># sends traffic to Pods with this label</span>
+  ports: [{ port: 8082, targetPort: 8082 }]</code></pre>
+<p><strong>Requests and limits</strong> matter for Java: the JVM sizes its heap from the
+container's memory limit. Our Dockerfile (platform T15) caps the heap, and the plan notes the
+memory each container needs. Keep the limit and the heap setting in agreement, or the Pod is
+killed for using too much memory (<em>OOMKilled</em>).</p>
+
+<h2 id="config">3. ConfigMap and Secret</h2>
+<p>The same image must run in dev, staging and production. Only <strong>configuration</strong>
+changes. Spring Boot reads environment variables automatically
+(<code>SPRING_DATASOURCE_URL</code> overrides <code>spring.datasource.url</code>), so Kubernetes
+only has to set env vars.</p>
+<pre data-file="ConfigMap and Secret (planned example)"><code>apiVersion: v1
+kind: ConfigMap
+metadata: { name: registration-config }
+data:
+  SPRING_PROFILES_ACTIVE: prod
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: campus-kafka-bootstrap:9092
+  SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: https://auth.campus.example.edu/realms/campus
+---
+apiVersion: v1
+kind: Secret
+metadata: { name: registration-secrets }
+type: Opaque
+stringData:
+  SPRING_DATASOURCE_PASSWORD: "…"            <span class="c"># NEVER in git: created by the pipeline or a vault</span>
+
+<span class="c"># in the Deployment's container:</span>
+envFrom:
+  - configMapRef: { name: registration-config }
+  - secretRef:    { name: registration-secrets }</code></pre>
+<div class="callout warn">
+  <span class="title">A Secret is not encrypted by default</span>
+  Kubernetes stores Secret values in base64, which is an <em>encoding</em>, not encryption. Protect
+  them with access rules, encryption at rest in the cluster, or an external store like Vault (Arch
+  §8: "Secrets in Kubernetes Secrets or Vault, never in the repo"). Same rule as
+  <code>infra/.env</code> today (<a href="30-security-hardening.html">lesson 30</a>).
+</div>
+
+<h2 id="probes">4. Probes and Actuator health groups</h2>
+<p>A <strong>probe</strong> is a check that Kubernetes runs against each container again and
+again. There are three kinds, and they answer different questions:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Probe</th><th>Question</th><th>If it fails</th><th>Spring Boot endpoint</th></tr></thead>
+<tbody>
+<tr><td><strong>Startup</strong></td><td>"Have you finished starting?"</td><td>Keep waiting (up to a limit), then restart. Other probes wait until it passes.</td><td><code>/actuator/health/liveness</code></td></tr>
+<tr><td><strong>Liveness</strong></td><td>"Are you stuck beyond repair?"</td><td><strong>Restart</strong> the container</td><td><code>/actuator/health/liveness</code></td></tr>
+<tr><td><strong>Readiness</strong></td><td>"Can you take traffic right now?"</td><td><strong>Stop sending</strong> traffic (no restart)</td><td><code>/actuator/health/readiness</code></td></tr>
+</tbody></table></div>
+<p>Spring Boot Actuator has these two <strong>health groups</strong> built in. They turn on
+automatically when the app detects Kubernetes, or with one property. Today <code>core-app</code>
+exposes <code>/actuator/health</code> (platform T6); Compose's healthcheck uses it.</p>
+<pre data-file="application.yml additions (planned for the shipping phase)"><code>management:
+  endpoint:
+    health:
+      probes:
+        enabled: true                 <span class="c"># /actuator/health/liveness and /readiness</span>
+      group:
+        readiness:
+          include: readinessState, db <span class="c"># no DB → stop traffic to this Pod, do not restart it</span></code></pre>
+<pre data-file="Container probes (planned)"><code>startupProbe:
+  httpGet: { path: /actuator/health/liveness, port: 8082 }
+  periodSeconds: 5
+  failureThreshold: 30              <span class="c"># up to 150 s to start (Flyway, Kafka, JIT warm-up)</span>
+livenessProbe:
+  httpGet: { path: /actuator/health/liveness, port: 8082 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /actuator/health/readiness, port: 8082 }
+  periodSeconds: 5</code></pre>
+<div class="callout bad">
+  <span class="title">Never put external systems in liveness</span>
+  If liveness included the database, a 30-second database hiccup would make Kubernetes
+  <em>restart every Pod at once</em>, and the restart itself would make the outage worse. Restarts
+  cannot fix the database. External checks belong in readiness (and even there, think: if every
+  Pod becomes unready, the whole service answers 503).
+</div>
+
+<h2 id="rolling">5. Rolling updates and graceful shutdown</h2>
+<p>NFR-6 asks for deploys "without downtime". A Deployment does a <strong>rolling update</strong>:
+it replaces Pods a few at a time. New Pods must be <em>ready</em> before old Pods are removed.</p>
+<pre class="diagram">replicas: 2   maxSurge: 1   maxUnavailable: 0
+
+ time ─────────────────────────────────────────────────────────────►
+ v1 ●  v1 ●                    start 1 new Pod (surge)
+ v1 ●  v1 ●  v2 ○              v2 starting…  (startup probe)
+ v1 ●  v1 ●  v2 ●              v2 ready      (readiness probe passes)
+ v1 ◌  v1 ●  v2 ●              stop one v1   (graceful shutdown)
+       v1 ●  v2 ●  v2 ○        next v2 starting…
+             v2 ●  v2 ●        done: never fewer than 2 ready Pods</pre>
+<p>Note the middle of the picture: <strong>v1 and v2 run at the same time</strong>. That is
+normal, and it has consequences for the database (section 8) and for events (old and new
+consumers in the same group).</p>
+
+<h3>Graceful shutdown</h3>
+<p>When a Pod must stop, Kubernetes sends <code>SIGTERM</code> (a polite "please stop") and, at
+about the same time, removes the Pod from the Service. These two happen in parallel, so for a
+moment new requests can still arrive. Then, after
+<code>terminationGracePeriodSeconds</code> (default 30 s), it kills the process for good.</p>
+<ol>
+  <li><strong>preStop sleep</strong> (a few seconds): wait until the Pod is out of the Service, so
+      no new requests come.</li>
+  <li><strong>Spring graceful shutdown</strong>: stop accepting new requests, finish the ones in
+      progress, within a time limit.</li>
+  <li><strong>Kafka</strong>: listeners stop, the consumer leaves its group, and its partitions
+      move to the other Pods. An event that was half-processed is delivered again to another Pod,
+      which is safe because consumers deduplicate by <code>eventId</code> (spec D2,
+      <a href="08-outbox-idempotency.html">lesson 08</a>).</li>
+  <li><strong>Outbox</strong>: an event saved but not yet sent stays in
+      <code>event_publication</code> and is sent later (resubmission job or restart). No event is lost.</li>
+</ol>
+<pre data-file="Graceful shutdown settings (planned)"><code><span class="c"># application.yml</span>
+server:
+  shutdown: graceful                       <span class="c"># recent Boot versions default to this; we set it explicitly</span>
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 20s        <span class="c"># max time to finish in-flight work</span>
+
+<span class="c"># Pod spec</span>
+terminationGracePeriodSeconds: 40          <span class="c"># &gt; preStop (10 s) + Spring's 20 s</span>
+containers:
+  - name: app
+    lifecycle:
+      preStop:
+        exec: { command: ["sh", "-c", "sleep 10"] }</code></pre>
+
+<h2 id="hpa">6. Autoscaling for the registration rush</h2>
+<p>NFR-1: 5,000 students registering in the same minute, p95 under 500 ms. A
+<strong>HorizontalPodAutoscaler (HPA)</strong> changes the number of replicas of a Deployment
+based on a metric. "Horizontal" means more copies, not bigger copies.</p>
+<pre data-file="HPA for registration-service (planned)"><code>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: registration-service }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: registration-service }
+  minReplicas: 2
+  maxReplicas: 20                          <span class="c"># Arch §8</span>
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 60 }   <span class="c"># % of the CPU *request*</span></code></pre>
+<p>Three things the Arch already thought about:</p>
+<ul>
+  <li><strong>Pre-scale before each window.</strong> An HPA reacts after load arrives, and a new
+      JVM needs time to start and warm up. A rush that peaks in the first seconds is over before
+      new Pods are ready. So a scheduled job raises <code>minReplicas</code> shortly before the
+      registration window opens, and lowers it after.</li>
+  <li><strong>Kafka lag as a metric.</strong> CPU does not show a growing queue. Scaling on
+      consumer lag needs an <em>external metrics</em> source (for example a Prometheus adapter,
+      or a tool like KEDA). Platform's open question about measuring lag in seconds (T18) feeds
+      into this.</li>
+  <li><strong>Partitions limit consumers.</strong> <code>registration.requests</code> has
+      <strong>12 partitions</strong> (spec O5). In one consumer group, each partition goes to at
+      most one consumer, so more than 12 worker Pods would sit idle. The Arch splits
+      <code>registration-service</code> into "api" and "worker" profiles: the API part can grow to
+      20, the worker part is capped by the partition count.</li>
+</ul>
+<p>The k6 rush test (<a href="21-load-testing-k6.html">lesson 21</a>) against staging proves the
+settings before every release that touches registration (Arch §8).</p>
+
+<h2 id="helm">7. Images, registries and Helm</h2>
+<h3>Pushing images to a registry</h3>
+<p>Compose builds images on your machine. A cluster pulls them from a <strong>container
+registry</strong> (a server that stores images, like GitHub Container Registry or a cloud
+provider's registry). Map C12: image push is deferred to this phase. The CI flow becomes:</p>
+<div class="flow">
+  <div class="box project"><b>1. Build</b><code>./mvnw verify</code>, layered jars, one Dockerfile for all 4 apps</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>2. Scan</b>Trivy on each image (spec C1); HIGH/CRITICAL fails</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>3. Tag + push</b>Tag = git commit SHA. Same image goes to staging, then prod</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>4. Deploy</b><code>helm upgrade</code> with that tag</div>
+</div>
+<pre data-file="Tag and push (normally done by CI)"><code>docker tag campus/registration-service:dev registry.example.edu/campus/registration-service:3f9c2ab
+docker push registry.example.edu/campus/registration-service:3f9c2ab</code></pre>
+<p>Why the commit SHA as the tag? It never moves: <code>3f9c2ab</code> is always the same code.
+A tag like <code>latest</code> can point to different images on different days, so you can never
+be sure what is running (and the spec forbids it). Build once, promote the <em>same</em> image
+from staging to production.</p>
+
+<h3>Helm: charts and values</h3>
+<p>Writing ~10 YAML files per app, three times (dev, staging, prod), is a lot of copy-paste.
+<strong>Helm</strong> is a package manager for Kubernetes. A <strong>chart</strong> is a folder of
+YAML <em>templates</em> with holes; a <strong>values</strong> file fills the holes. Like a form
+letter: one template, different names and addresses.</p>
+<pre class="diagram">infra/helm/campus/                 (planned)
+├── Chart.yaml                     name, version of the chart
+├── values.yaml                    defaults
+├── values-staging.yaml            only what differs in staging
+├── values-prod.yaml               only what differs in prod
+└── templates/
+    ├── _helpers.tpl               shared snippets (labels, names)
+    ├── app-deployment.yaml        ONE template, used for all 4 Spring apps
+    ├── app-service.yaml
+    ├── registration-hpa.yaml
+    ├── ingress.yaml
+    └── configmap.yaml</pre>
+<pre data-file="values-prod.yaml (planned example)"><code>image:
+  registry: registry.example.edu/campus
+  tag: "3f9c2ab"                 <span class="c"># set by CI with --set image.tag=…</span>
+apps:
+  gateway:              { replicas: 2, port: 8080 }
+  core-app:             { replicas: 2, port: 8081 }
+  registration-service: { replicas: 2, port: 8082, hpa: { max: 20 } }
+  notification-service: { replicas: 2, port: 8083 }
+ingress:
+  host: campus.example.edu</code></pre>
+<pre data-file="templates/app-deployment.yaml (planned, part)"><code>{{- range $name, $app := .Values.apps }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+spec:
+  replicas: {{ $app.replicas }}
+  template:
+    spec:
+      containers:
+        - name: app
+          image: "{{ $.Values.image.registry }}/{{ $name }}:{{ $.Values.image.tag }}"
+          ports: [{ containerPort: {{ $app.port }} }]
+---
+{{- end }}</code></pre>
+<pre data-file="Deploy or upgrade (from CI)"><code>helm upgrade --install campus infra/helm/campus \
+  -f infra/helm/campus/values-prod.yaml \
+  --set image.tag=3f9c2ab \
+  --wait                                 <span class="c"># wait until rollouts are ready</span>
+
+helm history campus                       <span class="c"># every release is numbered</span>
+helm rollback campus 41                   <span class="c"># go back to release 41 if needed</span></code></pre>
+<p>Ports here match the dev ports from the spec (gateway 8080, core-app 8081, registration 8082,
+notification 8083), so the apps need no new settings. The Arch mentions Argo CD as an
+alternative: instead of CI running <code>helm upgrade</code>, a tool inside the cluster watches
+a git repo and applies changes itself ("GitOps").</p>
+
+<h2 id="data">8. Migrations and the data layer</h2>
+<h3>Running Flyway at deploy time</h3>
+<p>Today each app runs Flyway at startup, on its own schema only (spec: one history table per
+schema). In Kubernetes there are two common choices:</p>
+<div class="compare">
+  <div class="good"><h4>Keep it at app startup</h4>
+    <p>Simple, and it is what we already do. When several Pods start at once, Flyway uses a database
+    lock so only one migrates and the others wait. The startup probe must allow enough time for a
+    long migration.</p></div>
+  <div class="good"><h4>A separate step before the rollout</h4>
+    <p>A Kubernetes <strong>Job</strong> (for example a Helm pre-upgrade hook) runs the migration
+    once; the Pods start only if it succeeds. Clear logs and one clear failure point. More setup.</p></div>
+</div>
+
+<h3>Expand / contract: schema changes with no downtime</h3>
+<p>During a rolling update, old and new Pods share one database (section 5). And a rollback puts
+the old code back on the <em>new</em> schema. So every migration must work with <strong>both</strong>
+versions of the code. The pattern is called <strong>expand / contract</strong> (or "parallel
+change"). Example: rename <code>marketplace.listings.title</code> to <code>name</code>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Release</th><th>Migration</th><th>Code</th></tr></thead>
+<tbody>
+<tr><td>1. Expand</td><td><code>ADD COLUMN name</code> (nullable); copy <code>title</code> into it</td><td>Writes both columns, still reads <code>title</code></td></tr>
+<tr><td>2. Switch</td><td>(none, or add <code>NOT NULL</code> once filled)</td><td>Reads and writes <code>name</code>; still writes <code>title</code> for safety</td></tr>
+<tr><td>3. Contract</td><td><code>DROP COLUMN title</code></td><td>Only <code>name</code></td></tr>
+</tbody></table></div>
+<p>A rename done in one step (<code>RENAME COLUMN</code>) would break every old Pod still running
+during the rollout. The same idea applies to events: a breaking payload change gets a new
+<code>schemaVersion</code> (spec D4), and consumers accept both versions for a while.</p>
+
+<h3>Managed vs self-hosted infrastructure</h3>
+<p>Our apps are stateless and easy to replace. The <strong>stateful</strong> parts (they keep
+data) are the hard ones to run: backups, failover, upgrades, disks. The Arch lists both options:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Part</th><th>Managed (a provider runs it)</th><th>Self-hosted in the cluster (Arch §8)</th></tr></thead>
+<tbody>
+<tr><td>PostgreSQL</td><td>Cloud database service</td><td>CloudNativePG operator, primary + read replica</td></tr>
+<tr><td>Kafka</td><td>Cloud Kafka service</td><td>Strimzi operator, 3 brokers</td></tr>
+<tr><td>Redis</td><td>Cloud Redis service</td><td>Redis Sentinel</td></tr>
+<tr><td>Object storage</td><td>S3 or a compatible service</td><td>An S3-compatible server (RustFS replaced MinIO in dev, spec Q6)</td></tr>
+<tr><td>Keycloak</td><td>(usually self-run)</td><td>2 replicas with its own PostgreSQL</td></tr>
+</tbody></table></div>
+<p>An <strong>operator</strong> is a program in the cluster that knows how to run one kind of
+system (create, back up, fail over, upgrade). <strong>Managed</strong> costs more money and less
+work, and it is usually the safer choice for a small team. <strong>Self-hosted</strong> gives
+control and may help keep data in a chosen place (a legal question too; see lesson 30). Because
+our apps use plain protocols (JDBC, Kafka, S3 API), the choice changes configuration, not code.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Piece</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Health endpoint used by Compose</td><td><code>core-app</code> <code>/actuator/health</code></td><td>Done (T6)</td></tr>
+<tr><td>Backend URLs from env (needed for K8s Services)</td><td><code>backend/gateway</code> config</td><td>Planned (T13.2)</td></tr>
+<tr><td>One Dockerfile for 4 apps, non-root, healthcheck</td><td><code>infra/docker/spring-app.Dockerfile</code></td><td>Planned (T15)</td></tr>
+<tr><td>Image scan in CI</td><td><code>.github/workflows/ci.yml</code> (Trivy)</td><td>Planned (T20)</td></tr>
+<tr><td>Image push to a registry</td><td>CI</td><td>Shipping phase (C12)</td></tr>
+<tr><td>Helm chart</td><td><code>infra/helm/</code> (Arch §9 tree)</td><td>Shipping phase</td></tr>
+<tr><td>Probes, graceful shutdown, HPA, pre-scaling</td><td>chart + each app's <code>application.yml</code></td><td>Shipping phase (NFR-6)</td></tr>
+<tr><td>k6 gate against staging</td><td><code>load-tests/k6/registration-rush.js</code> (Arch §9 tree)</td><td>registration module, then CI</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Using <code>latest</code> as the image tag.</strong> You cannot tell or roll back what runs.</li>
+  <li><strong>The database in the liveness probe.</strong> One DB blip restarts everything.</li>
+  <li><strong>No readiness probe.</strong> Traffic reaches Pods that are still starting: errors on every deploy.</li>
+  <li><strong>No preStop pause / graceful shutdown.</strong> Requests in progress fail during each rollout.</li>
+  <li><strong>Breaking migrations</strong> (rename or drop in one step) during a rolling update.</li>
+  <li><strong>Relying on <code>depends_on</code> habits.</strong> Kubernetes starts everything at
+      once; apps must retry connections.</li>
+  <li><strong>Memory limit and JVM heap out of step</strong>: the Pod is OOMKilled under load.</li>
+  <li><strong>More consumers than partitions</strong>, expecting more throughput.</li>
+  <li><strong>Secrets in values files committed to git.</strong> Values hold settings; secrets come from the pipeline or a vault.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Turn on the Kubernetes cluster in Docker Desktop (Settings → Kubernetes), or use another
+      local cluster tool. Check it works:</p>
+<pre><code>kubectl get nodes
+kubectl create deployment hello --image=nginx:1.27-alpine --replicas=2
+kubectl get pods -o wide
+kubectl delete pod &lt;one-pod-name&gt;     # watch a new one appear
+kubectl delete deployment hello</code></pre></li>
+  <li><p>Make a throwaway chart and look at what Helm renders, without installing it:</p>
+<pre><code>helm create demo
+helm template demo ./demo | more</code></pre>
+      <p>Find the Deployment, the Service, the probes and the values they come from.</p></li>
+  <li><p>Fill in the Compose → Kubernetes table (section 1) for every service in
+      <code>infra/docker-compose.yml</code>. Which ones are stateful?</p></li>
+  <li><p>On paper: plan an expand/contract change that splits
+      <code>identity</code> profile <code>full_name</code> into <code>given_name</code> and
+      <code>family_name</code>. How many releases? What does each one do?</p></li>
+  <li><p>Explain in three sentences why <code>registration-service</code> workers cannot usefully
+      scale past 12 Pods, and what would have to change to allow it.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Cluster</td><td>A group of machines that Kubernetes runs containers on.</td></tr>
+<tr><td>Declarative</td><td>You describe the goal; the system works to reach it.</td></tr>
+<tr><td>Pod</td><td>One or more containers that run together; the smallest unit.</td></tr>
+<tr><td>Deployment</td><td>Keeps N copies of a Pod running and handles updates.</td></tr>
+<tr><td>Service</td><td>A stable name and address in front of changing Pods.</td></tr>
+<tr><td>Ingress</td><td>Rules for traffic from outside the cluster.</td></tr>
+<tr><td>ConfigMap / Secret</td><td>Settings / sensitive settings given to Pods.</td></tr>
+<tr><td>Probe</td><td>A repeated health check: startup, liveness, readiness.</td></tr>
+<tr><td>Rolling update</td><td>Replacing Pods a few at a time so the service stays up.</td></tr>
+<tr><td>Graceful shutdown</td><td>Finishing work in progress before stopping.</td></tr>
+<tr><td>HPA</td><td>HorizontalPodAutoscaler: changes the number of Pods based on a metric.</td></tr>
+<tr><td>Registry</td><td>A server that stores container images.</td></tr>
+<tr><td>Helm chart</td><td>A package of Kubernetes templates plus default values.</td></tr>
+<tr><td>Expand / contract</td><td>Changing a schema in small steps that old and new code both accept.</td></tr>
+<tr><td>Operator</td><td>A program in the cluster that runs one kind of stateful system for you.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why does a failing readiness probe stop traffic, while a failing liveness probe restarts the container?</summary>
+    <p>Not ready can be temporary (starting, a dependency is slow), and a restart would not help.
+    Liveness failing means the process is stuck in a way only a restart can fix. Mixing them up
+    causes needless restarts or traffic to broken Pods.</p></details>
+  <details><summary>2. Why must database migrations be backward compatible during a rolling update?</summary>
+    <p>Old and new Pods run at the same time against the same database, and a rollback runs old
+    code on the new schema. A migration that only the new code understands breaks the old Pods.</p></details>
+  <details><summary>3. Why tag images with the git SHA and not <code>latest</code>?</summary>
+    <p>A SHA always means the same code, so you know exactly what runs, the same image moves from
+    staging to prod, and a rollback is precise. <code>latest</code> changes over time.</p></details>
+  <details><summary>4. Why pre-scale registration before the window instead of trusting the HPA?</summary>
+    <p>The HPA reacts after load rises, and new JVM Pods need time to start and warm up. The rush
+    peaks in the first seconds, so capacity must already be there.</p></details>
+  <details><summary>5. Why is a Pod stopped during a rollout not a problem for Kafka events?</summary>
+    <p>Unsent events stay in the outbox and are sent later; half-processed messages are delivered
+    again to another consumer, and consumers deduplicate by <code>eventId</code>. At-least-once plus
+    idempotent consumers make restarts safe.</p></details>
+  <details><summary>6. Why does choosing managed or self-hosted Postgres not change our Java code?</summary>
+    <p>The apps talk plain JDBC and read the URL and password from configuration. Only the
+    ConfigMap and Secret change; the image stays the same.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://kubernetes.io/docs/concepts/">Kubernetes documentation: Concepts</a>: Pods, Deployments, Services, Ingress, ConfigMaps, Secrets.</li>
+  <li><a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/">Kubernetes: Configure liveness, readiness and startup probes</a>.</li>
+  <li><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-update-deployment">Kubernetes: Rolling update Deployment</a>.</li>
+  <li><a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/">Kubernetes: Horizontal Pod Autoscaling</a>.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/actuator/endpoints.html#actuator.endpoints.kubernetes-probes">Spring Boot: Kubernetes probes</a> and <a href="https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html">Spring Boot: Graceful shutdown</a>.</li>
+  <li><a href="https://helm.sh/docs/">Helm documentation</a>: charts, values, templates, rollback.</li>
+  <li><a href="https://documentation.red-gate.com/flyway">Flyway documentation</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

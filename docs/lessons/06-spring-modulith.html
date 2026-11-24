@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modular Monolith Lesson</title>
+<meta name="description" content="Smart Campus lesson 06: a modular monolith with Spring Modulith: modules, internal packages, verify(), module tests and one API group per module.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="06">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 06 · Part 1: Foundations</div>
+<h1>Modular monolith with Spring Modulith</h1>
+<p class="lede">One app, many modules, and walls between them that the build checks for you.
+This is how <code>core-app</code> can hold ten feature modules without turning into a big ball of
+mud.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every core-app module</span>
+  <span class="badge task">T6 (done)</span>
+  <span class="badge task">T9 (done)</span>
+  <span class="badge task">T12</span>
+  <span class="badge time">~50 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="01-java-21.html">01 (packages, records)</a>,
+  <a href="02-maven.html">02 (Maven modules)</a> and
+  <a href="03-spring-boot.html">03 (beans, auto-configuration)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#styles">Monolith, microservices, modular monolith</a></li>
+    <li><a href="#module">A module is a top-level package</a></li>
+    <li><a href="#api">Public API and internal packages</a></li>
+    <li><a href="#detection">How our modules are found</a></li>
+    <li><a href="#verify">verify(): the build checks the walls</a></li>
+    <li><a href="#talk">How modules talk to each other</a></li>
+    <li><a href="#test-docs">Module tests and the Documenter</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Smart Campus has 14 modules. Ten of them (<code>identity</code>, <code>course</code>,
+<code>timetable</code>, <code>grade</code>, <code>announcement</code>, <code>payment</code>,
+<code>club</code>, <code>marketplace</code>, <code>lostfound</code>, <code>search</code>) plus
+<code>shell</code> and <code>platform</code> live in <strong>one Spring Boot app</strong>:
+<code>core-app</code>. If any class could call any other class, after a few months nobody could
+change <code>grade</code> without breaking <code>club</code>.</p>
+<p>So we draw walls inside the app. Each module has a small public part and a large private
+part. <strong>Spring Modulith</strong> is a Spring library that knows where the walls are and
+fails the build when code climbs over one. You will meet this every time you add a class to
+<code>core-app</code>.</p>
+
+<h2 id="styles">2. Monolith, microservices, modular monolith</h2>
+<p>There are three common ways to cut a backend:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Style</th><th>What it is</th><th>Good</th><th>Hard</th></tr></thead>
+<tbody>
+<tr><td><strong>Monolith</strong></td><td>One app, one deploy, no inside walls</td>
+    <td>Simple to run and debug</td><td>Grows into a tangle; every change can break anything</td></tr>
+<tr><td><strong>Microservices</strong></td><td>Many small apps, each with its own deploy and database</td>
+    <td>Each part scales and ships alone</td><td>Network calls everywhere, many moving parts, hard for one small team</td></tr>
+<tr><td><strong>Modular monolith</strong></td><td>One app, but split inside into modules with checked walls</td>
+    <td>Simple to run, clean boundaries</td><td>All modules scale together</td></tr>
+</tbody></table></div>
+<p>An everyday picture: a monolith is one big open-plan office. Microservices are separate
+buildings across the city. A modular monolith is one building with locked rooms and a reception
+desk at each door.</p>
+
+<div class="callout project">
+  <span class="title">Smart Campus mixes them (Arch ADR-1)</span>
+  A <strong>modular monolith</strong> (<code>core-app</code>) plus <strong>two extracted
+  services</strong>: <code>registration-service</code> (it must survive 5,000 students clicking
+  at the same minute, so it scales alone) and <code>notification-service</code> (WebSocket,
+  push and email have a different load shape). One team, fewer moving parts, and only the two
+  parts that really need it pay the price of a separate service.
+</div>
+
+<div class="flow">
+  <div class="box accent"><b>gateway :8080</b>one entry point</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>core-app :8081</b>platform, identity, shell, course, timetable, grade, announcement, payment, club, marketplace, lostfound, search</div>
+  <div class="box ok"><b>registration-service :8082</b>the registration rush</div>
+  <div class="box ok"><b>notification-service :8083</b>inbox, WebSocket, push, email</div>
+</div>
+<p>Because the walls inside <code>core-app</code> are real, a module could later be moved out
+into its own service with much less pain. That is a nice side effect, not a plan.</p>
+
+<h2 id="module">3. A module is a top-level package</h2>
+<p>Spring Modulith looks at the package of the main class (<code>edu.campus</code>, from
+<code>CoreApplication</code>). Every package <strong>directly below</strong> it is one
+<strong>application module</strong>:</p>
+<pre class="diagram">backend/core-app/src/main/java/edu/campus/
+├── CoreApplication.java          ← the root package: edu.campus
+├── platform/                     ← module "platform"  (exists, T6)
+│   ├── package-info.java         ← @ApplicationModule(displayName = "Platform")
+│   ├── PingController.java       ← API part (root package of the module)
+│   ├── ModuleApiGroups.java
+│   └── internal/                 ← private to platform
+│       └── OutboxProbeService.java …
+├── course/                       ← module "course"    (planned, module 4)
+│   ├── SectionLookup.java        ← API: other modules may use it
+│   └── internal/ …               ← private
+└── grade/                        ← module "grade"     (planned, module 7)</pre>
+<p>The project rule (spec, "Conventions"): <strong>one Modulith module = one top-level
+package</strong>, and the package name is the module id. The same id is used for the database
+schema (<code>course</code>), the API prefix (<code>/api/v1/course</code>) and the OpenAPI group.
+One name everywhere makes it easy to find things.</p>
+
+<pre data-file="backend/core-app/src/main/java/edu/campus/platform/package-info.java"><code>@ApplicationModule(displayName = <span class="s">"Platform"</span>)
+package edu.campus.platform;
+
+import org.springframework.modulith.ApplicationModule;</code></pre>
+<p>A <code>package-info.java</code> is a special Java file that holds annotations and Javadoc for a
+whole package. <code>@ApplicationModule</code> is optional (the package is a module anyway), but it
+is the natural place for the module's display name and its rules.</p>
+
+<h2 id="api">4. Public API and internal packages</h2>
+<p>Inside a module there are two kinds of classes:</p>
+<ul>
+  <li><strong>The API</strong>: public types in the module's root package
+      (<code>edu.campus.course</code>). Other modules may use them.</li>
+  <li><strong>Internals</strong>: everything in sub-packages
+      (<code>edu.campus.course.internal</code>, <code>…internal.jdbc</code>). Only the module itself
+      may use them.</li>
+</ul>
+<div class="callout tip">
+  <span class="title">Modulith's rule, and our naming rule</span>
+  By default, Modulith treats <strong>every</strong> sub-package of a module as hidden, whatever
+  its name. Smart Campus adds a naming convention on top: put private code in a sub-package
+  called <code>internal</code>, so a reader sees at once that it is private. Our own ArchUnit rule
+  (<code>InternalPackageRule</code>) checks exactly that name.
+</div>
+
+<div class="compare">
+  <div class="poor"><h4>Reaching inside</h4>
+<pre><code>package edu.campus.grade.internal;
+
+import edu.campus.course.internal.SectionRepository; <span class="c">// ✗</span>
+
+class GradeService {
+    <span class="c">// reads course's tables through its repository</span>
+}</code></pre></div>
+  <div class="good"><h4>Using the door</h4>
+<pre><code>package edu.campus.grade.internal;
+
+import edu.campus.course.SectionLookup;  <span class="c">// ✓ API</span>
+
+class GradeService {
+    <span class="c">// asks course a question through its API</span>
+}</code></pre></div>
+</div>
+
+<h3>Named interfaces</h3>
+<p>Sometimes a module wants to share more than its root package, for example a package of event
+payload records. A <strong>named interface</strong> opens one sub-package on purpose:</p>
+<pre data-file="Example (planned, not in the code yet)"><code><span class="c">// edu/campus/course/events/package-info.java</span>
+<span class="k">@org.springframework.modulith.NamedInterface</span>(<span class="s">"events"</span>)
+package edu.campus.course.events;</code></pre>
+<p>Now other modules may use <code>edu.campus.course.events</code>, but still not
+<code>edu.campus.course.internal</code>. Use this rarely: every opened door is a promise you must
+keep.</p>
+
+<h3>The database follows the same walls</h3>
+<p>Each module owns <strong>one PostgreSQL schema</strong> (<a href="04-postgres-flyway.html">lesson 04</a>).
+Its Flyway migrations live in <code>db/migration/&lt;schema&gt;/</code> and touch only that schema.
+There are <strong>no foreign keys across schemas</strong> (map C4). If <code>grade</code> needs a
+section id, it stores a bare UUID and keeps its own small copy of the facts it needs.</p>
+
+<h2 id="detection">5. How our modules are found</h2>
+<p>Modulith's default rule is "every direct sub-package of the main class's package". In T6 this
+caused a surprise: <code>shared-kernel</code>'s classes live in <code>edu.campus.kernel</code>, and
+<code>platform-starter</code>'s in <code>edu.campus.starter</code>. Both are below
+<code>edu.campus</code>, so Modulith thought they were modules. Then <code>platform</code> using
+<code>edu.campus.kernel.event.Topics</code> looked like a module reaching into another module's
+sub-package, and <code>verify()</code> failed.</p>
+<p>The fix is a small <strong>detection strategy</strong> in <code>platform-starter</code>:</p>
+<pre data-file="backend/platform-starter/src/main/java/edu/campus/starter/modulith/CampusModuleDetection.java"><code>public class CampusModuleDetection implements ApplicationModuleDetectionStrategy {
+
+    static final Set&lt;String&gt; LIBRARIES = Set.of(<span class="s">"edu.campus.kernel"</span>, <span class="s">"edu.campus.starter"</span>);
+
+    private final ApplicationModuleDetectionStrategy defaults =
+            ApplicationModuleDetectionStrategy.directSubPackage();
+
+    <span class="k">@Override</span>
+    public Stream&lt;JavaPackage&gt; getModuleBasePackages(JavaPackage rootPackage) {
+        return defaults.getModuleBasePackages(rootPackage)
+                .filter(pkg -&gt; !LIBRARIES.contains(pkg.getName()));  <span class="c">// libraries, not modules</span>
+    }
+}</code></pre>
+<p>It reuses the default rule and only removes the two libraries. A new package such as
+<code>edu.campus.grade</code> still becomes a module automatically, so nothing can slip past the
+checks. The strategy is registered in the starter's <code>META-INF/spring.factories</code>, so
+<code>core-app</code> needs no setting at all (T8.6).</p>
+
+<h2 id="verify">6. verify(): the build checks the walls</h2>
+<pre data-file="backend/core-app/src/test/java/edu/campus/ModularityTest.java"><code>class ModularityTest {
+
+    private final ApplicationModules modules = ApplicationModules.of(CoreApplication.class);
+
+    <span class="k">@Test</span>
+    void modulesFollowTheRules() {
+        modules.verify();      <span class="c">// throws Violations if any rule is broken</span>
+    }
+}</code></pre>
+<p><code>ApplicationModules.of(…)</code> reads the compiled classes (it uses ArchUnit under the
+hood; no Spring context, no Docker, so it is fast). <code>verify()</code> then checks:</p>
+<ul>
+  <li><strong>No access to another module's internals.</strong></li>
+  <li><strong>No cycles</strong> between modules (A uses B and B uses A). The map already removed
+      one planned cycle: <code>course</code> does not consume <code>registration</code> events (C17).</li>
+  <li><strong>Allowed dependencies</strong>, if a module lists them with
+      <code>@ApplicationModule(allowedDependencies = …)</code>.</li>
+</ul>
+
+<h3>Proving the check works (spec P3)</h3>
+<p>A test that always passes proves nothing. So T6 keeps a fixture in the test sources that is
+<strong>wrong on purpose</strong>:</p>
+<pre class="diagram">backend/core-app/src/test/java/fixture/boundary/
+├── alpha/AlphaService.java       uses beta.BetaApi (allowed) AND beta.internal.BetaSecret (NOT allowed)
+└── beta/
+    ├── BetaApi.java              beta's public API
+    └── internal/BetaSecret.java  beta's private class</pre>
+<pre data-file="backend/core-app/src/test/java/edu/campus/architecture/BoundaryViolationTest.java (part)"><code><span class="k">@Test</span>
+void modulithVerifyFailsWhenAModuleUsesAnotherModulesInternalPackage() {
+    ApplicationModules fixtureModules = ApplicationModules.of(FIXTURE, INCLUDE_TEST_CLASSES);
+
+    assertThatThrownBy(fixtureModules::verify)
+            .isInstanceOf(Violations.class)
+            .hasMessageContaining(<span class="s">"BetaSecret"</span>);
+}</code></pre>
+<p>The same test file also runs our <code>InternalPackageRule</code> (plain ArchUnit) against the
+fixture and against the real app. Two independent checks for the same wall: if one tool changes
+behavior in a new version, the other still catches the problem. More about ArchUnit in
+<a href="10-testing.html">lesson 10</a>.</p>
+
+<h2 id="talk">7. How modules talk to each other</h2>
+<p>There are two allowed doors (Arch §4):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Door</th><th>Use it for</th><th>Example (planned)</th></tr></thead>
+<tbody>
+<tr><td><strong>Public Java API</strong> (a direct method call)</td>
+    <td>Asking a question right now</td>
+    <td><code>grade</code> asks <code>course</code> "does section X exist?"</td></tr>
+<tr><td><strong>An event on Kafka</strong></td>
+    <td>Saying "this happened", so others can react later</td>
+    <td><code>course</code> publishes <code>SectionChanged</code>; <code>timetable</code> updates its read model</td></tr>
+</tbody></table></div>
+
+<h3>Events inside one module vs across modules (spec D5)</h3>
+<p>Spring Modulith has a handy annotation for listening to events in the same app:</p>
+<pre data-file="Allowed: a module listens to its OWN event"><code>package edu.campus.club.internal;
+
+<span class="k">@Component</span>
+class TicketStatsUpdater {
+
+    <span class="k">@ApplicationModuleListener</span>              <span class="c">// club listens to a club event: OK</span>
+    void on(DomainEvent&lt;TicketIssued&gt; event) { … }
+}</code></pre>
+<p><code>@ApplicationModuleListener</code> is a short form of three things: run
+<strong>after the sender's transaction commits</strong>, run <strong>asynchronously</strong> (on
+another thread), and run in <strong>a new transaction</strong>.</p>
+<div class="callout warn">
+  <span class="title">Smart Campus rule D5</span>
+  An in-process listener (<code>@ApplicationModuleListener</code>, <code>@EventListener</code>,
+  <code>@TransactionalEventListener</code>) may only handle events of <strong>its own
+  module</strong>. Events from <strong>another</strong> module are always read from
+  <strong>Kafka</strong>, even when both modules run inside <code>core-app</code>. Only Kafka keeps
+  the history, so only Kafka lets a read model be replayed. An ArchUnit rule (T12.3, planned)
+  fails the build otherwise. The full story is in <a href="08-outbox-idempotency.html">lesson 08</a>.
+</div>
+<p>Publishing stays the same in every module: call
+<code>ApplicationEventPublisher.publishEvent(new DomainEvent&lt;&gt;(…))</code> inside the
+business transaction. Modulith's event registry (the outbox) stores it and sends it to Kafka
+after the commit.</p>
+
+<h2 id="test-docs">8. Module tests and the Documenter</h2>
+<h3>Testing one module alone</h3>
+<p>A full <code>@SpringBootTest</code> starts every module. Modulith offers
+<code>@ApplicationModuleTest</code>: put it on a test class inside a module's package, and it
+starts <strong>only that module's beans</strong> (by default). If the module needs a bean from
+another module, the test fails, which tells you about a hidden dependency.</p>
+<pre data-file="Example (planned: the first feature module will add one)"><code>package edu.campus.course;
+
+<span class="k">@ApplicationModuleTest</span>                     <span class="c">// boots only the "course" module</span>
+<span class="k">@Import</span>(TestcontainersConfiguration.class)
+class CourseModuleIT {
+
+    <span class="k">@Autowired</span> SectionLookup sections;
+
+    <span class="k">@Test</span>
+    void findsASectionById() { … }
+}</code></pre>
+<p>Other bootstrap modes exist (for example, also start the direct dependencies). Modulith's test
+library also has a <code>Scenario</code> helper to check "when I do X, event Y is published". No
+module uses these yet; <code>platform</code> has full-app tests only.</p>
+
+<h3>Drawing the map: the Documenter</h3>
+<p>Modulith can write diagrams of the modules and their dependencies:</p>
+<pre data-file="Example test (not in the repo yet)"><code>class ModuleDocsTest {
+    <span class="k">@Test</span>
+    void writeModuleDocs() {
+        new Documenter(ApplicationModules.of(CoreApplication.class))
+                .writeDocumentation();          <span class="c">// diagrams + one "canvas" page per module</span>
+    }
+}</code></pre>
+<p>The files go into a folder under <code>target/</code> (PlantUML diagrams and an overview page per
+module). Because they come from the real code, they are never out of date. The Documenter lives
+in Modulith's docs library; check that it is on the test classpath before you add this test. Nice for a README or a
+review once several modules exist.</p>
+
+<h3>One OpenAPI group per module (T9)</h3>
+<p>The module list is also used for API docs. <code>ModuleApiGroups</code> asks Modulith for the
+modules and makes one springdoc group per module, so <code>course</code> will get
+<code>/v3/api-docs/course</code> with no code change:</p>
+<pre data-file="backend/core-app/src/main/java/edu/campus/platform/ModuleApiGroups.java (part)"><code>public static List&lt;GroupedOpenApi&gt; groupsFor(ApplicationModules modules) {
+    return modules.stream()
+            .map(ModuleApiGroups::groupFor)        <span class="c">// group = module id, packages = module package</span>
+            .sorted(Comparator.comparing(GroupedOpenApi::getGroup))
+            .toList();
+}</code></pre>
+<p>Details in <a href="09-rest-problem-openapi.html">lesson 09</a>.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Main class = module root</td><td><code>backend/core-app/src/main/java/edu/campus/CoreApplication.java</code></td><td>T6</td></tr>
+<tr><td>First module</td><td><code>core-app/…/edu/campus/platform/package-info.java</code></td><td>T6</td></tr>
+<tr><td>Module detection</td><td><code>platform-starter/…/starter/modulith/CampusModuleDetection.java</code></td><td>T6, moved T8</td></tr>
+<tr><td><code>verify()</code> test</td><td><code>core-app/src/test/java/edu/campus/ModularityTest.java</code></td><td>T6</td></tr>
+<tr><td>Violation fixture + ArchUnit rule</td><td><code>core-app/src/test/java/fixture/boundary/</code>, <code>…/edu/campus/architecture/</code></td><td>T6 (P3)</td></tr>
+<tr><td>One API group per module</td><td><code>core-app/…/platform/ModuleApiGroups.java</code></td><td>T9</td></tr>
+<tr><td>"Kafka only across modules" rule</td><td>ArchUnit rule + fixture (planned)</td><td>T12</td></tr>
+<tr><td>Real feature modules</td><td><code>edu.campus.identity</code>, <code>edu.campus.course</code>, … (planned)</td><td>modules 2–14</td></tr>
+</tbody></table></div>
+<p>Also read <a href="../learn/platform/task6.md">docs/learn/platform/task6.md</a>, which explains
+the T6 files and the "kernel is not a module" problem.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Making a class <code>public</code> in <code>internal</code> "just to use it" from
+      another module.</strong> Java <code>public</code> does not open a Modulith wall. Add a method
+      to the module's API instead.</li>
+  <li><strong>Putting shared helpers in a module.</strong> If every module needs it and it has no
+      Spring code, it belongs in <code>shared-kernel</code> (ids, money, time, events, errors).</li>
+  <li><strong>Listening in-process to another module's event.</strong> It works today and breaks
+      replay forever. Read it from Kafka (D5).</li>
+  <li><strong>Joining across schemas in SQL</strong> ("just for a report"). Use the other module's
+      API or build a read model from events.</li>
+  <li><strong>"Fixing" the boundary fixture.</strong> <code>AlphaService</code> is wrong on purpose.
+      If you fix it, the test that proves P3 stops proving anything.</li>
+  <li><strong>Creating a module by accident.</strong> A new package directly under
+      <code>edu.campus</code> is a new module, with its own walls and its own API group.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Run only the architecture tests (fast, no Docker):</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app -am test "-Dtest=ModularityTest,BoundaryViolationTest" "-Dsurefire.failIfNoSpecifiedTests=false"</code></pre></li>
+  <li><p>Break a wall on purpose (this is what T6 did once by hand):</p>
+      <ul>
+        <li>add a <strong>public</strong> class <code>Secret</code> in
+            <code>backend/core-app/src/main/java/edu/campus/platform/internal/</code>;</li>
+        <li>add <code>backend/core-app/src/main/java/edu/campus/demo/Demo.java</code> that calls
+            <code>new edu.campus.platform.internal.Secret()</code>.</li>
+      </ul>
+      <p>It compiles (Java is happy), but run step 1 again and read the <code>Violations</code>
+      message. Then <strong>delete</strong> both new files.</p></li>
+  <li><p>Read <code>ModularityTest</code>: why are there tests that say <code>kernel</code> and
+      <code>starter</code> are <em>not</em> modules? What would break without
+      <code>CampusModuleDetection</code>?</p></li>
+  <li><p>Start core-app (see <a href="03-spring-boot.html">lesson 03</a>) and open
+      <code>http://localhost:8081/swagger-ui.html</code>. Find the group selector. How many groups
+      are there today, and why?</p></li>
+  <li><p>On paper: design the packages for the planned <code>course</code> module. What goes in
+      <code>edu.campus.course</code> (API) and what in <code>edu.campus.course.internal</code>? Which
+      of its facts should other modules learn by API call, and which by event?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Monolith</td><td>One app that is built and deployed as one piece.</td></tr>
+<tr><td>Microservice</td><td>A small app with its own deploy and data, talking to others over the network.</td></tr>
+<tr><td>Modular monolith</td><td>One app split inside into modules with checked walls.</td></tr>
+<tr><td>Application module</td><td>In Modulith: one top-level package under the main class's package.</td></tr>
+<tr><td>Module API</td><td>The public types in the module's root package. The "front door".</td></tr>
+<tr><td>Internal</td><td>Sub-packages of a module. Private to that module.</td></tr>
+<tr><td>Named interface</td><td>A sub-package that a module opens to others on purpose.</td></tr>
+<tr><td>verify()</td><td>Modulith's check for internal access and cycles. Fails the build.</td></tr>
+<tr><td>Fixture</td><td>Fake code or data kept only for a test.</td></tr>
+<tr><td>Detection strategy</td><td>The rule Modulith uses to decide which packages are modules.</td></tr>
+<tr><td>Extracted service</td><td>A module that was moved into its own app (registration, notification).</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why did Smart Campus not choose full microservices for every module?</summary>
+    <p>One team would have to run and debug 14 networked apps. Most modules have the same small
+    load. Only registration (huge rush) and notification (different delivery work) need to scale
+    alone, so only those two are separate (ADR-1).</p></details>
+  <details><summary>2. Why is a Java <code>public</code> class in <code>course.internal</code> still not usable by <code>grade</code>?</summary>
+    <p>Java visibility and module walls are different things. Modulith decides by package: types in
+    a module's sub-packages are internal, whatever their Java modifier. <code>verify()</code> fails
+    if another module uses them.</p></details>
+  <details><summary>3. What problem does <code>CampusModuleDetection</code> solve?</summary>
+    <p>The shared libraries live in <code>edu.campus.kernel</code> and <code>edu.campus.starter</code>,
+    so the default rule saw them as modules, and using <code>kernel.event.Topics</code> looked like a
+    violation. The strategy removes those two packages from the module list but keeps the default rule
+    for everything else.</p></details>
+  <details><summary>4. Why keep a fixture that is wrong on purpose?</summary>
+    <p>To prove the check really fails on a violation (P3). Without it, a misconfigured
+    <code>verify()</code> could pass forever and nobody would notice.</p></details>
+  <details><summary>5. <code>timetable</code> and <code>course</code> both run in core-app. Why may <code>timetable</code> not use <code>@ApplicationModuleListener</code> for <code>SectionChanged</code>?</summary>
+    <p>An in-process listener cannot be replayed. <code>timetable</code> is a read model that must
+    be rebuildable from history, which only Kafka keeps. Also, one delivery path for all cross-module
+    events is simpler (D5).</p></details>
+  <details><summary>6. Why is it useful that OpenAPI groups come from the Modulith module list?</summary>
+    <p>A new module gets its API docs group automatically, and the groups always match the real
+    modules that <code>verify()</code> checks. Nobody has to remember to add a group by hand.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/fundamentals.html">Spring Modulith reference: Fundamentals</a>: modules, internal packages, named interfaces, detection.</li>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/verification.html">Spring Modulith reference: Verifying application module structure</a>: what <code>verify()</code> checks.</li>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/testing.html">Spring Modulith reference: Integration testing application modules</a>: <code>@ApplicationModuleTest</code> and <code>Scenario</code>.</li>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/documentation.html">Spring Modulith reference: Documenting application modules</a>: the Documenter.</li>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/events.html">Spring Modulith reference: Working with application events</a>: <code>@ApplicationModuleListener</code>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

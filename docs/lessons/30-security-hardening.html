@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Hardening OWASP</title>
+<meta name="description" content="Smart Campus lesson 30: the OWASP Top 10 mapped to Smart Campus, with IDOR, injection, XSS, uploads, SSRF, secrets, dependencies, webhooks, personal data and STRIDE threat modeling.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="30">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 30 · Part 2: Feature modules</div>
+<h1>Security hardening (OWASP)</h1>
+<p class="lede">Smart Campus holds grades, phone numbers, photos and payments for thousands of
+students. This lesson walks through the most common ways web apps get broken into, shows where each
+one could happen in Smart Campus, and gives the habit that stops it.</p>
+
+<div class="meta">
+  <span class="badge module">all modules</span>
+  <span class="badge task">platform C1 (scans)</span>
+  <span class="badge task">R1 (rate limit)</span>
+  <span class="badge task">NFR-3</span>
+  <span class="badge time">~90 min</span>
+  <span class="badge level">Checklist</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="16-oauth-oidc-keycloak.html">16 (OAuth and Keycloak)</a> and
+  <a href="17-spring-security.html">17 (Spring Security, ownership checks)</a>. Lessons
+  <a href="26-payments-webhooks.html">26 (payments)</a> and
+  <a href="28-file-storage-s3.html">28 (file uploads)</a> go deeper on two topics here.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">The OWASP Top 10, mapped to Smart Campus</a></li>
+    <li><a href="#access">Broken access control: IDOR and SSRF</a></li>
+    <li><a href="#injection">Injection and XSS</a></li>
+    <li><a href="#uploads">File uploads</a></li>
+    <li><a href="#config">Configuration, secrets and dependencies</a></li>
+    <li><a href="#abuse">Logins, rate limits and webhooks</a></li>
+    <li><a href="#privacy">Logs and personal data</a></li>
+    <li><a href="#stride">Light threat modeling with STRIDE</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. The OWASP Top 10, mapped to Smart Campus</h2>
+<p><strong>OWASP</strong> (Open Worldwide Application Security Project) is a non-profit
+community. Every few years it publishes the <strong>Top 10</strong>: the ten most important risk
+categories for web apps, based on real data. The newest edition is the <strong>2025</strong> list.
+Check <a href="https://owasp.org/Top10/">owasp.org/Top10</a> for the exact wording; the short names
+below follow it.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>Category (2025)</th><th>Example in Smart Campus</th><th>Section</th></tr></thead>
+<tbody>
+<tr><td>A01</td><td>Broken Access Control (now includes SSRF)</td><td>A student reads another student's grade by changing the id</td><td>2</td></tr>
+<tr><td>A02</td><td>Security Misconfiguration</td><td>Keycloak in <code>start-dev</code> mode in production; Swagger UI open to the world</td><td>5</td></tr>
+<tr><td>A03</td><td>Software Supply Chain Failures</td><td>A Maven or npm dependency with a known hole, or a hijacked package</td><td>5</td></tr>
+<tr><td>A04</td><td>Cryptographic Failures</td><td>Plain HTTP in production; a weak secret for QR ticket signatures</td><td>5, <a href="27-qr-tickets.html">27</a></td></tr>
+<tr><td>A05</td><td>Injection</td><td>Marketplace search built by joining strings into SQL; XSS in a listing description</td><td>3</td></tr>
+<tr><td>A06</td><td>Insecure Design</td><td>A refund flow with no limit; no plan for registration bots</td><td>8</td></tr>
+<tr><td>A07</td><td>Authentication Failures</td><td>Password guessing against admin accounts</td><td>6</td></tr>
+<tr><td>A08</td><td>Software or Data Integrity Failures</td><td>Trusting a payment webhook without checking its signature</td><td>6</td></tr>
+<tr><td>A09</td><td>Security Logging and Alerting Failures</td><td>Nobody notices 10,000 failed logins; or logs full of personal data</td><td>7</td></tr>
+<tr><td>A10</td><td>Mishandling of Exceptional Conditions</td><td>An error page that shows a stack trace; a failure that "fails open"</td><td>5</td></tr>
+</tbody></table></div>
+<p>Security is not one feature you add at the end. It is a set of small habits in every module.
+Each section below ends with the habit.</p>
+
+<h2 id="access">2. Broken access control: IDOR and SSRF</h2>
+<h3>IDOR</h3>
+<p>Access control is "who may do what to which row". It is number one on the list because it is
+easy to forget one check. The classic bug is <strong>IDOR</strong> (insecure direct object
+reference): the URL contains an id, and the server never checks that the row belongs to the caller.</p>
+<div class="compare">
+  <div class="poor"><h4>IDOR</h4>
+<pre><code><span class="k">@GetMapping</span>("/api/v1/grade/grades/{id}")
+<span class="k">@PreAuthorize</span>("hasRole('STUDENT')")
+GradeView get(<span class="k">@PathVariable</span> UUID id) {
+    return grades.findById(id)
+        .orElseThrow(...);       <span class="c">// any student, any grade</span>
+}</code></pre></div>
+  <div class="good"><h4>Owner in the query</h4>
+<pre><code><span class="k">@GetMapping</span>("/api/v1/grade/grades/{id}")
+<span class="k">@PreAuthorize</span>("hasRole('STUDENT')")
+GradeView get(<span class="k">@PathVariable</span> UUID id, <span class="k">@AuthenticationPrincipal</span> Jwt jwt) {
+    UUID me = UUID.fromString(jwt.getSubject());
+    return grades.findByIdAndStudent(id, me)
+        .orElseThrow(() -&gt; new CampusProblem(ProblemCode.NOT_FOUND,
+                "Grade %s not found".formatted(id)));
+}</code></pre></div>
+</div>
+<p>Random UUIDs make ids hard to guess, but that is <em>not</em> access control: ids leak in
+links, logs and screenshots. Other IDOR spots to check: a club manager editing another club's
+event, a seller marking someone else's listing as sold, a student closing someone else's
+lost-item claim, a lecturer exporting a roster for a section they do not teach.</p>
+<p><strong>Habit:</strong> every endpoint with an id gets a test "other user's id → 404".</p>
+
+<h3>SSRF</h3>
+<p><strong>SSRF</strong> (server-side request forgery) happens when <em>our server</em> fetches a
+URL that a user gave. The attacker gives an internal address, like
+<code>http://keycloak:8080/admin/…</code> or a cloud metadata address, and our server, which sits
+inside the private network, fetches it for them. In the 2025 list SSRF is part of A01.</p>
+<p>Where could Smart Campus fetch a user's URL? "Import a book photo from a link" in the
+marketplace, a link preview in announcements, a club's external event page. Best answer:
+<strong>do not build these features</strong>; uploads go straight to storage (section 4). If one is
+ever needed:</p>
+<ul>
+  <li>allow only <code>https</code> and a short <strong>allowlist</strong> of hosts;</li>
+  <li>resolve the host name and refuse private and loopback IP ranges (10.x, 172.16–31.x,
+      192.168.x, 127.x, 169.254.x);</li>
+  <li>do not follow redirects, set a short timeout and a size limit.</li>
+</ul>
+
+<h2 id="injection">3. Injection and XSS</h2>
+<h3>SQL injection</h3>
+<p><strong>Injection</strong> means user text is treated as <em>code</em>. With SQL, a search for
+<code>' OR '1'='1</code> could change the meaning of the query. The fix is always the same:
+<strong>bind parameters</strong>. The SQL text has <code>?</code> placeholders, and the values are
+sent separately, so the database never reads them as SQL.</p>
+<pre data-file="Marketplace search with JdbcTemplate"><code><span class="c">// BAD: the user's text becomes part of the SQL</span>
+jdbc.query("SELECT id, title FROM marketplace.listings WHERE title ILIKE '%" + q + "%'", mapper);
+
+<span class="c">// GOOD: a placeholder, value bound separately</span>
+jdbc.query("SELECT id, title FROM marketplace.listings WHERE title ILIKE ?", mapper, "%" + q + "%");</code></pre>
+<p>One trap: you <strong>cannot bind a column name</strong>. Our API convention allows
+<code>?sort=createdAt,desc</code> (Arch §7). Never paste that into <code>ORDER BY</code>.
+Map it through a fixed list:</p>
+<pre data-file="Sort by an allowlist, never by user text"><code>private static final Map&lt;String, String&gt; SORT_COLUMNS = Map.of(
+        "createdAt", "created_at",
+        "price", "price_amount");
+
+String column = SORT_COLUMNS.get(sortField);
+if (column == null) {
+    throw new CampusProblem(ProblemCode.VALIDATION_FAILED, "Cannot sort by " + sortField);
+}
+String direction = "desc".equalsIgnoreCase(sortDir) ? "DESC" : "ASC";</code></pre>
+<p>The same idea applies to OpenSearch queries (<a href="29-opensearch.html">lesson 29</a>): build
+them with the client's query objects, not by joining JSON strings.</p>
+
+<h3>XSS in React</h3>
+<p><strong>XSS</strong> (cross-site scripting) is injection into the <em>page</em>: an attacker's
+text runs as JavaScript in another user's browser, where it can steal tokens or act as that user.
+React protects you by default: <code>{listing.description}</code> is shown as text, never run as
+HTML. You lose this protection when you step around React:</p>
+<div class="compare">
+  <div class="poor"><h4>Dangerous</h4>
+<pre><code>&lt;div dangerouslySetInnerHTML={{ __html: listing.description }} /&gt;
+
+&lt;a href={club.website}&gt;Website&lt;/a&gt;   <span class="c">// "javascript:…" link</span></code></pre></div>
+  <div class="good"><h4>Safe</h4>
+<pre><code>&lt;p style={{ whiteSpace: "pre-line" }}&gt;{listing.description}&lt;/p&gt;
+
+&lt;a href={safeHttpUrl(club.website)}&gt;Website&lt;/a&gt;
+<span class="c">// allow only http: and https: URLs</span></code></pre></div>
+</div>
+<p>If an announcement really needs rich text (bold, lists), sanitize the HTML with a well-known
+library such as DOMPurify before showing it, and still keep a strict Content Security Policy
+(section 5). <strong>Habit:</strong> a code review flags every <code>dangerouslySetInnerHTML</code>.</p>
+
+<h2 id="uploads">4. File uploads</h2>
+<p>The marketplace (book photos, MKT-1) and lost &amp; found (item photos, LF-1) accept files. A
+file from a user is untrusted input that is also large. The Arch (§8) sets the rules: "uploads go
+straight to storage via pre-signed URLs, size and MIME type checked; images re-encoded". In dev the
+storage is RustFS (S3-compatible, spec Q6).</p>
+<div class="flow">
+  <div class="box project"><b>1. Ask</b>Browser asks our API: "I want to upload a JPEG of 2 MB"</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>2. Pre-signed URL</b>API checks type + size limit, returns a short-lived upload URL with a random key</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>3. Upload</b>Browser PUTs the file straight to storage (our servers carry no big bytes)</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>4. Check + re-encode</b>A job reads the real bytes, re-encodes the image, then marks it ready</div>
+</div>
+<div class="table-wrap"><table>
+<thead><tr><th>Risk</th><th>Defence</th></tr></thead>
+<tbody>
+<tr><td>A huge file fills the disk</td><td>Size limit in the pre-signed request and checked again after upload</td></tr>
+<tr><td>A script named <code>photo.jpg</code></td><td>Do not trust the name or the browser's <code>Content-Type</code>; read the first bytes; re-encode to a fresh JPEG/WebP</td></tr>
+<tr><td>SVG with JavaScript inside</td><td>Do not accept SVG for user photos</td></tr>
+<tr><td>Location hidden in the photo (EXIF GPS)</td><td>Re-encoding drops metadata. Matters for lost-item photos taken at home</td></tr>
+<tr><td>Guessing other people's files</td><td>Private bucket, random object keys, short-lived download URLs</td></tr>
+<tr><td>Path tricks (<code>../../</code>)</td><td>Never use the user's file name as the storage key</td></tr>
+</tbody></table></div>
+<p>Details and code: <a href="28-file-storage-s3.html">lesson 28</a>.</p>
+
+<h2 id="config">5. Configuration, secrets and dependencies</h2>
+<h3>Misconfiguration</h3>
+<p>Many break-ins use no clever bug, only a setting left in "dev mode". Checks for Smart Campus:</p>
+<ul>
+  <li><strong>Keycloak</strong> runs <code>start-dev</code> in Compose. Production uses
+      <code>start</code> with HTTPS, a fixed hostname and a strong admin password, and the admin
+      console is not reachable from the internet.</li>
+  <li><strong>Actuator</strong>: today <code>core-app</code> exposes only <code>health</code> and
+      <code>info</code>, and <code>show-details: always</code> is set only in the <code>dev</code>
+      profile. Keep it that way: never expose <code>env</code> or <code>heapdump</code> publicly.</li>
+  <li><strong>Swagger UI</strong> and <code>/v3/api-docs</code>: useful in dev; in production, hide
+      them or put them behind login.</li>
+  <li><strong>Errors</strong>: rule E1 already makes every error problem JSON with no stack trace
+      (platform T8). That also covers A10: when something unexpected happens, the answer is a clean
+      500 and the request is refused ("fail closed"), never "let it through".</li>
+  <li><strong>CORS</strong>: never <code>*</code> together with credentials (lesson 17).</li>
+  <li><strong>Ports</strong>: Compose binds every port to <code>127.0.0.1</code>, so other machines
+      on your Wi-Fi cannot reach your dev database. Keep that.</li>
+</ul>
+
+<h3>Security headers</h3>
+<p>HTTP response headers can tell the browser to be stricter. Spring Security adds some by
+default on API responses (for example <code>X-Content-Type-Options: nosniff</code> and cache
+control). The SPA's HTML is served by Nginx in production (Arch §8), so these go in its config:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Header</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>Content-Security-Policy</code></td><td>Lists where scripts, styles and API calls may come from. Stops most XSS even if a bug slips in. Start with <code>default-src 'self'</code> and add Keycloak's origin for login.</td></tr>
+<tr><td><code>Strict-Transport-Security</code></td><td>"Always use HTTPS for this site." (HSTS)</td></tr>
+<tr><td><code>X-Content-Type-Options: nosniff</code></td><td>The browser must not guess file types (helps with uploads).</td></tr>
+<tr><td><code>frame-ancestors 'none'</code> (in CSP)</td><td>Our pages cannot be shown inside another site's frame (clickjacking).</td></tr>
+<tr><td><code>Referrer-Policy</code></td><td>Limits how much of our URL is sent to other sites.</td></tr>
+</tbody></table></div>
+
+<h3>Secrets</h3>
+<p>A <strong>secret</strong> is anything that gives access: DB passwords, the Keycloak admin
+password, the payment gateway key, the QR ticket signing key. The spec's "Never" list says: never
+commit secrets. Today:</p>
+<ul>
+  <li>Compose reads passwords from <code>infra/.env</code>, which is in <code>.gitignore</code>.
+      The template with fake values is <code>infra/.env.example</code>.</li>
+  <li><code>core-app</code>'s dev profile imports <code>../../infra/.env</code>, so no password is
+      written in <code>application.yml</code>.</li>
+  <li>In production: Kubernetes Secrets or Vault (Arch §8, <a href="31-kubernetes-shipping.html">lesson 31</a>).</li>
+</ul>
+<div class="callout bad">
+  <span class="title">If a secret is ever committed</span>
+  Deleting the line is not enough: it stays in git history and in every clone. <strong>Change the
+  secret</strong> (rotate it) first, then clean up.
+</div>
+
+<h3>Vulnerable dependencies (supply chain)</h3>
+<p>Most of our running code is not ours: Spring, Kafka clients, React, hundreds of npm packages.
+A known hole in any of them is our hole. Platform task T20 (spec criterion C1) adds two scanners to CI:</p>
+<ul>
+  <li><strong>OWASP Dependency-Check</strong>: compares our Maven and npm libraries with public
+      vulnerability databases (it needs an NVD API key, plan open question 3).</li>
+  <li><strong>Trivy</strong>: scans the file system <em>and</em> the 4 app images, including the
+      operating system packages in the base image.</li>
+</ul>
+<p>Any HIGH or CRITICAL finding fails the build unless it is in a <strong>reviewed</strong>
+suppression file. Adding a suppression is on the spec's "Ask first" list. Other supply chain
+habits already in the spec: pin every version (no <code>latest</code>, no ranges), commit lock
+files, use <code>npm ci</code>, and ask before adding a new dependency.</p>
+
+<h2 id="abuse">6. Logins, rate limits and webhooks</h2>
+<h3>Authentication failures</h3>
+<p>Our best defence here: <strong>we never handle passwords</strong>. Keycloak does (lesson 16).
+In Keycloak we should turn on its brute-force detection (lock or slow down after many wrong
+passwords), set a password policy, and require a second factor (OTP) for powerful roles like
+<code>SYSTEM_ADMIN</code> and <code>ACADEMIC_ADMIN</code>. Short access tokens (5 minutes) limit
+the damage of a stolen token.</p>
+
+<h3>Rate limiting</h3>
+<p>Rate limiting caps how many requests one caller can send in a time window. It protects against
+bots, scraping and simple denial of service (map C14):</p>
+<ul>
+  <li><strong>Per IP at the gateway</strong> for all <code>/api/v1/**</code> routes: default 20
+      requests/second with a burst of 40, state in Redis, answer 429 + <code>Retry-After</code>
+      (platform R1, task T14, <a href="11-gateway-rate-limit.html">lesson 11</a>).</li>
+  <li><strong>Per user for registration</strong>: keyed by the JWT <code>sub</code>, because
+      thousands of students may share one campus IP (registration module).</li>
+  <li>The <strong>waiting room</strong> during registration windows (REG-5) also stops bots that
+      try to grab seats.</li>
+</ul>
+
+<h3>Webhook signature checks</h3>
+<p>When a student pays for a club ticket, the payment gateway (VNPay or MoMo) calls <em>our</em>
+webhook to say "paid". Anyone on the internet can call that URL. If we believe any call, an
+attacker gets free tickets. The provider signs each call with a shared secret using an
+<strong>HMAC</strong> (a hash mixed with a secret key; the provider's docs say which algorithm and
+which fields). We recompute it and compare:</p>
+<pre data-file="edu.campus.payment.internal.WebhookSignature (planned sketch)"><code>boolean isValid(String signedData, String receivedHex, byte[] secret) throws GeneralSecurityException {
+    Mac mac = Mac.getInstance("HmacSHA512");                  <span class="c">// use the algorithm the provider documents</span>
+    mac.init(new SecretKeySpec(secret, "HmacSHA512"));
+    byte[] expected = mac.doFinal(signedData.getBytes(StandardCharsets.UTF_8));
+    byte[] received = HexFormat.of().parseHex(receivedHex);
+    return MessageDigest.isEqual(expected, received);         <span class="c">// constant-time compare</span>
+}</code></pre>
+<ul>
+  <li><strong>Constant-time compare</strong> (<code>MessageDigest.isEqual</code>): a normal
+      <code>equals</code> stops at the first wrong byte, and the time difference can leak the answer.</li>
+  <li>After the signature, also check the <strong>amount and order id</strong> against our own
+      database, and make the handler <strong>idempotent</strong> (the provider retries;
+      <a href="08-outbox-idempotency.html">lesson 08</a>).</li>
+  <li>Never trust the browser's return URL ("payment success" page) as proof of payment. Only the
+      signed server-to-server call counts. More in <a href="26-payments-webhooks.html">lesson 26</a>.</li>
+</ul>
+
+<h2 id="privacy">7. Logs and personal data</h2>
+<h3>Logging without personal data</h3>
+<p>Logs are copied to Loki (platform T17), kept for weeks, and read by many people. So they must
+help debugging without becoming a leak (A09 covers both sides: log enough to notice attacks, but
+log safely).</p>
+<div class="compare">
+  <div class="poor"><h4>Do not log</h4>
+    <p>Tokens or the <code>Authorization</code> header, passwords, full names, emails, phone
+    numbers, grades, payment card or wallet data, photos, whole request bodies.</p></div>
+  <div class="good"><h4>Do log</h4>
+    <p>The user id (the UUID <code>sub</code>), <code>traceId</code>, the module, the action, ids
+    of rows, the problem <code>code</code>, and security events: failed logins (Keycloak), 403s,
+    bad webhook signatures, rate-limit hits.</p></div>
+</div>
+<pre data-file="A safe log line (structured, one line of JSON in Loki)"><code>log.info("grade published sectionId={} count={}", sectionId, grades.size());   <span class="c">// ids and counts</span>
+<span class="c">// NOT: log.info("published {}", grades)  → would print every student's mark</span></code></pre>
+<p>The <strong>audit log</strong> (NFR-3: "an audit log of grade and enrollment changes") is a
+different thing: a table that records who changed what and when, kept on purpose, with access
+limited to admins. Do not use normal logs as the audit trail.</p>
+
+<h3>Personal-data protection</h3>
+<p>Smart Campus stores personal data of real people, many of them young adults. Vietnam has
+national rules on personal data protection, and newer, stricter rules have been introduced in
+recent years. This lesson does not give legal advice: the university's legal or data protection
+team must say which rules apply and what they require. The engineering habits that support almost
+any such rules are:</p>
+<ul>
+  <li><strong>Collect only what you need</strong> (data minimization). Does the marketplace really
+      need a phone number, or is in-app messaging enough?</li>
+  <li><strong>Use data only for the stated purpose.</strong> Grades are for the student and
+      their lecturers, not for the search index.</li>
+  <li><strong>Ask and record consent</strong> where needed, for example before showing a phone
+      number to buyers (AUTH-2).</li>
+  <li><strong>Let people see and correct</strong> their data, and delete what is no longer needed
+      (the lost &amp; found 60-day archive job, LF module, is an example of a retention rule).</li>
+  <li><strong>Protect it</strong>: access control, encryption in transit (HTTPS) and at rest, and
+      backups that are protected too.</li>
+  <li><strong>Be ready to react to a breach</strong>: know who to tell, and how fast. Logs and
+      traces must make it possible to find what was accessed.</li>
+  <li><strong>Know where data is stored</strong>: choosing a cloud region is a legal question as
+      well as a technical one (lesson 31).</li>
+</ul>
+
+<h2 id="stride">8. Light threat modeling with STRIDE</h2>
+<p><strong>Threat modeling</strong> means asking "what can go wrong?" <em>before</em> building.
+It finds design flaws (A06, Insecure Design) that no scanner can find. You do not need a big
+process. Draw the flow of one feature, then for each arrow ask the six <strong>STRIDE</strong>
+questions:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Letter</th><th>Threat</th><th>Question</th><th>Example: course registration</th><th>Defence</th></tr></thead>
+<tbody>
+<tr><td>S</td><td>Spoofing</td><td>Can someone pretend to be another user?</td><td>A bot registers for a friend</td><td>Keycloak login, JWT <code>sub</code> as the student id, never a body field</td></tr>
+<tr><td>T</td><td>Tampering</td><td>Can someone change data on the way or at rest?</td><td>Edit the request to skip prerequisites</td><td>All rules checked on the server; signed tokens</td></tr>
+<tr><td>R</td><td>Repudiation</td><td>Can someone deny they did it?</td><td>"I never dropped that course"</td><td>Audit log with user id, time, traceId (NFR-3)</td></tr>
+<tr><td>I</td><td>Information disclosure</td><td>Can someone see what they should not?</td><td>See other students' enrollments</td><td>Ownership checks; 404 for others' rows</td></tr>
+<tr><td>D</td><td>Denial of service</td><td>Can someone make it unavailable?</td><td>Scripts flood the registration API at 08:00</td><td>Waiting room, per-user limit, Redis seat gate, Kafka queue</td></tr>
+<tr><td>E</td><td>Elevation of privilege</td><td>Can someone get more rights?</td><td>A student calls the admin override endpoint</td><td><code>@PreAuthorize("hasRole('ACADEMIC_ADMIN')")</code> + a test for 403</td></tr>
+</tbody></table></div>
+<p><strong>Habit for Smart Campus:</strong> every <code>SPEC-&lt;module&gt;.md</code> gets a short
+"Threats" table like this one for its riskiest flow (payment webhook, grade entry, QR scan,
+uploads). Ten minutes in the spec saves a week of fixes later.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Defence</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Problem JSON, no stack traces (E1)</td><td><code>platform-starter/.../starter/problem/CampusProblemHandler.java</code></td><td>Done (T8)</td></tr>
+<tr><td>Secrets out of git</td><td><code>.gitignore</code> (<code>infra/.env</code>), <code>infra/.env.example</code></td><td>Done (T3)</td></tr>
+<tr><td>Ports bound to 127.0.0.1</td><td><code>infra/docker-compose.yml</code></td><td>Done (T3)</td></tr>
+<tr><td>Actuator exposure limited</td><td><code>core-app/src/main/resources/application.yml</code></td><td>Done (T6)</td></tr>
+<tr><td>Per-IP rate limit (R1)</td><td><code>backend/gateway</code></td><td>Planned (T14)</td></tr>
+<tr><td>Non-root app images (K1)</td><td><code>infra/docker/spring-app.Dockerfile</code></td><td>Planned (T15)</td></tr>
+<tr><td>Trivy + Dependency-Check in CI (C1)</td><td><code>.github/workflows/ci.yml</code></td><td>Planned (T20)</td></tr>
+<tr><td>JWT, roles, ownership checks</td><td>gateway + every service (lesson 17)</td><td>Planned (identity, then all)</td></tr>
+<tr><td>Uploads via pre-signed URLs</td><td>marketplace, lostfound</td><td>Planned</td></tr>
+<tr><td>Webhook signature + idempotency</td><td>payment</td><td>Planned</td></tr>
+<tr><td>Audit log (NFR-3)</td><td>grade, registration</td><td>Planned</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Checking the role but not the owner</strong> (IDOR).</li>
+  <li><strong>Building SQL with <code>+</code></strong>, or pasting a sort field into <code>ORDER BY</code>.</li>
+  <li><strong>Using <code>dangerouslySetInnerHTML</code></strong> on user text.</li>
+  <li><strong>Trusting the file name or <code>Content-Type</code></strong> of an upload.</li>
+  <li><strong>Committing <code>.env</code></strong>, or "fixing" a leaked secret without rotating it.</li>
+  <li><strong>Suppressing a scanner finding</strong> to make CI green without a review.</li>
+  <li><strong>Comparing signatures with <code>equals</code></strong> instead of a constant-time compare.</li>
+  <li><strong>Logging whole objects</strong> (they may hold grades, phones or tokens).</li>
+  <li><strong>Leaving dev settings in production</strong>: <code>start-dev</code>, open Swagger, detailed health.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Read <code>backend/core-app/src/main/resources/application.yml</code>. Which actuator
+      endpoints are exposed? In which profile is <code>show-details: always</code>? Explain why that
+      is safe for dev and not for production.</p></li>
+  <li><p>Check that your secrets file is ignored by git:</p>
+<pre><code>git check-ignore -v infra/.env
+git log --all --oneline -- infra/.env      # should print nothing</code></pre></li>
+  <li><p>Run Trivy on the repo with Docker (no install needed), and read one finding if there is any:</p>
+<pre><code>docker run --rm -v "${PWD}:/src" aquasec/trivy:&lt;pinned-version&gt; fs --severity HIGH,CRITICAL /src</code></pre>
+      <p>(Replace <code>&lt;pinned-version&gt;</code> with a real version tag; the spec forbids
+      <code>latest</code>.)</p></li>
+  <li><p>Write a STRIDE table (six rows) for the club ticket QR scan at the door (CLUB-5). What
+      stops a screenshot of a ticket from being used twice?</p></li>
+  <li><p>Pick three endpoints you expect in the marketplace module. For each, write the IDOR
+      test you would add ("user B tries user A's id → 404").</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>OWASP Top 10</td><td>A public list of the ten biggest web app risk categories.</td></tr>
+<tr><td>IDOR</td><td>Getting someone else's data by changing an id, because the owner is not checked.</td></tr>
+<tr><td>SSRF</td><td>Tricking our server into fetching an internal URL for an attacker.</td></tr>
+<tr><td>Injection</td><td>User text being run as code (SQL, HTML, commands).</td></tr>
+<tr><td>Bind parameter</td><td>A <code>?</code> in SQL whose value is sent separately and never read as SQL.</td></tr>
+<tr><td>XSS</td><td>An attacker's script running in another user's browser.</td></tr>
+<tr><td>CSP</td><td>Content Security Policy: a header listing where scripts may come from.</td></tr>
+<tr><td>Secret rotation</td><td>Replacing a secret with a new one, so the old one stops working.</td></tr>
+<tr><td>Supply chain</td><td>All the libraries and images our app is built from.</td></tr>
+<tr><td>HMAC</td><td>A signature made by hashing a message together with a shared secret.</td></tr>
+<tr><td>Constant-time compare</td><td>A comparison that takes the same time whether it fails early or late.</td></tr>
+<tr><td>Data minimization</td><td>Collecting and keeping only the personal data you really need.</td></tr>
+<tr><td>Threat modeling</td><td>Asking "what can go wrong?" while designing.</td></tr>
+<tr><td>STRIDE</td><td>Six threat types: Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Our ids are random UUIDs. Why do we still need ownership checks?</summary>
+    <p>Hard to guess is not the same as forbidden. Ids appear in links, logs, screenshots and
+    shared URLs. Only a server-side check that the row belongs to the caller is access control.</p></details>
+  <details><summary>2. Why does binding parameters stop SQL injection, and why does it not help with <code>ORDER BY</code>?</summary>
+    <p>Bound values are sent apart from the SQL text, so they can never change the query's
+    structure. But placeholders can only stand for values, not for column names, so sort fields
+    must be mapped through an allowlist.</p></details>
+  <details><summary>3. Why do uploads go straight to storage with a pre-signed URL, and why re-encode images?</summary>
+    <p>Our services never carry large untrusted bytes, and the URL only allows one object, one size
+    and a short time. Re-encoding throws away anything that is not a real image, including hidden
+    scripts and location metadata.</p></details>
+  <details><summary>4. Why must the payment webhook check a signature, and why compare in constant time?</summary>
+    <p>Anyone can call the webhook URL; the signature proves it came from the provider and was not
+    changed. A normal compare stops early on the first difference, and that timing can help an
+    attacker guess a valid signature.</p></details>
+  <details><summary>5. Why log the user's UUID but not their name or email?</summary>
+    <p>The UUID is enough to investigate (it links to the profile for people allowed to see it),
+    while names, emails and grades in logs would spread personal data to every log reader and
+    backup.</p></details>
+  <details><summary>6. Scanners and tests exist. Why also do threat modeling?</summary>
+    <p>Scanners find known bugs in code and libraries. They cannot find a design that is wrong,
+    like a refund flow with no limit or a registration API with no plan against bots. Only
+    thinking about the design finds those.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://owasp.org/Top10/">OWASP Top 10</a>: the current list with examples and defences.</li>
+  <li><a href="https://cheatsheetseries.owasp.org/">OWASP Cheat Sheet Series</a>: short guides, for example <a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html">File Upload</a> and <a href="https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html">SSRF Prevention</a>.</li>
+  <li><a href="https://owasp.org/www-project-application-security-verification-standard/">OWASP ASVS</a>: a detailed checklist of security requirements.</li>
+  <li><a href="https://owasp.org/www-project-dependency-check/">OWASP Dependency-Check</a> and <a href="https://trivy.dev/">Trivy documentation</a>.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/features/exploits/headers.html">Spring Security: Security HTTP response headers</a>.</li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP">MDN: Content Security Policy</a>.</li>
+  <li><a href="https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats">Microsoft: STRIDE threat categories</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

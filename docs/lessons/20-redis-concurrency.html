@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Registration Rush Lesson</title>
+<meta name="description" content="Smart Campus lesson 20: race conditions, Redis data types, Lua seat-gate scripts, the Kafka request queue, waitlists and keeping Redis and PostgreSQL in sync.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="20">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 20 · Part 2: Feature modules</div>
+<h1>Redis, Lua and the registration rush</h1>
+<p class="lede">At 08:00 the registration window opens and 5,000 students click "Register" in
+the same minute. How do we answer each of them in under half a second, and still never give
+away a seat twice? This is the hardest part of Smart Campus, and the reason
+<code>registration-service</code> is a separate app.</p>
+
+<div class="meta">
+  <span class="badge module">registration</span>
+  <span class="badge task">REG-1..6</span>
+  <span class="badge task">REG-8</span>
+  <span class="badge task">REG-10..12</span>
+  <span class="badge task">NFR-1</span>
+  <span class="badge task">NFR-2</span>
+  <span class="badge task">NFR-5</span>
+  <span class="badge time">~90 min</span>
+  <span class="badge level">Hard</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="07-kafka.html">07 (Kafka keys and partitions)</a>,
+  <a href="08-outbox-idempotency.html">08 (outbox and idempotent consumers)</a>,
+  <a href="11-gateway-rate-limit.html">11 (rate limiting)</a> and
+  <a href="19-domain-modeling.html">19 (optimistic locking)</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  <code>SPEC-registration.md</code> does not exist yet, and <code>backend/registration-service</code>
+  is created by platform task T10. This lesson follows the Plan (§5 "Surviving the Registration
+  Rush"), the Arch (§5, §6, §8, ADR-3, ADR-7) and the capability map decisions C5, C8, C14 and
+  C17. Key names, scripts and endpoint paths are <strong>proposals</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">The rush problem</a></li>
+    <li><a href="#races">Race conditions</a></li>
+    <li><a href="#db-vs-redis">Database locks vs Redis</a></li>
+    <li><a href="#redis">Redis in 10 minutes</a></li>
+    <li><a href="#lua">Lua scripts: the seat gate</a></li>
+    <li><a href="#front-door">Waiting room and per-user limit</a></li>
+    <li><a href="#queue">Queue, worker, 202 and polling</a></li>
+    <li><a href="#after">Drops, waitlist, sync, restarts</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. The rush problem</h2>
+<p>The Plan says course registration "crashes every semester" today. Our targets are written as
+non-functional requirements (NFRs):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Id</th><th>Requirement (from the Plan)</th><th>What it means for the design</th></tr></thead>
+<tbody>
+<tr><td><strong>NFR-1</strong></td><td>Registration stays up with <strong>5,000 students at once</strong>, <strong>p95 under 500 ms</strong></td>
+    <td>95 of every 100 answers must arrive in under 0.5 s, even at the peak. The Arch says "5,000 students registering at the same minute" and 99.9% availability during windows.</td></tr>
+<tr><td><strong>NFR-2</strong></td><td>Never overbook a section or double-enroll a student</td>
+    <td>Correctness beats speed. A fast wrong answer is a bug.</td></tr>
+<tr><td><strong>NFR-5</strong></td><td>Run a load test before every registration window</td>
+    <td>We must be able to <em>prove</em> NFR-1 and NFR-2 (<a href="21-load-testing-k6.html">lesson 21</a>).</td></tr>
+</tbody></table></div>
+<p>Why is this hard? Popular sections are a <strong>hot spot</strong>: hundreds of students want
+the same 60 seats in the same second. Everyone reads and changes <em>one</em> number. That is
+exactly where race conditions and slow locks appear.</p>
+<p>The Plan's answer has five steps. Keep this picture in mind for the whole lesson:</p>
+<div class="flow">
+  <div class="box accent"><b>1. Waiting room</b>Per-user rate limit. At peak, a queue ticket and a position.</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>2. Redis seat gate</b>Lua script: duplicate? seat left? decrement. Answer in ms.</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>3. Kafka queue</b><code>registration.requests</code>, key = sectionId.</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>4. Worker + PostgreSQL</b>Final guard: unique keys, version. On failure, release the Redis seat.</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>5. Result</b>202 now, then polling (C8). WebSocket later.</div>
+</div>
+
+<h2 id="races">2. Race conditions</h2>
+<p>A <strong>race condition</strong> is a bug that appears only when two things happen at nearly
+the same time, and the result depends on who is faster. Two classic forms:</p>
+<h3>Check-then-act</h3>
+<pre class="diagram">Section CS101-01: 1 seat left
+
+  Request A (Lan)                     Request B (Minh)
+  ─────────────────                   ─────────────────
+  SELECT seats_left → 1
+                                      SELECT seats_left → 1
+  1 &gt; 0, so INSERT enrollment
+                                      1 &gt; 0, so INSERT enrollment
+  UPDATE seats_left = 0
+                                      UPDATE seats_left = 0
+
+  Result: 2 students in 1 seat.  Overbooked (breaks NFR-2).</pre>
+<p>Each request was correct alone. The bug is the <strong>gap between the check and the
+action</strong>. Another request slipped into the gap.</p>
+<h3>Lost update</h3>
+<pre class="diagram">  A reads enrolled = 29          B reads enrolled = 29
+  A writes enrolled = 30         B writes enrolled = 30     ← A's +1 is lost
+
+  Two students enrolled, counter says one.</pre>
+<p>The fix for both is the same idea: the read and the write must be <strong>one indivisible
+(atomic) step</strong>, or the write must fail when the data changed since the read (a version
+check, <a href="19-domain-modeling.html#locking">lesson 19</a>).</p>
+
+<h2 id="db-vs-redis">3. Database locks vs atomic Redis operations</h2>
+<p>PostgreSQL can make the steps safe, for example with
+<code>SELECT … FOR UPDATE</code> (lock the row until commit) or a conditional update
+<code>UPDATE … SET enrolled = enrolled + 1 WHERE enrolled &lt; capacity</code>. These are
+correct. The problem is <strong>speed under a hot spot</strong>:</p>
+<div class="compare">
+  <div class="poor"><h4>Only PostgreSQL on the hot path</h4>
+    <p>Every request for CS101-01 waits for the same row lock, one after another. Each
+    transaction holds a connection from a small pool (often 10–20 per app). With hundreds of
+    requests per second on one row, the queue grows, the pool runs out, and <em>all</em>
+    endpoints slow down, not only the popular section.</p></div>
+  <div class="good"><h4>Redis first, PostgreSQL last</h4>
+    <p>Redis keeps data in memory and runs commands one at a time on a single main thread, so
+    each command (and each Lua script) is atomic. A seat check takes well under a millisecond.
+    PostgreSQL is still the final truth, but it is written later, at a steady pace, by a
+    worker.</p></div>
+</div>
+<p>This is Arch decision <strong>ADR-3</strong>: "Redis as the first seat gate, PostgreSQL as
+the final truth". The trade-off the Arch accepts: "two copies of seat counts need reconciling".
+We handle that in section 8.</p>
+
+<h2 id="redis">4. Redis in 10 minutes</h2>
+<p><strong>Redis</strong> is an in-memory key–value store. Our Compose stack runs
+<code>redis:8.8.4-alpine3.23</code> on port 6379 (<code>infra/docker-compose.yml</code>). The
+platform already uses it for the gateway's per-IP rate limit
+(<a href="11-gateway-rate-limit.html">lesson 11</a>). The types we need:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>Like…</th><th>Commands</th><th>Our use (planned)</th></tr></thead>
+<tbody>
+<tr><td>String / integer</td><td>One labelled box with a number</td><td><code>GET</code>, <code>SET</code>, <code>INCR</code>, <code>DECR</code>, <code>INCRBY</code></td><td><code>seats:{sectionId}</code> = seats left</td></tr>
+<tr><td>Set</td><td>A bag of unique names</td><td><code>SADD</code>, <code>SREM</code>, <code>SISMEMBER</code></td><td><code>holders:{sectionId}</code> = students holding a seat (dedupe)</td></tr>
+<tr><td>Hash</td><td>A small form with fields</td><td><code>HSET</code>, <code>HGET</code>, <code>HGETALL</code></td><td><code>req:{requestId}</code> = status of one request</td></tr>
+<tr><td>Sorted set</td><td>A ranked list</td><td><code>ZADD</code>, <code>ZRANK</code></td><td>an option for waiting-room order</td></tr>
+</tbody></table></div>
+<p><strong>TTL</strong> ("time to live") makes a key delete itself later:
+<code>EXPIRE key 3600</code>, or <code>SET key value EX 3600 NX</code> (set only if it does not
+exist, expire in 1 hour). We use TTLs for request status, waiting-room tickets and rate-limit
+counters, so old keys never pile up.</p>
+<pre data-file="Try it (redis-cli inside the Compose container)"><code>docker compose -f infra/docker-compose.yml exec redis redis-cli
+127.0.0.1:6379&gt; SET seats:{sec-1} 2
+127.0.0.1:6379&gt; DECR seats:{sec-1}        <span class="c"># (integer) 1</span>
+127.0.0.1:6379&gt; SADD holders:{sec-1} lan  <span class="c"># (integer) 1 = added</span>
+127.0.0.1:6379&gt; SADD holders:{sec-1} lan  <span class="c"># (integer) 0 = already there</span>
+127.0.0.1:6379&gt; SET req:abc PENDING EX 60
+127.0.0.1:6379&gt; TTL req:abc               <span class="c"># seconds left</span></code></pre>
+<div class="callout tip">
+  <span class="title">Why the curly braces in key names?</span>
+  In a Redis <em>cluster</em>, keys are spread over many nodes, and one script may only touch
+  keys on one node. Redis hashes only the part inside <code>{…}</code> (a "hash tag"). So
+  <code>seats:{sec-1}</code> and <code>holders:{sec-1}</code> always live together. We run a
+  single Redis today (Sentinel in production, per Arch §8), but using hash tags from day one
+  costs nothing.
+</div>
+
+<h2 id="lua">5. Lua scripts: the seat gate</h2>
+<p>Each Redis command is atomic, but "check the set, then check the counter, then decrement,
+then add to the set" is four commands. Another client could run between them: check-then-act
+again. A <strong>Lua script</strong> fixes this. Redis runs the whole script as one step;
+nothing else runs until it ends. It is like a bank clerk who closes the door while serving one
+customer, so be quick: a script must be short and must never loop over big data.</p>
+<pre data-file="Planned: backend/registration-service/src/main/resources/redis/reserve-seat.lua"><code><span class="c">-- KEYS[1] = seats:{sectionId}     seats left (integer)</span>
+<span class="c">-- KEYS[2] = holders:{sectionId}   students who hold a seat (set)</span>
+<span class="c">-- ARGV[1] = studentId</span>
+<span class="c">-- Returns: 1 reserved, 0 full, -1 already holds a seat, -2 section not loaded</span>
+
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
+  return -1                                   <span class="c">-- duplicate click or retry</span>
+end
+
+local left = redis.call('GET', KEYS[1])
+if not left then
+  return -2                                   <span class="c">-- not open, or Redis lost its data</span>
+end
+
+if tonumber(left) &lt;= 0 then
+  return 0                                    <span class="c">-- full: answer SECTION_FULL at once</span>
+end
+
+redis.call('DECR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+return 1</code></pre>
+<p>This is the Plan's step 2: "a Lua script atomically checks for a duplicate and decrements
+<code>seats:{sectionId}</code>. If no seat is left, the request is rejected immediately without
+touching the database." Because the whole script is one step, the race from section 2 cannot
+happen: the second request sees the first one's decrement.</p>
+
+<h3>EVAL, EVALSHA and Spring's <code>RedisScript</code></h3>
+<p><code>EVAL "script" numkeys key… arg…</code> sends the full script text every time.
+<code>EVALSHA sha1 …</code> sends only its SHA-1 fingerprint; Redis keeps a cache of scripts it
+has seen. If the cache is empty (for example after a restart), Redis answers
+<code>NOSCRIPT</code>. Spring Data Redis handles this for you: it tries <code>EVALSHA</code>
+first and falls back to <code>EVAL</code>.</p>
+<pre data-file="Planned: backend/registration-service/.../registration/internal/SeatGate.java"><code>package edu.campus.registration.internal;
+
+<span class="k">@Component</span>
+class SeatGate {
+    private static final RedisScript&lt;Long&gt; RESERVE =
+            RedisScript.of(new ClassPathResource("redis/reserve-seat.lua"), Long.class);
+
+    private final StringRedisTemplate redis;
+
+    SeatGate(StringRedisTemplate redis) {          <span class="c">// constructor injection, no Lombok</span>
+        this.redis = redis;
+    }
+
+    SeatResult reserve(SectionId section, StudentId student) {
+        String tag = "{" + section.value() + "}";
+        Long code = redis.execute(RESERVE,
+                List.of("seats:" + tag, "holders:" + tag),  <span class="c">// KEYS: always pass keys here,</span>
+                student.value().toString());                  <span class="c">// never build them inside Lua</span>
+        return SeatResult.fromCode(code);              <span class="c">// RESERVED, FULL, DUPLICATE, NOT_LOADED</span>
+    }
+}</code></pre>
+<p>A matching <code>release-seat.lua</code> does the opposite (<code>SREM</code> the student,
+then <code>INCR</code> the seats, only if the student was in the set). We call it when the worker
+rejects a request or a student drops.</p>
+
+<h2 id="front-door">6. The front door: waiting room and per-user limit</h2>
+<h3>Per-user rate limit (C14)</h3>
+<p>The gateway limits <em>per IP</em> (platform R1: 20 requests/s, burst 40). But many students
+share one campus Wi-Fi IP, and one bot can use many IPs. So C14 says: <strong>registration
+endpoints are limited per user</strong>, inside <code>registration</code>. The simplest version
+is a fixed-window counter in Redis, again as one Lua script:</p>
+<pre data-file="Planned: redis/rate-limit.lua   KEYS[1] = rl:reg:{studentId}:{epochSecond}   ARGV[1] = window seconds"><code>local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])   <span class="c">-- the counter deletes itself after the window</span>
+end
+return n                                   <span class="c">-- Java: if n &gt; limit → 429</span></code></pre>
+<p>Over the limit, the service answers <code>429</code> with a <code>Retry-After</code> header
+and problem JSON with <code>code: RATE_LIMITED</code> (that code already exists in
+<code>ProblemCode</code>). The actual limit (for example 5 requests per second per student) is a
+number for the registration spec.</p>
+
+<h3>Waiting room tokens (REG-5)</h3>
+<p>Even with limits, 5,000 people at 08:00:00 is more than the backend may want to take in one
+second. A <strong>waiting room</strong> works like the ticket machine at a bank: take a number,
+sit down, and watch the screen. The Plan: "At peak, students receive a queue token and the page
+polls their position." A simple design with two counters:</p>
+<pre class="diagram">wr:{windowId}:next      INCR  → each arriving student gets the next number (ticket)
+wr:{windowId}:admitted  INCRBY N every second, by a scheduled job ("now serving up to …")
+
+position = ticket − admitted        (≤ 0 means: you may register now)
+
+Lan arrives → ticket 1204          admitted = 1000  → position 204
+… 1 second later …                 admitted = 1200  → position 4
+… 1 second later …                 admitted = 1400  → admitted ✓</pre>
+<ul>
+  <li><code>POST /api/v1/registration/waiting-room</code> → a random token, stored in Redis as
+      <code>wr:token:{token}</code> → (studentId, ticket), with a TTL. The token is bound to the
+      student, so it cannot be passed to a friend.</li>
+  <li><code>GET …/waiting-room/{token}</code> → <code>{ "position": 204 }</code>. The page polls
+      this every few seconds (REG-5: "I know the system is working and don't refresh").</li>
+  <li>The register endpoint refuses a request whose ticket is not admitted yet.</li>
+  <li>N (students admitted per second) comes from load tests: it is the rate we
+      <em>proved</em> the system can handle (<a href="21-load-testing-k6.html">lesson 21</a>).</li>
+</ul>
+<p>Both counters are single <code>INCR</code>/<code>GET</code> commands, so they are atomic and
+cost the same for 50 or 50,000 students.</p>
+
+<h2 id="queue">7. The queue, the worker, 202 and polling</h2>
+<h3>The API side</h3>
+<p>After the seat gate says <code>RESERVED</code>, the API puts a <strong>request</strong> (a
+command: "give Lan a seat in CS101-01") on the Kafka topic <code>registration.requests</code>.
+The key is the <strong>sectionId</strong> (<code>Topics.REGISTRATION_REQUESTS</code>, 12
+partitions). Kafka keeps order per key, so all requests for one section are processed by one
+worker thread, in arrival order. Waitlists stay fair, and two requests for the same section
+never race inside the worker.</p>
+<p>Then the API answers at once with <strong>202 Accepted</strong>, not 201 Created: "I took your
+request; the result comes later" (ADR-7). This is decision <strong>C8</strong>: the result is read
+by polling, because the WebSocket host (<code>notification</code>) arrives later.</p>
+<pre data-file="Planned HTTP exchange (paths decided in SPEC-registration)"><code>POST /api/v1/registration/requests
+Authorization: Bearer eyJ…
+Idempotency-Key: 7f9c2b6e-…                <span class="c">// required on POSTs that create enrollments (Arch §7)</span>
+{ "sectionId": "3f1c…" }
+
+HTTP/1.1 202 Accepted
+Location: /api/v1/registration/requests/a1b2…
+{ "requestId": "a1b2…", "status": "PENDING" }
+
+GET /api/v1/registration/requests/a1b2…     <span class="c">// the page asks every second</span>
+{ "requestId": "a1b2…", "status": "CONFIRMED" }          <span class="c">// or REJECTED + a reason code</span></code></pre>
+<p>If the seat gate says <code>FULL</code>, the API answers <code>409</code> with
+<code>code: SECTION_FULL</code> right away (a code the Arch names; the registration spec adds
+it to <code>ProblemCode</code>). Nothing reaches Kafka or PostgreSQL. This fast "no" is most of
+the traffic in a rush, so it must be cheap.</p>
+<div class="callout warn">
+  <span class="title">This is not the outbox, and that is on purpose</span>
+  <p>Lesson 08 says "never call <code>kafkaTemplate.send</code> in business code". Here the API
+  has no database write at all, so there is nothing for an outbox to be atomic with. The two
+  systems are Redis and Kafka. The API therefore waits for Kafka's acknowledgement before it
+  answers 202, and if the send fails, it runs <code>release-seat.lua</code> and answers with an
+  error. If the API crashes between the Redis decrement and the send, one seat is "stuck" in
+  Redis: the sync check in section 8 finds it. The registration spec must confirm this design.</p>
+</div>
+<p>The request status lives in a Redis hash <code>req:{requestId}</code> with a TTL (for example
+one hour), written by the API (<code>PENDING</code>) and by the worker (<code>CONFIRMED</code> /
+<code>REJECTED</code>). Only the student who made the request may read it.</p>
+<pre data-file="Planned: frontend polling with TanStack Query (lesson 14)"><code>const result = useQuery({
+  queryKey: ['registration-request', requestId],
+  queryFn: () =&gt; api.getRequest(requestId),
+  refetchInterval: (query) =&gt; (query.state.data?.status === 'PENDING' ? 1000 : false),
+});</code></pre>
+
+<h3>The worker side (C5)</h3>
+<p>The worker runs in <code>registration-service</code> (Arch §9: "api + worker profiles") and
+reads <code>registration.requests</code>. It writes to the database with the final guards from
+Plan step 4. Because <code>registration-service</code> cannot write the <code>course</code>
+schema, decision <strong>C5</strong> gives it its own seat table, fed by
+<code>SectionChanged</code> events:</p>
+<pre data-file="Planned migration: registration schema"><code>CREATE TABLE registration.section_seats (
+    section_id  UUID PRIMARY KEY,              <span class="c">-- from course.events; no FK to course (C4)</span>
+    capacity    INT  NOT NULL CHECK (capacity &gt;= 0),
+    enrolled    INT  NOT NULL DEFAULT 0,
+    version     BIGINT NOT NULL DEFAULT 0,     <span class="c">-- optimistic lock</span>
+    updated_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE registration.enrollments (
+    id               UUID PRIMARY KEY,
+    student_id       UUID NOT NULL,
+    section_id       UUID NOT NULL,
+    status           TEXT NOT NULL,            <span class="c">-- ENROLLED / DROPPED</span>
+    idempotency_key  TEXT NOT NULL UNIQUE,     <span class="c">-- a retried request cannot enroll twice</span>
+    created_at       TIMESTAMPTZ NOT NULL
+);
+<span class="c">-- The Plan has UNIQUE(student_id, section_id). A partial index keeps that rule for active</span>
+<span class="c">-- enrollments but still lets a student register again after a drop.</span>
+CREATE UNIQUE INDEX enrollments_one_active
+    ON registration.enrollments (student_id, section_id) WHERE status = 'ENROLLED';</code></pre>
+<pre data-file="Planned: the worker (shortened)"><code><span class="k">@KafkaListener</span>(topics = "registration.requests", groupId = "registration-worker")
+<span class="k">@Transactional</span>
+void on(SeatRequest req) {
+    if (enrollments.existsByIdempotencyKey(req.idempotencyKey())) {
+        return;                                          <span class="c">// a repeat (at-least-once, lesson 08)</span>
+    }
+    RuleCheck check = rules.check(req.studentId(), req.sectionId());   <span class="c">// REG-3: clash, prerequisite, credit limit</span>
+    if (!check.ok()) {
+        afterCommit.releaseSeatAndReject(req, check.reason());         <span class="c">// Plan step 4: give the Redis seat back</span>
+        return;
+    }
+    SeatRow seats = sectionSeats.get(req.sectionId());
+    int changed = jdbc.update("""
+            UPDATE registration.section_seats
+               SET enrolled = enrolled + 1, version = version + 1, updated_at = ?
+             WHERE section_id = ? AND version = ? AND enrolled &lt; capacity""",
+            Timestamp.from(clock.instant()), req.sectionId().value(), seats.version());
+    if (changed == 0) {
+        throw new SeatConflict(req);                     <span class="c">// version moved or full: retry or reject</span>
+    }
+    enrollments.insert(req);                             <span class="c">// unique indexes = last guard</span>
+    events.publishEvent(enrollmentConfirmed(req));       <span class="c">// outbox → registration.events (key studentId)</span>
+    afterCommit.markConfirmed(req);                      <span class="c">// Redis req:{id} = CONFIRMED</span>
+}</code></pre>
+<p>Notice the layers. Redis already blocked most bad requests. The version check, the
+<code>enrolled &lt; capacity</code> condition and the unique indexes catch anything Redis
+missed. Redis updates happen <strong>after commit</strong> (for example with a
+<code>TransactionSynchronization</code>), so Redis never shows a result that was rolled back.
+<code>registration.requests</code> is <strong>not replayable</strong>
+(<code>Topics</code> says so): it holds commands, and running them again would act again.</p>
+
+<h2 id="after">8. Drops, waitlist, overrides, sync, and restarts</h2>
+<h3>Drop and waitlist promotion (REG-4, REG-6)</h3>
+<p>A drop is also sent through <code>registration.requests</code> with the same key
+(sectionId). So drops and new requests for one section are handled one at a time, in order.
+When a seat frees up:</p>
+<ol>
+  <li>The worker marks the enrollment <code>DROPPED</code>, lowers <code>enrolled</code> and
+      publishes <code>EnrollmentDropped</code>.</li>
+  <li>If the section's waitlist is not empty, the seat goes <strong>straight to the first
+      student on the waitlist</strong> (after the REG-3 checks again; if that student now has a
+      clash, try the next one). Redis <code>seats</code> stays at 0, so a newcomer cannot jump
+      the queue.</li>
+  <li>If the waitlist is empty, after commit the worker runs <code>release-seat.lua</code>:
+      Redis gets the seat back and the next click can take it.</li>
+</ol>
+<h3>Capacity changes and admin overrides (REG-9, REG-11)</h3>
+<ul>
+  <li><strong>REG-9 (raise capacity):</strong> <code>course</code> publishes
+      <code>SectionChanged</code> with the new capacity. The registration consumer updates
+      <code>section_seats.capacity</code> (version check) and then
+      <code>INCRBY seats:{id} delta</code> in Redis (or gives the new seats to the waitlist first).</li>
+  <li><strong>REG-11 (enroll manually with a reason):</strong> an academic admin's override goes
+      through the same queue with an <code>override</code> flag and a required reason. The worker
+      skips the capacity check, adds the student to <code>holders</code>, never lets Redis go
+      below 0, and writes an audit row (NFR-3). Counting overrides separately keeps NFR-2
+      checkable: normal enrollments never exceed capacity.</li>
+</ul>
+<h3>Keeping Redis and PostgreSQL in sync</h3>
+<p>Two copies of a number will drift sometimes: a crash between a Redis change and a Kafka send,
+or between a DB commit and the Redis update. Most of our crashes leave Redis with <em>fewer</em>
+seats than reality (we under-sell, never over-sell), which is the safe direction. Still, we must
+see it. For each open section, a scheduled job compares:</p>
+<pre class="diagram">expected Redis seats = section_seats.capacity − section_seats.enrolled − pending requests
+drift                = Redis seats:{sectionId} − expected</pre>
+<p>It exports <code>drift</code> as a metric, and an alert fires when it is not 0 for a while.
+Arch §8 lists this alert ("Redis seat count and DB enrolled_count out of sync"), and platform
+criterion B3 says the seat-sync alert "is added by <code>registration</code>":</p>
+<pre data-file="Planned: a rule in infra/prometheus/alerts.yml"><code>- alert: SeatCountOutOfSync
+  expr: abs(registration_seat_drift) &gt; 0
+  for: 2m                       <span class="c"># short drift is normal while requests are in flight</span>
+  labels: { severity: page }
+  annotations:
+    summary: "Redis and DB seat counts differ for section {{ $labels.section }}"</code></pre>
+<p>Should the job fix the drift by itself? Fixing a number while requests are in flight can make
+it worse, so a safe first version alerts and gives admins a "resync this section" action. The
+spec decides.</p>
+
+<h3>What if Redis restarts?</h3>
+<p>Redis keeps data in memory. After a restart it may have lost recent writes, or everything if
+there is no persistence. (Redis can save to disk with snapshots (RDB) or an append-only file
+(AOF); with <code>appendfsync everysec</code> you lose at most about a second. Our dev
+container has no volume for Redis, so treat its data as lost on restart.) The rules:</p>
+<ul>
+  <li><strong>Never guess.</strong> A missing <code>seats:</code> key returns <code>-2</code>,
+      and the API answers <code>503</code> "registration paused, try again" instead of assuming
+      the section is empty or full.</li>
+  <li><strong>Rebuild from the truth.</strong> A loader reads <code>section_seats</code>,
+      active enrollments and pending requests from PostgreSQL and writes <code>seats:</code> and
+      <code>holders:</code> back. Then the gate opens again.</li>
+  <li><strong>Correctness never depended on Redis.</strong> Even with wrong Redis data, the
+      worker's version check and unique indexes stop overbooking. Redis only makes the answer
+      fast.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Redis container</td><td><code>infra/docker-compose.yml</code> service <code>redis</code>, port 6379</td><td>exists (T3)</td></tr>
+<tr><td>Topic + key for requests</td><td><code>Topics.REGISTRATION_REQUESTS</code> (12 partitions, key sectionId, not replayable)</td><td>exists (T5)</td></tr>
+<tr><td><code>RATE_LIMITED</code> problem code</td><td><code>backend/shared-kernel/.../kernel/error/ProblemCode.java</code></td><td>exists</td></tr>
+<tr><td>registration schema + <code>registration_svc</code> user</td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>exists</td></tr>
+<tr><td>Service skeleton (port 8082)</td><td><code>backend/registration-service/</code></td><td>planned (T10)</td></tr>
+<tr><td>Lua scripts, <code>SeatGate</code>, worker, waiting room</td><td><code>backend/registration-service/src/main/…</code></td><td>planned (module 5)</td></tr>
+<tr><td><code>section_seats</code>, <code>enrollments</code>, <code>waitlist_entries</code></td><td><code>…/db/migration/registration/</code></td><td>planned (C5)</td></tr>
+<tr><td>Seat-sync alert, registration dashboard</td><td><code>infra/prometheus/alerts.yml</code>, <code>infra/grafana/dashboards/</code></td><td>planned (B3 says registration adds it)</td></tr>
+<tr><td>Rush test</td><td><code>load-tests/k6/registration-rush.js</code> (Arch §9)</td><td>planned (<a href="21-load-testing-k6.html">lesson 21</a>)</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Doing <code>GET</code> then <code>DECR</code> from Java.</strong> Two commands = a
+      gap = a race. Put check and change in one Lua script.</li>
+  <li><strong>Building key names inside Lua.</strong> Pass every key in <code>KEYS</code>, so
+      Redis (and a future cluster) knows which keys the script touches.</li>
+  <li><strong>Long Lua scripts.</strong> While a script runs, Redis serves nobody else. No loops
+      over big sets.</li>
+  <li><strong>Treating Redis as the truth.</strong> It is a fast gate. PostgreSQL constraints
+      decide.</li>
+  <li><strong>Returning 201 before the worker ran.</strong> The honest answer is 202 + a status
+      URL.</li>
+  <li><strong>Keying <code>registration.requests</code> by studentId.</strong> Then two requests
+      for the same section run in parallel in different partitions, and waitlist order is lost.</li>
+  <li><strong>Releasing a Redis seat inside the DB transaction.</strong> If the transaction then
+      rolls back, Redis and the DB disagree. Update Redis after commit.</li>
+  <li><strong>Forgetting TTLs.</strong> Request statuses and tickets without a TTL fill memory
+      over many semesters.</li>
+  <li><strong>Assuming a missing key means "0 seats" or "full capacity".</strong> Missing means
+      "unknown": pause and rebuild.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infra and open <code>redis-cli</code>:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+docker compose -f infra/docker-compose.yml exec redis redis-cli</code></pre></li>
+  <li><p>Load 2 seats and run the seat-gate script with <code>EVAL</code> (one line):</p>
+<pre><code>SET seats:{s1} 2
+EVAL "if redis.call('SISMEMBER',KEYS[2],ARGV[1])==1 then return -1 end local l=redis.call('GET',KEYS[1]) if not l then return -2 end if tonumber(l)&lt;=0 then return 0 end redis.call('DECR',KEYS[1]) redis.call('SADD',KEYS[2],ARGV[1]) return 1" 2 seats:{s1} holders:{s1} lan</code></pre>
+      <p>Run it again for <code>lan</code> (expect -1), then for <code>minh</code> (1), then
+      <code>hoa</code> (0). Then <code>DEL seats:{s1}</code> and run it for a new student <code>an</code> (-2).</p></li>
+  <li><p>Load the script once and call it by its hash:</p>
+<pre><code>SCRIPT LOAD "return redis.call('INCR', KEYS[1])"
+EVALSHA &lt;the sha it printed&gt; 1 counter
+SCRIPT FLUSH
+EVALSHA &lt;same sha&gt; 1 counter</code></pre>
+      <p>The last command fails with <code>NOSCRIPT</code>: the cache is empty. This is why Spring falls back to <code>EVAL</code>.</p></li>
+  <li><p>On paper: the API crashes after <code>DECR</code> but before the Kafka send. What does
+      the drift metric show? Is the error in the safe direction? How does an admin fix it?</p></li>
+  <li><p>On paper: write the <code>release-seat.lua</code> script. Make sure releasing twice
+      for the same student gives back only one seat.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Hot spot</td><td>One piece of data that very many requests change at the same time.</td></tr>
+<tr><td>Race condition</td><td>A bug that depends on which of two parallel actions is faster.</td></tr>
+<tr><td>Check-then-act</td><td>Reading a value, deciding, then writing, with a gap in between.</td></tr>
+<tr><td>Lost update</td><td>Two writers overwrite each other; one change disappears.</td></tr>
+<tr><td>Atomic</td><td>Happens as one step that cannot be split or interrupted.</td></tr>
+<tr><td>TTL</td><td>Time to live: the key deletes itself after this many seconds.</td></tr>
+<tr><td>Lua script</td><td>A small program Redis runs as one atomic step.</td></tr>
+<tr><td>EVALSHA</td><td>Run a cached script by its SHA-1 fingerprint.</td></tr>
+<tr><td>Hash tag</td><td>The <code>{…}</code> part of a key that decides where it lives in a cluster.</td></tr>
+<tr><td>Seat gate</td><td>Our Redis script that says "seat reserved", "full" or "duplicate".</td></tr>
+<tr><td>Waiting room</td><td>A queue with tickets that lets students in at a safe rate.</td></tr>
+<tr><td>202 Accepted</td><td>"Request received, the result comes later."</td></tr>
+<tr><td>Waitlist promotion</td><td>Giving a freed seat to the first student on the waitlist.</td></tr>
+<tr><td>Drift</td><td>The difference between Redis's seat count and the database's.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why not just use <code>SELECT … FOR UPDATE</code> in PostgreSQL for every request?</summary>
+    <p>It is correct but slow at a hot spot: every request for a popular section waits for the
+    same row lock and holds a pooled connection while waiting. The pool runs out and every
+    endpoint slows down. Redis answers the same question atomically in memory, in well under a
+    millisecond.</p></details>
+  <details><summary>2. Why must the duplicate check and the decrement be in one Lua script?</summary>
+    <p>As separate commands, another request can run between them (check-then-act). Redis runs
+    a script as one atomic step, so no other command can see a half-done state.</p></details>
+  <details><summary>3. Why is <code>registration.requests</code> keyed by <code>sectionId</code>?</summary>
+    <p>Kafka keeps order only within a partition, and the key picks the partition. With
+    sectionId as the key, all requests and drops for one section are processed one by one in
+    arrival order, so the waitlist is fair and the worker never races with itself on that
+    section.</p></details>
+  <details><summary>4. Why does the API answer 202 and not 201?</summary>
+    <p>At that moment only Redis has reserved a seat. The enrollment row does not exist yet;
+    the worker may still reject it (for example a prerequisite is missing). 202 plus a status
+    URL is honest, and it keeps the answer fast (ADR-7, C8).</p></details>
+  <details><summary>5. If Redis has wrong numbers, can a section be overbooked?</summary>
+    <p>No. Redis is only the first gate. The worker's <code>enrolled &lt; capacity</code> and
+    version check, and the unique indexes, are the final guard (NFR-2). Wrong Redis data can
+    cause wrong "full" answers or slow requests, which is why we alert on drift.</p></details>
+  <details><summary>6. Why must a missing <code>seats:</code> key not be treated as "0 seats left"?</summary>
+    <p>Missing can mean Redis restarted and lost data. Treating it as 0 would wrongly reject
+    everyone; treating it as full capacity could hand out seats that are taken. The safe answer
+    is "paused" until the loader rebuilds the keys from PostgreSQL.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://redis.io/docs/latest/develop/interact/programmability/eval-intro/">Redis docs: Scripting with Lua</a>: EVAL, EVALSHA, atomicity, KEYS vs ARGV.</li>
+  <li><a href="https://redis.io/docs/latest/develop/data-types/">Redis docs: Data types</a>: strings, sets, hashes, sorted sets.</li>
+  <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/">Redis docs: Persistence</a>: RDB and AOF.</li>
+  <li><a href="https://docs.spring.io/spring-data/redis/reference/redis/scripting.html">Spring Data Redis reference: Scripting</a>: <code>RedisScript</code> and <code>execute</code>.</li>
+  <li><a href="https://www.postgresql.org/docs/current/explicit-locking.html">PostgreSQL docs: Explicit locking</a>: row locks and <code>FOR UPDATE</code>.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9110#name-202-accepted">RFC 9110: 202 Accepted</a>: what the status code promises.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

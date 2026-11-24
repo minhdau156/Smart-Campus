@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>File Uploads and S3</title>
+<meta name="description" content="Smart Campus lesson 28: S3-compatible storage with RustFS, the AWS SDK for Java v2, presigned URLs, a safe upload flow, image cleaning and orphan cleanup.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="28">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 28 · Part 2: Feature modules</div>
+<h1>File uploads and S3 storage</h1>
+<p class="lede">Students post photos of second-hand books and of lost wallets. Where do the photos
+live, how does a 6 MB phone picture get there without passing through our Java app, and how do we
+make sure it is really a picture and does not tell the world where the student lives?</p>
+
+<div class="meta">
+  <span class="badge module">marketplace</span>
+  <span class="badge module">lostfound</span>
+  <span class="badge task">MKT-1, 3, 4, 5, 6</span>
+  <span class="badge task">LF-1 … LF-6</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Planned module</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="05-docker-compose.html">05 (Docker Compose)</a>,
+  <a href="09-rest-problem-openapi.html">09 (REST)</a> and
+  <a href="25-scheduled-jobs-feeds.html">25 (scheduled jobs)</a>. <code>SPEC-marketplace.md</code>
+  and <code>SPEC-lostfound.md</code> are not written yet, so all code here is <strong>planned</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#not-db">Why files do not go in the database</a></li>
+    <li><a href="#s3">Buckets, keys, objects, and RustFS</a></li>
+    <li><a href="#client">S3 from Java: <code>S3Client</code></a></li>
+    <li><a href="#presigned">Presigned URLs</a></li>
+    <li><a href="#flow">The upload flow</a></li>
+    <li><a href="#validate">Checking and cleaning images</a></li>
+    <li><a href="#safety">Private files, key names, cleanup</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<ul>
+  <li><strong>MKT-1</strong>: a seller posts a book with photos, price and course. The Plan has a
+      <code>listing_images(id, listing_id, object_key)</code> table: the database stores only the
+      <em>key</em> of each photo, not the photo.</li>
+  <li><strong>MKT-3/4</strong>: edit, mark as sold, delete a listing: its photos must be removed too.</li>
+  <li><strong>MKT-5/6</strong>: reports and moderation: an admin may need to remove a bad photo.</li>
+  <li><strong>LF-1/2</strong>: report a lost or found item with a photo
+      (<code>lost_found_items.image_key</code>).</li>
+  <li><strong>LF-4</strong>: claim an item with proof of ownership. Proof photos are private.</li>
+  <li><strong>LF-6</strong>: archive after 60 days: what happens to the photos?</li>
+</ul>
+<p>The Architecture says it plainly: <em>"Uploads go straight to MinIO via pre-signed URLs, size
+and MIME type checked; images re-encoded."</em> Spec decision <strong>Q6</strong> replaced MinIO
+with <strong>RustFS</strong> in dev, because MinIO stopped publishing Docker images. Apps use the
+plain S3 API, so only the dev container changed.</p>
+
+<h2 id="not-db">2. Why files do not go in the database</h2>
+<p>PostgreSQL <em>can</em> store bytes (<code>bytea</code>). But for photos it is a poor fit:</p>
+<ul>
+  <li><strong>Size</strong>: thousands of 3 MB photos make the database huge. Backups and restores
+      become slow, and the database cache fills with pictures instead of useful rows.</li>
+  <li><strong>Traffic</strong>: every photo view would go browser → gateway → Java → database and
+      back, holding a database connection the whole time.</li>
+  <li><strong>Tools</strong>: object stores are built for this job. They are cheap per gigabyte,
+      stream big files, and can give out short-lived download links.</li>
+</ul>
+<p>An analogy: the database is a library catalogue. It says "the book is on shelf 4B". It does not
+glue the book into the catalogue.</p>
+
+<h2 id="s3">3. Buckets, keys, objects, and RustFS</h2>
+<p><strong>S3</strong> (Amazon Simple Storage Service) is a storage service whose HTTP API became a
+de facto standard. Many products speak the same API ("S3-compatible"), including RustFS.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning</th><th>Smart Campus example (planned)</th></tr></thead>
+<tbody>
+<tr><td><strong>Bucket</strong></td><td>A named container for files, like a top-level drive</td><td><code>campus-marketplace</code></td></tr>
+<tr><td><strong>Key</strong></td><td>The full name of a file inside a bucket. Slashes are just characters; there are no real folders</td><td><code>listings/7f3c…/a91e….jpg</code></td></tr>
+<tr><td><strong>Object</strong></td><td>The file bytes plus its metadata</td><td>a re-encoded JPEG</td></tr>
+<tr><td><strong>Metadata</strong></td><td>Small facts stored with the object: content type, size, your own headers</td><td><code>Content-Type: image/jpeg</code></td></tr>
+</tbody></table></div>
+
+<p>Our Compose file already runs RustFS:</p>
+<pre data-file="infra/docker-compose.yml (service rustfs)"><code>rustfs:
+  # S3-compatible file store, replaces MinIO (spec Q6).
+  image: rustfs/rustfs:1.0.6
+  environment:
+    RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set in infra/.env}
+    RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set in infra/.env}
+    RUSTFS_CONSOLE_ENABLE: "true"
+  ports:
+    - "127.0.0.1:9000:9000"      <span class="c"># the S3 API</span>
+    - "127.0.0.1:9001:9001"      <span class="c"># the web console</span></code></pre>
+<p>The dev access key and secret key are in <code>infra/.env</code> (copied from
+<code>.env.example</code>, gitignored). The S3 API is <code>http://localhost:9000</code>; the
+console at <code>http://localhost:9001</code> lets you look at buckets and files.</p>
+
+<h2 id="client">4. S3 from Java: <code>S3Client</code></h2>
+<p>We use the official <strong>AWS SDK for Java v2</strong>. It works with RustFS if we change two
+things: the <strong>endpoint</strong> (talk to localhost:9000, not to Amazon) and
+<strong>path-style access</strong>.</p>
+<div class="compare">
+  <div class="poor"><h4>Virtual-hosted style (Amazon's default)</h4>
+    <p><code>http://campus-marketplace.localhost:9000/listings/a.jpg</code>: the bucket is part of
+    the host name. Needs DNS tricks on localhost.</p></div>
+  <div class="good"><h4>Path style (what we use in dev)</h4>
+    <p><code>http://localhost:9000/campus-marketplace/listings/a.jpg</code>: the bucket is the first
+    part of the path. Works with one host name.</p></div>
+</div>
+<pre data-file="core-app/.../marketplace/internal/storage/StorageConfig.java (planned)"><code><span class="k">@ConfigurationProperties</span>("campus.storage")
+record StorageProperties(URI endpoint, String region, String accessKey, String secretKey, String bucket) { }
+
+<span class="k">@Configuration</span>(proxyBeanMethods = false)
+<span class="k">@EnableConfigurationProperties</span>(StorageProperties.class)
+class StorageConfig {
+
+    <span class="k">@Bean</span>
+    S3Client s3Client(StorageProperties p) {
+        return S3Client.builder()
+                .endpointOverride(p.endpoint())                    <span class="c">// http://localhost:9000 in dev</span>
+                .region(Region.of(p.region()))                     <span class="c">// required by the SDK; RustFS accepts a fixed value</span>
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(p.accessKey(), p.secretKey())))
+                .forcePathStyle(true)
+                .build();
+    }
+
+    <span class="k">@Bean</span>
+    S3Presigner s3Presigner(StorageProperties p) {
+        return S3Presigner.builder()
+                .endpointOverride(p.endpoint())
+                .region(Region.of(p.region()))
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create(p.accessKey(), p.secretKey())))
+                .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
+                .build();
+    }
+}</code></pre>
+<p>The values come from configuration, so production can point at another S3-compatible store
+without code changes. The secret key comes from the environment, never from a committed file.</p>
+<div class="callout warn">
+  <span class="title">Check against the real container</span>
+  Newer SDK versions add extra checksum headers by default, and some S3-compatible stores handle
+  them differently. If uploads to RustFS fail with checksum errors, read the SDK's documentation
+  on request checksum settings. Always prove the setup with an integration test against the real
+  RustFS image (<a href="10-testing.html">lesson 10</a>).
+</div>
+
+<h2 id="presigned">5. Presigned URLs</h2>
+<p>We do not want 6 MB photos to pass through the gateway and core-app. Instead, our server gives
+the browser a <strong>presigned URL</strong>: a normal S3 URL plus a signature, made with our secret
+key, that says "whoever holds this link may do <em>this one thing</em> (PUT this key, or GET this
+key) until <em>this time</em>". The browser uses it to talk to the object store directly. The
+secret key never leaves the server.</p>
+<p>An analogy: a hotel key card that opens only room 412 and stops working at noon.</p>
+<pre data-file="marketplace/internal/storage/UploadUrls.java (planned)"><code>PresignedUpload presignPut(String key, String contentType) {
+    PutObjectRequest put = PutObjectRequest.builder()
+            .bucket(props.bucket())
+            .key(key)                                   <span class="c">// chosen by US, never by the user</span>
+            .contentType(contentType)                   <span class="c">// the browser must send the same header</span>
+            .build();
+    PresignedPutObjectRequest signed = presigner.presignPutObject(PutObjectPresignRequest.builder()
+            .signatureDuration(Duration.ofMinutes(5))   <span class="c">// short life</span>
+            .putObjectRequest(put)
+            .build());
+    return new PresignedUpload(signed.url().toString(), clock.instant().plus(Duration.ofMinutes(5)));
+}</code></pre>
+<p>Downloads work the same way with <code>presignGetObject</code>, for private files (section 8).</p>
+<p>Because the browser on <code>localhost:5173</code> talks to <code>localhost:9000</code>, a
+different origin, the store must allow it with <strong>CORS</strong> rules for that bucket
+(allowed origin, method <code>PUT</code>, header <code>Content-Type</code>). How to set CORS rules
+on RustFS must be checked in its docs when the module is built.</p>
+
+<h2 id="flow">6. The upload flow: ask, upload, confirm</h2>
+<pre class="diagram">Browser                       core-app (marketplace)              RustFS :9000
+   │ POST …/listings/{id}/uploads ─►│ check: my listing? &lt; 5 photos?
+   │   { contentType: image/jpeg }  │ key = tmp/{uploadId}; save pending_uploads row
+   │◄── { uploadId, url, expiresAt }│
+   │ PUT url  (the file bytes) ───────────────────────────────────────►│ stores tmp/{uploadId}
+   │ POST …/uploads/{uploadId}/confirm ─►│ HEAD object: size OK?
+   │                                │ GET bytes: really an image? re-encode,
+   │                                │ strip metadata, make thumbnail
+   │                                │ PUT listings/{id}/{imageId}.jpg + thumb ─►│
+   │                                │ DELETE tmp/{uploadId} ───────────────────►│
+   │                                │ INSERT listing_images (object_key)
+   │◄── 201 { imageId, thumbUrl }   │</pre>
+<ol>
+  <li><strong>Ask.</strong> The server checks rights (only the seller of this listing) and limits
+      (for example at most 5 photos), creates a temporary key, and remembers it in a
+      <code>pending_uploads</code> table with an expiry.</li>
+  <li><strong>Upload.</strong> The browser PUTs the file directly to RustFS with the presigned URL.</li>
+  <li><strong>Confirm.</strong> The browser says "done". The server does <em>not</em> believe the
+      browser: it checks the real object (next section), makes the final clean image, and only
+      then adds a <code>listing_images</code> row.</li>
+</ol>
+<p>Note that a presigned PUT does not limit the size by itself. That is why the confirm step
+checks the size with a <code>HEAD</code> request before reading the file, and deletes anything too
+big.</p>
+
+<h2 id="validate">7. Checking and cleaning images</h2>
+<h3>Do not trust the name or the Content-Type</h3>
+<p><code>photo.jpg</code> with <code>Content-Type: image/jpeg</code> can be an HTML page, a script or
+a 2 GB file. Check the <strong>real content</strong>: the first bytes of a file (the "magic
+number") tell its true type. JPEG starts with <code>FF D8 FF</code>, PNG with
+<code>89 50 4E 47</code>. Even better: try to <strong>decode</strong> it as an image. If it does not
+decode, reject it.</p>
+
+<h3>Re-encode, which also removes EXIF</h3>
+<p>Phone photos carry <strong>EXIF metadata</strong>: camera model, time, and often the exact
+<strong>GPS position</strong> where the photo was taken. A photo of a book taken at home tells
+everyone where the student lives. Re-encoding means: decode the pixels, then write a brand new JPEG
+from the pixels only. The new file has no EXIF, no GPS, and no hidden extra content.</p>
+<pre data-file="marketplace/internal/storage/ImageCleaner.java (planned, simplified)"><code>CleanImage clean(InputStream in, long size) throws IOException {
+    if (size &gt; MAX_BYTES) throw new CampusProblem(ProblemCode.VALIDATION_FAILED, "Photo is larger than 8 MB");
+    try (ImageInputStream iis = ImageIO.createImageInputStream(in)) {
+        Iterator&lt;ImageReader&gt; readers = ImageIO.getImageReaders(iis);
+        if (!readers.hasNext()) throw new CampusProblem(ProblemCode.VALIDATION_FAILED, "Not a supported image");
+        ImageReader reader = readers.next();
+        try {
+            reader.setInput(iis);
+            if ((long) reader.getWidth(0) * reader.getHeight(0) &gt; MAX_PIXELS) {   <span class="c">// stop "image bombs"</span>
+                throw new CampusProblem(ProblemCode.VALIDATION_FAILED, "Photo has too many pixels");
+            }
+            BufferedImage pixels = reader.read(0);
+            BufferedImage main = resize(pixels, 1600);         <span class="c">// long side at most 1600 px</span>
+            BufferedImage thumb = resize(pixels, 320);         <span class="c">// for lists</span>
+            return new CleanImage(toJpeg(main), toJpeg(thumb)); <span class="c">// new files: pixels only, no EXIF</span>
+        } finally {
+            reader.dispose();
+        }
+    }
+}</code></pre>
+<ul>
+  <li><strong>Image bombs</strong>: a tiny file can claim 50 000 × 50 000 pixels and use gigabytes of
+      memory when decoded. Read the width and height first, as above.</li>
+  <li><strong>Orientation</strong>: phones often save the picture sideways and add an EXIF note
+      "rotate 90°". Removing EXIF removes that note, so the photo appears sideways. Read the
+      orientation before cleaning and rotate the pixels (a metadata library can read it).</li>
+  <li><strong>Formats</strong>: Java's built-in <code>ImageIO</code> reads JPEG and PNG, but not
+      every modern phone format (for example HEIC). The spec must say which formats we accept.</li>
+  <li><strong>Thumbnails</strong>: make them once at upload, not on every page view. Lists show the
+      320 px thumbnail; the listing page shows the 1600 px version.</li>
+</ul>
+
+<h2 id="safety">8. Private files, key names, cleanup</h2>
+<h3>Public or private?</h3>
+<div class="compare">
+  <div class="good"><h4>Marketplace listing photos</h4>
+    <p>Shown to every logged-in student. Still, keep the bucket private and give out presigned GET
+    links (for example valid for one hour), or serve them through a controlled path. Then a removed
+    photo (MKT-6) stops working quickly.</p></div>
+  <div class="good"><h4>Lost &amp; found claim proof (LF-4)</h4>
+    <p>A photo of an ID card or a receipt. Only the claimant and security staff may see it. Private
+    bucket, a permission check, then a <strong>short</strong> presigned GET (a few minutes).</p></div>
+</div>
+<p>Never make a whole bucket "public read" just to make images easy.</p>
+
+<h3>Key naming</h3>
+<ul>
+  <li>Build keys from <strong>our own ids</strong>: <code>listings/{listingId}/{imageId}.jpg</code>,
+      <code>lostfound/{itemId}/{imageId}.jpg</code>, <code>tmp/{uploadId}</code>.</li>
+  <li><strong>Never use the user's file name</strong> in the key. A name like
+      <code>../../other/listing.jpg</code> or a 2 000-character name causes trouble. Keep the
+      original name only as text in the database if you want to show it.</li>
+  <li>Random ids in keys also mean nobody can guess the next photo's URL.</li>
+  <li>Prefixes per purpose (<code>tmp/</code>, <code>listings/</code>) make cleanup jobs and
+      expiry rules simple.</li>
+</ul>
+
+<h3>Orphan cleanup</h3>
+<p>An <strong>orphan</strong> is a file that no database row points to. They appear when a user asks
+for an upload URL and never confirms, when a confirm crashes half-way, or when a listing is deleted.
+A nightly job (<a href="25-scheduled-jobs-feeds.html">lesson 25</a>: a lock, chunks, a time zone)
+cleans them:</p>
+<ul>
+  <li>delete <code>tmp/…</code> objects whose <code>pending_uploads</code> row expired a day ago,</li>
+  <li>delete objects of listings deleted more than N days ago,</li>
+  <li>for LF-6, decide in the spec whether archived items keep their photos.</li>
+</ul>
+<p>Order matters: when deleting a listing, delete the database row (and publish the event) first,
+and let the job delete the files later. A missing file shows a broken image; a row pointing to a
+deleted file is worse than a file nobody points to.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>RustFS container (S3 API :9000, console :9001)</td><td><code>infra/docker-compose.yml</code>, service <code>rustfs</code></td><td>Exists</td></tr>
+<tr><td>Dev keys <code>RUSTFS_ACCESS_KEY</code>, <code>RUSTFS_SECRET_KEY</code></td><td><code>infra/.env.example</code> → <code>infra/.env</code></td><td>Exists</td></tr>
+<tr><td>Why RustFS, not MinIO</td><td><code>SPEC-platform.md</code>, decision Q6</td><td>Exists</td></tr>
+<tr><td>Schemas <code>marketplace</code>, <code>lostfound</code></td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>Exists</td></tr>
+<tr><td><code>S3Client</code>, presigner, upload flow, image cleaning</td><td><code>core-app/.../marketplace/</code>, <code>core-app/.../lostfound/</code></td><td>Planned (modules 12, 13)</td></tr>
+<tr><td>Buckets, CORS rules, who creates them</td><td><code>SPEC-marketplace.md</code></td><td>Planned</td></tr>
+<tr><td>Orphan cleanup job</td><td>marketplace / lostfound</td><td>Planned</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Streaming uploads through core-app</strong> when a presigned URL would do.</li>
+  <li><strong>Trusting the file name or Content-Type.</strong> Decode the real bytes.</li>
+  <li><strong>Storing the original phone photo.</strong> It keeps GPS data. Re-encode.</li>
+  <li><strong>Keys made from user input.</strong> Build keys from your own ids.</li>
+  <li><strong>Long-lived presigned URLs</strong> (days). Use minutes for uploads and private files.</li>
+  <li><strong>Public buckets</strong> for convenience.</li>
+  <li><strong>Forgetting path-style access</strong> with RustFS, then getting strange DNS errors.</li>
+  <li><strong>Saving the database row before the file is checked.</strong> Confirm first.</li>
+  <li><strong>Never cleaning <code>tmp/</code>.</strong> Storage grows forever.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infrastructure and open the RustFS console at
+      <code>http://localhost:9001</code>. Log in with the keys from your <code>infra/.env</code>.
+      Create a bucket <code>scratch</code> and upload a photo by hand.</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+docker compose -f infra/docker-compose.yml ps rustfs</code></pre></li>
+  <li><p>In a scratch Maven project (not in the repo), add the AWS SDK v2 S3 module, build the
+      <code>S3Client</code> above, and list the objects in <code>scratch</code> with
+      <code>listObjectsV2</code>.</p></li>
+  <li><p>Make a presigned PUT URL for <code>tmp/test.jpg</code> with content type
+      <code>image/jpeg</code>, valid for 5 minutes. Upload with curl:</p>
+<pre><code>curl -X PUT -H "Content-Type: image/jpeg" --data-binary "@photo.jpg" "&lt;the presigned url&gt;"</code></pre>
+      <p>Try again with <code>Content-Type: image/png</code>. Why does it fail now?</p></li>
+  <li><p>Take a photo with your phone with location on. Look at its EXIF data with any EXIF viewer.
+      Re-encode it with <code>ImageIO.read</code> + <code>ImageIO.write</code> and look again.</p></li>
+  <li><p>On paper: write the <code>pending_uploads</code> table and the SQL of the cleanup job. What
+      happens if the job runs while a user is uploading?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Object store / S3</td><td>A service that stores files by name over HTTP.</td></tr>
+<tr><td>S3-compatible</td><td>Speaks the same API as Amazon S3 (RustFS, MinIO, …).</td></tr>
+<tr><td>Bucket</td><td>A named container of objects.</td></tr>
+<tr><td>Key</td><td>The full name of an object inside a bucket.</td></tr>
+<tr><td>Path-style access</td><td>The bucket name is in the URL path, not in the host name.</td></tr>
+<tr><td>Presigned URL</td><td>A link with a signature that allows one action until a time.</td></tr>
+<tr><td>CORS</td><td>Browser rules about which other sites a page may call.</td></tr>
+<tr><td>Magic number</td><td>The first bytes of a file that show its real type.</td></tr>
+<tr><td>EXIF</td><td>Hidden data in photos: camera, time, GPS position.</td></tr>
+<tr><td>Re-encode</td><td>Decode the pixels and save a brand-new file from them.</td></tr>
+<tr><td>Orphan</td><td>A stored file that no database row points to.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do photos go to RustFS and not into a <code>bytea</code> column?</summary>
+    <p>Photos would make the database huge, slow backups, fill its cache, and every view would hold
+    a database connection. An object store is built and priced for big files.</p></details>
+  <details><summary>2. Why does the browser upload with a presigned URL instead of sending the file to our API?</summary>
+    <p>The big bytes skip the gateway and core-app, so our app threads and memory stay free. The
+    secret key stays on the server; the URL allows only one action for a few minutes.</p></details>
+  <details><summary>3. Why does the server re-check the file at "confirm" instead of trusting the browser?</summary>
+    <p>The browser can be changed by the user. It can upload a huge file or a non-image with an
+    image name. Only the server's own check of the real object is trustworthy.</p></details>
+  <details><summary>4. Why re-encode images even when they are valid JPEGs?</summary>
+    <p>To remove EXIF data like the GPS position (privacy), remove any hidden extra content, and
+    make the size and format predictable.</p></details>
+  <details><summary>5. Why must keys never come from the user's file name?</summary>
+    <p>A user could pick a name that overwrites another file or breaks paths. Keys built from our
+    own random ids are safe, unique and cannot be guessed.</p></details>
+  <details><summary>6. When deleting a listing, why delete the row first and the file later?</summary>
+    <p>If the file is deleted first and the transaction then fails, a live listing points to a
+    missing photo. A leftover file with no row is harmless and the cleanup job removes it.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/examples-s3.html">AWS SDK for Java 2.x developer guide: Amazon S3</a>.</li>
+  <li><a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/examples-s3-presign.html">AWS SDK for Java 2.x: Work with presigned URLs</a>.</li>
+  <li><a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html">Amazon S3 user guide: Virtual hosting of buckets</a>: path-style vs virtual-hosted style.</li>
+  <li><a href="https://docs.rustfs.com/">RustFS documentation</a>.</li>
+  <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html">OWASP Cheat Sheet: File upload</a>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.desktop/javax/imageio/ImageIO.html">Java 21 API: <code>ImageIO</code></a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

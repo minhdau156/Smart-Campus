@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kafka Fundamentals Lesson</title>
+<meta name="description" content="Smart Campus lesson 07: Apache Kafka fundamentals: topics, partitions, keys, producers, consumer groups, offsets, retention, KRaft and Spring Kafka.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="07">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 07 · Part 1: Foundations</div>
+<h1>Apache Kafka fundamentals</h1>
+<p class="lede">Kafka is the only road between Smart Campus modules. This lesson explains how that
+road works: topics, partitions, keys, producers, consumer groups and offsets, and how we use it
+from Spring.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module that sends or reads events</span>
+  <span class="badge task">T5 (done)</span>
+  <span class="badge task">T7 (done)</span>
+  <span class="badge task">T11</span>
+  <span class="badge task">T12</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="03-spring-boot.html">03 (beans, configuration)</a> and
+  <a href="05-docker-compose.html">05 (Compose, running commands in a container)</a>.
+  After this lesson, go on to <a href="08-outbox-idempotency.html">08 (outbox, dedupe, replay)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#picture">The big picture</a></li>
+    <li><a href="#keys">Keys, partitions and ordering</a></li>
+    <li><a href="#producer">The producer: acks, retries, timeouts</a></li>
+    <li><a href="#consumer">Consumer groups, offsets, rebalancing</a></li>
+    <li><a href="#retention">Retention: how long Kafka keeps records</a></li>
+    <li><a href="#broker">Our broker: KRaft and topics in code</a></li>
+    <li><a href="#spring">Spring Kafka: sending, listening, errors</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice with the CLI tools</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Modules in Smart Campus never read each other's tables. When something happens, the module
+publishes an <strong>event</strong>, and other modules react. Kafka carries those events
+(map C2: "Kafka only", spec D5: "even inside <code>core-app</code>"). Kafka is also a
+<strong>work queue</strong>: during the registration rush, seat requests wait in
+<code>registration.requests</code> until a worker handles them.</p>
+<p>Why Kafka and not a simple queue (Arch ADR-4)? It keeps order per key, it keeps history so
+read models can be rebuilt (replay), and it handles big bursts. The price: it is heavier to run
+and has more ideas to learn. Here they are.</p>
+
+<h2 id="picture">2. The big picture</h2>
+<p>Think of Kafka as a set of <strong>notebooks</strong> that you can only write at the end of.
+Nobody erases a line. Readers keep a bookmark of how far they have read.</p>
+<pre class="diagram">                          Kafka broker (one in dev, three in production)
+                          ┌──────────────────────────────────────────────────┐
+ producer                 │ topic "registration.events"  (6 partitions)      │
+ (registration-service) ──►   partition 0: [0][1][2][3][4][5] ← new records  │
+                          │   partition 1: [0][1][2]                         │
+                          │   …                                              │
+                          │   partition 5: [0][1][2][3]                      │
+                          └──────────────────────────────────────────────────┘
+                                   │ offsets: 0, 1, 2, … (position in one partition)
+                                   ▼
+                consumer group "timetable"      consumer group "notification"
+                (its own bookmarks)             (its own bookmarks)</pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><strong>Broker</strong></td><td>A Kafka server. It stores records on disk and answers clients.</td></tr>
+<tr><td><strong>Topic</strong></td><td>A named stream of records, e.g. <code>course.events</code>. Like a notebook title.</td></tr>
+<tr><td><strong>Partition</strong></td><td>One slice of a topic. A topic with 6 partitions is 6 append-only logs. Partitions let many consumers work in parallel.</td></tr>
+<tr><td><strong>Offset</strong></td><td>The position of a record inside one partition: 0, 1, 2, … It never changes.</td></tr>
+<tr><td><strong>Record</strong></td><td>One message: a <strong>key</strong>, a <strong>value</strong>, <strong>headers</strong>, and a timestamp.</td></tr>
+</tbody></table></div>
+<p>In Smart Campus, a record looks like this:</p>
+<ul>
+  <li><strong>key</strong>: a string such as a <code>studentId</code> (chosen per topic, next section);</li>
+  <li><strong>value</strong>: the JSON <code>DomainEvent</code> envelope (<code>eventId</code>,
+      <code>type</code>, <code>schemaVersion</code>, <code>occurredAt</code>,
+      <code>aggregateId</code>, <code>payload</code>);</li>
+  <li><strong>headers</strong>: technical extras, like the trace context <code>traceparent</code>
+      (spec D4, <a href="12-observability.html">lesson 12</a>). Business data never goes in headers.</li>
+</ul>
+
+<h2 id="keys">3. Keys, partitions and ordering</h2>
+<p>When a producer sends a record with a key, Kafka hashes the key and picks a partition. The
+<strong>same key always goes to the same partition</strong> (as long as the partition count does not
+change). Kafka keeps order <strong>only inside one partition</strong>. So:</p>
+<div class="callout project">
+  <span class="title">The key decides what stays in order</span>
+  All records with the same key are read in the order they were written. Records with different
+  keys may be read in any order compared to each other.
+</div>
+<p>That is why the key is chosen <strong>per topic</strong>, in <code>shared-kernel</code>
+(spec D6, built in T5):</p>
+<pre data-file="backend/shared-kernel/src/main/java/edu/campus/kernel/event/Topics.java (part)"><code>public enum Topics {
+    <span class="c">/** Seat requests. Not replayable: a request is a command, running it twice would act twice. */</span>
+    REGISTRATION_REQUESTS(<span class="s">"registration.requests"</span>, 12, <span class="s">"sectionId"</span>,   false),
+    REGISTRATION_EVENTS(  <span class="s">"registration.events"</span>,    6, <span class="s">"studentId"</span>,   true),
+    COURSE_EVENTS(        <span class="s">"course.events"</span>,          3, <span class="s">"sectionId"</span>,   true),
+    GRADE_EVENTS(         <span class="s">"grade.events"</span>,           3, <span class="s">"studentId"</span>,   true),
+    CAMPUS_EVENTS(        <span class="s">"campus.events"</span>,          3, <span class="s">"aggregateId"</span>, true);
+    …
+    public String keyOf(DomainEvent&lt;?&gt; event) { … }  <span class="c">// a missing key throws (D6)</span>
+}</code></pre>
+<ul>
+  <li><code>registration.requests</code> keyed by <strong>sectionId</strong>: all requests for one
+      section are in one partition, in arrival order. First come, first served, and the waitlist is
+      fair.</li>
+  <li><code>registration.events</code> keyed by <strong>studentId</strong>: one student's
+      "enrolled", then "dropped" can never arrive swapped.</li>
+  <li><code>campus.events</code> keyed by <strong>aggregateId</strong>: the thing that changed.</li>
+</ul>
+<div class="callout warn">
+  <span class="title">Never change the partition count of a live topic lightly</span>
+  More partitions = a different hash result = keys move to other partitions, and the order
+  between old and new records of one key is lost. In Smart Campus, changing partitions, keys or
+  names is an "Ask first" spec change.
+</div>
+
+<h2 id="producer">4. The producer: acks, retries, timeouts</h2>
+<p>The <strong>producer</strong> is the client that writes records. Its most important settings:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Setting</th><th>What it means</th><th>Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><code>acks</code></td><td>When does the broker say "stored"? <code>0</code> = never asks, <code>1</code> = the leader wrote it, <code>all</code> = the leader and all in-sync copies wrote it.</td>
+    <td><code>all</code>, set in <code>campus-platform-defaults.yml</code></td></tr>
+<tr><td><code>enable.idempotence</code></td><td>The broker drops a repeat of the same batch when the producer resends it after a timeout. Avoids duplicates <em>from producer retries</em>.</td>
+    <td>On (Kafka's default)</td></tr>
+<tr><td><code>retries</code></td><td>How many times the producer resends a failed batch.</td><td>Kafka's default (very high)</td></tr>
+<tr><td><code>delivery.timeout.ms</code></td><td>The total time the producer may try before it gives up and reports a failure.</td>
+    <td>Kafka's default (120 s); 8 s in the test profile</td></tr>
+<tr><td>key / value serializer</td><td>How the key and value become bytes.</td>
+    <td>String key, byte-array value (Modulith writes the JSON itself)</td></tr>
+</tbody></table></div>
+<p>Think of sending a registered letter. <code>acks=all</code> means you wait for the signed
+receipt. Idempotence means the post office throws away a second copy of the <em>same</em> letter
+you sent because you were not sure the first one arrived. But if your <em>outbox</em> sends a new
+letter later (after <code>delivery.timeout.ms</code>), that is a new send, and a duplicate can still
+appear. T7 saw exactly this. The answer is the idempotent consumer in
+<a href="08-outbox-idempotency.html">lesson 08</a>.</p>
+
+<h2 id="consumer">5. Consumer groups, offsets, rebalancing</h2>
+<h3>Consumer groups</h3>
+<p>A <strong>consumer</strong> reads records. Consumers join a <strong>consumer group</strong>
+(a name, the <code>group.id</code>). Inside one group, each partition is given to
+<strong>exactly one</strong> consumer. Different groups are fully independent: each group gets
+<strong>every</strong> record.</p>
+<pre class="diagram">topic registration.requests (12 partitions)
+
+group "registration-worker", 3 instances:
+   worker A ← partitions 0-3      worker B ← partitions 4-7      worker C ← partitions 8-11
+
+group "timetable" on registration.events — a different group, reads everything again for itself</pre>
+<ul>
+  <li>More consumers in a group = more work in parallel, <strong>up to the number of
+      partitions</strong>. With 12 partitions, a 13th worker sits idle.</li>
+  <li>One partition is read by one consumer at a time, so order per key is kept.</li>
+  <li>In Smart Campus the group id is the consumer's name, e.g. <code>notification</code>,
+      <code>timetable</code>. The replay script resets one group (T12).</li>
+</ul>
+
+<h3>Offsets and committing</h3>
+<p>A group remembers how far it has read by <strong>committing offsets</strong>: "for partition 3,
+the next record to read is 42". Kafka stores this in an internal topic. After a restart, the
+consumer continues from the committed offset.</p>
+<div class="compare">
+  <div class="poor"><h4>Commit before processing</h4>
+    <p>The app crashes after the commit but before the work → the record is <strong>skipped
+    forever</strong> (at-most-once).</p></div>
+  <div class="good"><h4>Commit after processing</h4>
+    <p>The app crashes after the work but before the commit → the record is <strong>read
+    again</strong> (at-least-once). Safe if the consumer is idempotent.</p></div>
+</div>
+<p>Spring Kafka turns Kafka's own auto-commit off and commits <strong>after</strong> your listener
+returns without an error. That gives at-least-once, which is what Smart Campus wants.</p>
+<p>If a group has <strong>no</strong> committed offset yet (a brand-new group),
+<code>auto.offset.reset</code> decides where to start: <code>earliest</code> (from the oldest
+record) or <code>latest</code> (only new records, Kafka's default). A read model that must see
+all history wants <code>earliest</code>.</p>
+
+<h3>Rebalancing</h3>
+<p>When a consumer joins, leaves or crashes, the group <strong>rebalances</strong>: partitions are
+handed out again. During a rebalance, the moved partitions pause for a moment, and a record that
+was processed but not yet committed may be read again by the new owner. One more reason to be
+idempotent. Kafka notices a dead consumer when it stops sending heartbeats or stops polling for too
+long, so a listener that blocks for minutes can be kicked out of its group.</p>
+
+<h2 id="retention">6. Retention: how long Kafka keeps records</h2>
+<p>Reading a record does <strong>not</strong> delete it. Kafka deletes old data only by its
+<strong>retention</strong> rules, per topic:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Cleanup policy</th><th>What is kept</th><th>Use</th></tr></thead>
+<tbody>
+<tr><td><code>delete</code> (default)</td><td>Records younger than <code>retention.ms</code> (and under <code>retention.bytes</code>). Older segments are deleted.</td><td>Event history, queues</td></tr>
+<tr><td><code>compact</code></td><td>At least the <strong>latest</strong> record for each key. Older records of the same key are removed.</td><td>"Current value per key" tables</td></tr>
+</tbody></table></div>
+<div class="callout project">
+  <span class="title">Smart Campus: event topics keep everything (spec D5, O5)</span>
+  The event topics use <code>retention.ms=-1</code>: never delete by age. With the full history,
+  a read model like <code>timetable</code> or <code>search</code> can be dropped and rebuilt by
+  reading from offset 0. Compaction was rejected because it loses history per key.
+</div>
+<p>In dev, <code>infra/docker-compose.yml</code> also sets
+<code>KAFKA_LOG_RETENTION_BYTES</code> (about 100 MB per partition) so your laptop disk does not
+fill up. That size cap still deletes old data, so very old dev events can disappear.</p>
+
+<h2 id="broker">7. Our broker: KRaft and topics in code</h2>
+<h3>KRaft</h3>
+<p>Older Kafka needed a second system, ZooKeeper, to store cluster metadata. Modern Kafka uses
+<strong>KRaft</strong>: some Kafka nodes act as <strong>controllers</strong> and keep the metadata
+themselves, using the Raft agreement protocol. Kafka 4 runs only in KRaft mode. In dev, our single
+container is both broker and controller:</p>
+<pre data-file="infra/docker-compose.yml (kafka, part)"><code>kafka:
+  image: apache/kafka:4.4.0
+  environment:
+    KAFKA_PROCESS_ROLES: broker,controller        <span class="c"># one node does both jobs</span>
+    KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+    KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: <span class="s">"false"</span>        <span class="c"># topics come from the apps</span>
+    KAFKA_LOG_RETENTION_BYTES: 104857600          <span class="c"># dev disk cap</span></code></pre>
+<p>Two client <strong>listeners</strong>: apps on your computer use <code>localhost:9092</code>,
+containers in the Compose network use <code>kafka:29092</code>. The broker tells each client
+which address to use next ("advertised" listener), so a wrong value here is a classic "it
+connects, then hangs" bug.</p>
+
+<h3>Topics are declared in code, never auto-created</h3>
+<p>With auto-create on, a typo like <code>cours.events</code> silently creates a new empty topic
+with default settings. So auto-create is <strong>off</strong>, and each producing app declares its
+topics as <code>NewTopic</code> beans. Spring Boot's <code>KafkaAdmin</code> creates any missing
+ones at startup. T7 does this for the probe topic:</p>
+<pre data-file="backend/core-app/src/main/java/edu/campus/platform/internal/OutboxProbeConfiguration.java (part)"><code><span class="k">@Bean</span>
+NewTopic probeTopic() {
+    return TopicBuilder.name(ProbeTopic.NAME)        <span class="c">// "platform.probe"</span>
+            .partitions(ProbeTopic.PARTITIONS)       <span class="c">// 3</span>
+            .replicas(1)                             <span class="c">// one broker in dev</span>
+            .build();
+}</code></pre>
+<p>T12 (planned) does the same for the five real topics, built from <code>Topics</code>, and adds
+unlimited retention:</p>
+<pre data-file="Shape of the T12 code (planned)"><code><span class="k">@Bean</span>
+NewTopic courseEvents() {
+    Topics t = Topics.COURSE_EVENTS;
+    return TopicBuilder.name(t.topicName())
+            .partitions(t.partitions())
+            .config(TopicConfig.RETENTION_MS_CONFIG, <span class="s">"-1"</span>)   <span class="c">// keep forever (D5)</span>
+            .build();
+}</code></pre>
+<p><code>core-app</code> declares <code>course.events</code>, <code>grade.events</code> and
+<code>campus.events</code>; <code>registration-service</code> declares the two registration
+topics. The app that writes a topic owns it.</p>
+
+<h2 id="spring">8. Spring Kafka: sending, listening, errors</h2>
+<h3>Sending: <code>KafkaTemplate</code></h3>
+<pre data-file="Plain Spring Kafka (for understanding)"><code>kafkaTemplate.send(<span class="s">"course.events"</span>, sectionId, json)   <span class="c">// topic, key, value</span>
+        .whenComplete((result, error) -&gt; { … });       <span class="c">// async: a CompletableFuture</span></code></pre>
+<div class="callout warn">
+  <span class="title">In Smart Campus business code, do not call KafkaTemplate yourself</span>
+  Publish with <code>ApplicationEventPublisher.publishEvent(new DomainEvent&lt;&gt;(…))</code>
+  inside your transaction. Spring Modulith saves it in the outbox and calls
+  <code>KafkaTemplate</code> for you after the commit, with the key from <code>Topics</code>
+  (<a href="08-outbox-idempotency.html">lesson 08</a>).
+</div>
+
+<h3>Listening: <code>@KafkaListener</code></h3>
+<pre data-file="Shape of a consumer (planned, T11 builds the first one)"><code>package edu.campus.notification.internal;
+
+<span class="k">@Component</span>
+class ProbeListener {
+
+    private final IdempotentConsumer idempotent;     <span class="c">// from platform-starter (T11)</span>
+
+    ProbeListener(IdempotentConsumer idempotent) {   <span class="c">// constructor injection</span>
+        this.idempotent = idempotent;
+    }
+
+    <span class="k">@KafkaListener</span>(topics = <span class="s">"platform.probe"</span>, groupId = <span class="s">"notification-probe"</span>)
+    void on(ConsumerRecord&lt;String, String&gt; record) {
+        <span class="c">// parse the envelope, then: insert processed_events + side effect, in ONE transaction</span>
+    }
+}</code></pre>
+<p>Spring creates a <strong>listener container</strong> for each <code>@KafkaListener</code>. The
+container polls Kafka in a loop, calls your method for each record, and commits the offset when the
+method returns. If the method throws, the container's <strong>error handler</strong> decides what
+happens. (The group id above is an example; the T11 task decides the real one.)</p>
+
+<h3>Errors: retry, then dead-letter</h3>
+<p>Spring Kafka's <code>DefaultErrorHandler</code> retries a failed record a few times. Its default
+is <code>FixedBackOff(0, 9)</code>: no pause and 9 retries, so 10 attempts in all. Then it logs the
+record and moves on. You can give it a back-off and a <strong>recoverer</strong>:</p>
+<pre data-file="Example (not in the repo yet)"><code><span class="k">@Bean</span>
+DefaultErrorHandler kafkaErrorHandler(KafkaTemplate&lt;Object, Object&gt; template) {
+    var deadLetter = new DeadLetterPublishingRecoverer(template);   <span class="c">// sends to "&lt;topic&gt;-dlt"</span>
+    return new DefaultErrorHandler(deadLetter, new FixedBackOff(1_000L, 2L)); <span class="c">// 3 tries, 1 s apart</span>
+}</code></pre>
+<p>A <strong>dead-letter topic</strong> (DLT) is a parking place for records that keep failing (a
+"poison message", for example bad JSON). Without it, one bad record could block its partition
+forever, or be dropped with only a log line. By default Spring Kafka names it
+<code>&lt;original topic&gt;-dlt</code>, same partition number. Remember: our broker does not
+auto-create topics, so a DLT must be declared as a <code>NewTopic</code> too, with at least as many
+partitions as the original. Smart Campus has not decided its DLT setup yet; it comes with the first
+real consumers.</p>
+<div class="callout tip">
+  <span class="title">Retry only what can succeed later</span>
+  A database that is briefly down: retry. A payload that cannot be parsed: retrying 10 times gives
+  the same error 10 times. Spring Kafka lets you mark exception types as "not retryable" so they go
+  straight to the recoverer.
+</div>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Topics, partitions, keys, replayable flag</td><td><code>backend/shared-kernel/src/main/java/edu/campus/kernel/event/Topics.java</code></td><td>T5</td></tr>
+<tr><td>Table test for the topic list</td><td><code>backend/shared-kernel/src/test/java/edu/campus/kernel/event/TopicsTest.java</code></td><td>T5</td></tr>
+<tr><td>Broker (KRaft, listeners, auto-create off)</td><td><code>infra/docker-compose.yml</code> service <code>kafka</code></td><td>T3</td></tr>
+<tr><td>Producer settings (<code>acks: all</code>, serializers)</td><td><code>backend/platform-starter/src/main/resources/campus-platform-defaults.yml</code></td><td>T7, T8</td></tr>
+<tr><td>First topic in code + routing with a key</td><td><code>core-app/…/platform/internal/OutboxProbeConfiguration.java</code>, <code>ProbeTopic.java</code></td><td>T7</td></tr>
+<tr><td>Test helper that reads a whole topic</td><td><code>backend/core-app/src/test/java/edu/campus/KafkaTestConsumer.java</code></td><td>T7</td></tr>
+<tr><td>First <code>@KafkaListener</code> + idempotent consumer</td><td><code>notification-service</code> (planned)</td><td>T11</td></tr>
+<tr><td>The 5 real topics, retention, keys, replay script</td><td><code>TopicConfig</code>, <code>TopicsIT</code>, <code>infra/replay.sh</code> (planned)</td><td>T12</td></tr>
+<tr><td>Trace context in headers</td><td>OpenTelemetry agent (planned)</td><td>T16</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Expecting global order.</strong> Kafka orders per partition only. If two records must
+      stay in order, they must have the same key.</li>
+  <li><strong>Sending without a key.</strong> The record lands on any partition. In Smart Campus a
+      missing key throws on purpose (D6).</li>
+  <li><strong>Doing slow work inside the listener for minutes.</strong> The consumer looks dead, the
+      group rebalances, and records are read twice.</li>
+  <li><strong>Thinking "read = deleted".</strong> Records stay until retention removes them. Other
+      groups, and replays, read them again.</li>
+  <li><strong>Reusing one group id for two different jobs.</strong> They would share the partitions
+      and each would see only part of the records.</li>
+  <li><strong>Swallowing every exception in the listener.</strong> Then failed records are committed
+      as "done". Let real failures reach the error handler.</li>
+  <li><strong>Using <code>localhost:9092</code> from inside a container.</strong> Containers use
+      <code>kafka:29092</code>.</li>
+</ul>
+
+<h2 id="practice">11. Practice with the CLI tools</h2>
+<p>The <code>apache/kafka</code> image has Kafka's command-line tools in
+<code>/opt/kafka/bin/</code> (our Compose healthcheck uses one of them). Run them inside the
+container with <code>docker compose exec</code>.</p>
+<ol class="steps">
+  <li><p>Start the infrastructure and list the topics:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+docker compose -f infra/docker-compose.yml exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list</code></pre></li>
+  <li><p>Start core-app in dev (it declares <code>platform.probe</code>), then describe the topic.
+      Look at the partition count and the leader of each partition:</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app spring-boot:run
+docker compose -f infra/docker-compose.yml exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic platform.probe</code></pre></li>
+  <li><p>Watch records arrive, with keys and headers. Then create a probe in another terminal:</p>
+<pre><code>docker compose -f infra/docker-compose.yml exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic platform.probe --from-beginning --property print.key=true --property print.headers=true
+curl.exe -X POST "http://localhost:8081/api/v1/platform/outbox-probe?note=hello"</code></pre>
+      <p>Create three probes. Do they always land in the same partition? Why not?</p></li>
+  <li><p>See consumer groups and their lag (how far behind they are):</p>
+<pre><code>docker compose -f infra/docker-compose.yml exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list
+docker compose -f infra/docker-compose.yml exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group &lt;group&gt;</code></pre>
+      <p>The console consumer makes its own temporary group, so you will see something even before T11.</p></li>
+  <li><p>Reset a group to the start (this is the heart of <code>replay.sh</code>, T12). The group
+      must have <strong>no running consumers</strong>. Without <code>--execute</code> it only prints
+      a plan (a "dry run"):</p>
+<pre><code>docker compose -f infra/docker-compose.yml exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group &lt;group&gt; --topic platform.probe --reset-offsets --to-earliest
+# add --execute to really do it</code></pre></li>
+  <li><p>Read <code>KafkaTestConsumer</code> in core-app's tests. It uses <code>assign</code> instead
+      of a group. Why is that better for a test that counts records?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Broker</td><td>A Kafka server that stores records.</td></tr>
+<tr><td>Topic</td><td>A named stream of records.</td></tr>
+<tr><td>Partition</td><td>One ordered, append-only slice of a topic.</td></tr>
+<tr><td>Offset</td><td>The number of a record inside its partition.</td></tr>
+<tr><td>Key</td><td>Picks the partition, so it decides what stays in order.</td></tr>
+<tr><td>Header</td><td>Small technical extra data on a record (e.g. trace id).</td></tr>
+<tr><td>Producer / consumer</td><td>The client that writes / reads records.</td></tr>
+<tr><td>Consumer group</td><td>Consumers sharing one job; each partition goes to one of them.</td></tr>
+<tr><td>Commit</td><td>Saving "my group has read up to here".</td></tr>
+<tr><td>Lag</td><td>How many records a group still has to read.</td></tr>
+<tr><td>Rebalance</td><td>Handing out partitions again when group members change.</td></tr>
+<tr><td>Retention</td><td>The rule for when Kafka deletes old records.</td></tr>
+<tr><td>Compaction</td><td>Keeping only the newest record per key.</td></tr>
+<tr><td>KRaft</td><td>Kafka's built-in metadata system; replaces ZooKeeper.</td></tr>
+<tr><td>Dead-letter topic (DLT)</td><td>A topic for records that failed too many times.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why is <code>registration.events</code> keyed by <code>studentId</code> and not by <code>sectionId</code>?</summary>
+    <p>Consumers care about one student's history in order ("enrolled" before "dropped"). The same
+    key puts all of one student's events in one partition, and Kafka keeps order only inside a
+    partition.</p></details>
+  <details><summary>2. <code>registration.requests</code> has 12 partitions. Why would a 13th worker in the same group not help?</summary>
+    <p>Each partition is read by exactly one consumer of a group. 12 partitions can keep at most 12
+    consumers busy; the 13th gets no partition and waits.</p></details>
+  <details><summary>3. Why does Spring Kafka commit offsets after the listener returns, not before?</summary>
+    <p>If the app crashes in the middle, the record is read again (at-least-once) instead of being
+    lost. Duplicates can be handled by an idempotent consumer; lost records cannot be fixed.</p></details>
+  <details><summary>4. Why do our event topics use <code>retention.ms=-1</code> and not compaction?</summary>
+    <p>Read models must be rebuilt from the full history (replay). Compaction keeps only the newest
+    record per key and would lose the history.</p></details>
+  <details><summary>5. Why is topic auto-create turned off?</summary>
+    <p>A typo would silently create a wrong topic with default partitions and retention, and events
+    would go nowhere useful. Declaring topics in code makes the settings reviewed and repeatable.</p></details>
+  <details><summary>6. The producer has idempotence on. Why can a consumer still see the same event twice?</summary>
+    <p>Idempotence only removes repeats of the same producer batch. When the outbox gives up and sends
+    the event again later, it is a new send. Rebalances can also cause a re-read. So the consumer must
+    dedupe by <code>eventId</code> (lesson 08).</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://kafka.apache.org/documentation/#introduction">Apache Kafka docs: Introduction</a>: topics, partitions, consumer groups.</li>
+  <li><a href="https://kafka.apache.org/documentation/#producerconfigs">Apache Kafka docs: Producer configs</a> and <a href="https://kafka.apache.org/documentation/#consumerconfigs">Consumer configs</a>.</li>
+  <li><a href="https://kafka.apache.org/documentation/#topicconfigs">Apache Kafka docs: Topic configs</a>: <code>retention.ms</code>, <code>cleanup.policy</code>.</li>
+  <li><a href="https://kafka.apache.org/documentation/#kraft">Apache Kafka docs: KRaft</a>.</li>
+  <li><a href="https://docs.spring.io/spring-kafka/reference/">Spring for Apache Kafka reference</a>: <code>KafkaTemplate</code>, <code>@KafkaListener</code>, error handling and dead-letter publishing.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/messaging/kafka.html">Spring Boot reference: Apache Kafka support</a>: <code>spring.kafka.*</code> settings and <code>KafkaAdmin</code>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

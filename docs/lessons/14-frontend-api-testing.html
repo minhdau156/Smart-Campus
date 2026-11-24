@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frontend Data and Tests</title>
+<meta name="description" content="Smart Campus lesson 14: fetch, TanStack Query, generated API types from OpenAPI, the problem-JSON client, Vitest with Testing Library, ESLint and Prettier.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="14">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 14 · Part 1: Foundations</div>
+<h1>Frontend data, generated types and tests</h1>
+<p class="lede">The website must talk to the backend without guessing what the JSON looks like,
+must show clear messages when something fails, and must be tested. This lesson connects the
+backend's OpenAPI file to typed React screens, and shows how to test them.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module's screens</span>
+  <span class="badge task">T9 (done)</span>
+  <span class="badge task">T19</span>
+  <span class="badge task">T20</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core skill</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="13-typescript-react.html">13 (TypeScript, React, Vite)</a> and
+  <a href="09-rest-problem-openapi.html">09 (REST, problem JSON and OpenAPI)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#fetch"><code>fetch</code> and <code>async</code>/<code>await</code></a></li>
+    <li><a href="#generated">Types generated from OpenAPI</a></li>
+    <li><a href="#client">The problem-JSON client</a></li>
+    <li><a href="#query">TanStack Query: reading data</a></li>
+    <li><a href="#mutation">TanStack Query: changing data</a></li>
+    <li><a href="#vitest">Vitest and Testing Library</a></li>
+    <li><a href="#lint">ESLint, Prettier and the "up to date" check</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>The backend and the frontend are written in two languages (Java and TypeScript). If a backend
+developer renames <code>seatsLeft</code> to <code>availableSeats</code>, a hand-written frontend
+type is now wrong, and nobody notices until a student sees an empty page. Smart Campus closes this
+gap with a chain of generated files:</p>
+<div class="flow">
+  <div class="box project"><b>Java controller</b><code>record Ping(String app, …)</code></div>
+  <div class="arrow">→</div>
+  <div class="box"><b>OpenAPI JSON</b><code>docs/api/core-app-platform.json</code><br>(T9, exists)</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>TS types</b><code>src/shared/api/generated/</code><br>(T19.5, planned)</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>Screens</b>compile errors if the shape changed</div>
+</div>
+<p>A change in the backend now breaks the <em>frontend build</em>, not the student's page. T19
+also writes one shared client that turns every error into a typed <code>ProblemError</code>, so all
+14 modules show errors the same way. This closes spec criteria <strong>P2</strong> (lint, test,
+build pass) and the frontend part of <strong>A1</strong>.</p>
+
+<h2 id="fetch">2. <code>fetch</code> and <code>async</code>/<code>await</code></h2>
+<p><code>fetch</code> is the browser's built-in function for HTTP calls. It returns a
+<strong>Promise</strong>: an object that says "the answer will come later". <code>await</code> waits
+for it, inside a function marked <code>async</code>. Like ordering at a café: you get a ticket
+(the Promise), and you wait for your number (<code>await</code>).</p>
+<pre data-file="A raw fetch call"><code>async function loadPing(): Promise&lt;unknown&gt; {
+  const res = await fetch("/api/v1/platform/ping", {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {                              <span class="c">// res.ok = status 200–299</span>
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.json();                          <span class="c">// also a Promise: reading the body takes time</span>
+}</code></pre>
+<div class="callout warn">
+  <span class="title">The big fetch surprise</span>
+  <code>fetch</code> does <strong>not</strong> throw for 404, 409 or 500. It only throws when the
+  network fails (server down, no internet). You must check <code>res.ok</code> or
+  <code>res.status</code> yourself. Forgetting this is the most common bug in API code.
+</div>
+<p>Also note <code>Promise&lt;unknown&gt;</code>: <code>res.json()</code> can return anything. The next
+section makes it typed.</p>
+
+<h2 id="generated">3. Types generated from OpenAPI</h2>
+<p>Since T9, a test exports the core-app OpenAPI document to <code>docs/api/</code>, sorted and
+stable, and the normal build fails if the committed file is out of date. Here is part of the real
+file:</p>
+<pre data-file="docs/api/core-app-platform.json (part, real)"><code>"paths" : {
+  "/api/v1/platform/ping" : {
+    "get" : {
+      "operationId" : "ping",
+      "responses" : {
+        "200" : { "content" : { "application/json" : {
+                    "schema" : { "$ref" : "#/components/schemas/Ping" } } } },
+        "default" : { "content" : { "application/problem+json" : {
+                    "schema" : { "$ref" : "#/components/schemas/Problem" } } } }
+…
+"Problem" : {
+  "required" : [ "code", "detail", "status", "title", "traceId", "type" ], …</code></pre>
+<p><strong>openapi-typescript</strong> is a command-line tool that reads this file and writes a
+<code>.ts</code> file with only <em>types</em> (no runtime code, so it adds nothing to the bundle).
+T19.5 adds it as the <code>gen:api</code> script:</p>
+<pre data-file="frontend/web/package.json (planned in T19.5, sketch)"><code>"scripts": {
+  "gen:api": "openapi-typescript ../../docs/api/core-app-platform.json -o src/shared/api/generated/core-app-platform.ts"
+}</code></pre>
+<p>When more apps and modules export their own JSON files, the script will cover all of
+<code>docs/api/*.json</code> (T19.5 decides how: one command per file, or a small loop). The output
+looks roughly like this (shortened):</p>
+<pre data-file="src/shared/api/generated/core-app-platform.ts (generated, do not edit; shortened)"><code>export interface paths {
+  "/api/v1/platform/ping": {
+    get: operations["ping"];
+  };
+}
+export interface components {
+  schemas: {
+    Ping: {
+      app?: string;
+      <span class="c">/** Format: date-time */</span>
+      time?: string;
+      version?: string;
+    };
+    Problem: {
+      code: string;
+      detail: string;
+      errors?: components["schemas"]["FieldError"][];
+      status: number;
+      title: string;
+      traceId: string;
+      type: string;
+    };
+  };
+}</code></pre>
+<p>Look closely: <code>Ping</code>'s fields are optional (<code>?</code>) because the Java record does
+not mark them as required, while <code>Problem</code>'s fields are required because T9 listed them
+in <code>required</code>. The generated types tell the truth about the contract, so a good backend
+contract gives a good frontend type. Also, <code>time</code> is a <code>string</code>: JSON has no
+date type; you convert it with <code>new Date(time)</code> where you need it.</p>
+<p>You use the types by indexing into them:</p>
+<pre data-file="Picking types out of the generated file"><code>import type { components } from "./generated/core-app-platform";
+
+export type Ping = components["schemas"]["Ping"];
+export type Problem = components["schemas"]["Problem"];</code></pre>
+
+<h2 id="client">4. The problem-JSON client (T19.6)</h2>
+<p>Every error from every Smart Campus app is RFC 7807 <strong>problem JSON</strong> with content
+type <code>application/problem+json</code> and our extra fields <code>code</code> and
+<code>traceId</code> (<a href="09-rest-problem-openapi.html">lesson 09</a>). T19.6 writes
+<code>src/shared/api/http.ts</code>: a small wrapper around <code>fetch</code>, typed by the generated
+<code>paths</code>, that turns any problem response into a <code>ProblemError</code> with
+<code>code</code>, <code>traceId</code> and, for 429, <code>retryAfter</code>. The task does not add
+a fetch library; it is our own small file. A sketch of the idea:</p>
+<pre data-file="frontend/web/src/shared/api/http.ts (planned in T19.6, sketch)"><code>import type { components, paths } from "./generated/core-app-platform";
+
+type Problem = components["schemas"]["Problem"];
+
+export class ProblemError extends Error {
+  readonly status: number;
+  readonly code: string;                     <span class="c">// "NOT_FOUND", "RATE_LIMITED", …</span>
+  readonly traceId: string | undefined;
+  readonly retryAfter: number | undefined;   <span class="c">// seconds, from the Retry-After header (429)</span>
+
+  constructor(status: number, problem: Partial&lt;Problem&gt;, retryAfter?: number) {
+    super(problem.detail ?? `HTTP ${status}`);
+    this.name = "ProblemError";
+    this.status = status;
+    this.code = problem.code ?? "UNKNOWN";   <span class="c">// e.g. an HTML error page from a proxy</span>
+    this.traceId = problem.traceId;
+    this.retryAfter = retryAfter;
+  }
+}
+
+async function toProblemError(res: Response): Promise&lt;ProblemError&gt; {
+  const isProblem = res.headers.get("Content-Type")?.includes("application/problem+json");
+  const body: unknown = isProblem ? await res.json() : {};
+  const header = res.headers.get("Retry-After");
+  const retryAfter = header !== null &amp;&amp; /^\d+$/.test(header) ? Number(header) : undefined;
+  return new ProblemError(res.status, body as Partial&lt;Problem&gt;, retryAfter);
+}
+
+<span class="c">// The JSON type of a GET path's 200 answer, read from the generated paths.</span>
+type GetJson&lt;P extends keyof paths&gt; = paths[P] extends {
+  get: { responses: { 200: { content: { "application/json": infer Body } } } };
+} ? Body : never;
+
+export async function get&lt;P extends keyof paths&gt;(path: P): Promise&lt;GetJson&lt;P&gt;&gt; {
+  const res = await fetch(path, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw await toProblemError(res);
+  return (await res.json()) as GetJson&lt;P&gt;;
+}</code></pre>
+<p>Three things are worth understanding here:</p>
+<ul>
+  <li><code>P extends keyof paths</code> means the <strong>path string itself is checked</strong>.
+      <code>get("/api/v1/platform/pong")</code> is a compile error, because that path is not in the
+      OpenAPI file. <code>get("/api/v1/platform/ping")</code> returns <code>Promise&lt;Ping&gt;</code>
+      with no type written by hand. (Paths with <code>{id}</code> parameters need a bit more work;
+      T19 starts with what ping needs.)</li>
+  <li><code>infer Body</code> is TypeScript "pattern matching" on a type: "if it has this shape,
+      give me the part called <code>Body</code>". You will rarely write this yourself; it lives in
+      one shared file.</li>
+  <li>The <code>Retry-After</code> header may be a number of seconds or an HTTP date. Our gateway
+      limiter answers 429 (spec R1); the sketch only accepts whole seconds and ignores anything else.</li>
+</ul>
+
+<h3>Showing messages by <code>code</code></h3>
+<p>The rule from the backend is: <strong>switch on <code>code</code>, never on the message text</strong>.
+<code>detail</code> is for humans and can change; <code>code</code> is a stable contract
+(<code>ProblemCode</code> in <code>shared-kernel</code>: <code>INTERNAL_ERROR</code>,
+<code>VALIDATION_FAILED</code>, <code>NOT_FOUND</code>, <code>CONFLICT</code>,
+<code>RATE_LIMITED</code>; later modules add codes such as <code>SECTION_FULL</code>).</p>
+<pre data-file="src/shared/api/problem-message.tsx (example)"><code>import { ProblemError } from "./http";
+
+export function problemText(error: unknown): string {
+  if (!(error instanceof ProblemError)) return "Network problem. Check your connection.";
+  switch (error.code) {
+    case "NOT_FOUND":
+      return "We could not find this.";
+    case "VALIDATION_FAILED":
+      return "Please check the highlighted fields.";
+    case "RATE_LIMITED":
+      return `Too many requests. Try again in ${error.retryAfter ?? 1} s.`;
+    default:
+      return `Something went wrong. Please quote this id: ${error.traceId ?? "n/a"}`;
+  }
+}
+
+export function ProblemMessage({ error }: { error: unknown }) {
+  return &lt;p role="alert"&gt;{problemText(error)}&lt;/p&gt;;
+}</code></pre>
+<p>Showing the <code>traceId</code> matters: a student can send it to support, and a developer finds
+the exact trace and logs in Grafana (<a href="12-observability.html">lesson 12</a>). When the
+<code>shell</code> module adds vi/en translations, these texts move into translation files, keyed by
+the same codes.</p>
+
+<h2 id="query">5. TanStack Query: reading data</h2>
+<p><strong>TanStack Query</strong> (formerly "React Query") manages <strong>server state</strong>:
+data that lives on the server and that the page shows a copy of. It handles loading and error
+states, caching, retries, refresh, and removes duplicate requests. It is part of the Smart Campus
+frontend stack (Architecture and Capability Map). T19 itself does not list it as a subtask; it
+comes in with the first screens that load data. Examples below use the v5 API; check the docs for
+the version that gets pinned.</p>
+<pre data-file="Setup, once, in src/main.tsx (sketch)"><code>import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ProblemError } from "./shared/api/http";
+import { App } from "./shell/app";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,          <span class="c">// data counts as fresh for 30 s: no refetch in that time</span>
+      retry: (failures, error) =&gt;  <span class="c">// retry network/5xx errors, never 4xx</span>
+        !(error instanceof ProblemError &amp;&amp; error.status &lt; 500) &amp;&amp; failures &lt; 2,
+    },
+  },
+});
+
+createRoot(document.getElementById("root")!).render(
+  &lt;QueryClientProvider client={queryClient}&gt;
+    &lt;App /&gt;
+  &lt;/QueryClientProvider&gt;,
+);</code></pre>
+
+<pre data-file="src/shell/ping-status.tsx (example)"><code>import { useQuery } from "@tanstack/react-query";
+import { get } from "../shared/api/http";
+import { ProblemMessage } from "../shared/api/problem-message";
+
+export function usePing() {
+  return useQuery({
+    queryKey: ["platform", "ping"],                     <span class="c">// the cache key</span>
+    queryFn: () =&gt; get("/api/v1/platform/ping"),        <span class="c">// how to load it</span>
+  });
+}
+
+export function PingStatus() {
+  const ping = usePing();
+  if (ping.isPending) return &lt;p&gt;Checking the server…&lt;/p&gt;;
+  if (ping.isError) return &lt;ProblemMessage error={ping.error} /&gt;;
+  return &lt;p&gt;{ping.data.app} {ping.data.version} is up&lt;/p&gt;;   <span class="c">// data is Ping here</span>
+}</code></pre>
+<ul>
+  <li><strong>Query key</strong>: an array that names the data, like a label on a box in the cache.
+      Put every input into it: <code>["course", "sections", { semester, page }]</code>. Two components
+      with the same key share one request and one cache entry.</li>
+  <li><strong>Loading and error states</strong>: check <code>isPending</code> and <code>isError</code>
+      first. After those checks, TS knows <code>data</code> is defined. Always show something for all
+      three states.</li>
+  <li><strong><code>staleTime</code></strong>: how long data is "fresh". Fresh data is shown
+      without asking the server. Stale data is still shown at once, then refreshed in the background.
+      A course list can be fresh for minutes; seat counts during the registration rush much less.</li>
+</ul>
+<p>Put each <code>useQuery</code> in a small custom hook (<code>usePing</code>,
+<code>useSections</code>) inside the module folder. Screens then never see URLs or keys.</p>
+
+<h2 id="mutation">6. TanStack Query: changing data</h2>
+<p>Reading is a <em>query</em>. Creating, updating or deleting is a <strong>mutation</strong>. After a
+change on the server, the cached lists are old, so you <strong>invalidate</strong> them: mark them
+stale so they are fetched again.</p>
+<pre data-file="A future lostfound screen (example; the endpoint does not exist yet)"><code>import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+export function useCreateReport() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    <span class="c">// post(): a sibling of get() in http.ts for POST requests (not shown)</span>
+    mutationFn: (title: string) =&gt; post("/api/v1/lostfound/reports", { title }),
+    onSuccess: () =&gt; {
+      <span class="c">// every query whose key STARTS with ["lostfound", "reports"] is refetched</span>
+      return queryClient.invalidateQueries({ queryKey: ["lostfound", "reports"] });
+    },
+  });
+}
+
+export function NewReport() {
+  const create = useCreateReport();
+  return (
+    &lt;&gt;
+      &lt;ReportForm onSubmit={(title) =&gt; create.mutate(title)} /&gt;
+      {create.isPending &amp;&amp; &lt;p&gt;Saving…&lt;/p&gt;}
+      {create.isError &amp;&amp; &lt;ProblemMessage error={create.error} /&gt;}
+    &lt;/&gt;
+  );
+}</code></pre>
+<div class="compare">
+  <div class="poor"><h4>Copying server data into <code>useState</code></h4>
+    <p>Load once, store in state, update by hand after each change. Two screens soon show different
+    numbers.</p></div>
+  <div class="good"><h4>Let the cache own server data</h4>
+    <p><code>useQuery</code> to read, <code>useMutation</code> + <code>invalidateQueries</code> to
+    change. <code>useState</code> is only for UI state (open/closed, text being typed).</p></div>
+</div>
+<p>Hierarchical keys make invalidation easy: <code>["registration"]</code> would refresh everything of
+that module, <code>["registration", "enrollments", studentId]</code> only one student's list.</p>
+
+<h2 id="vitest">7. Vitest and Testing Library</h2>
+<p><strong>Vitest</strong> is the test runner. It uses the same config and transforms as Vite, so
+TypeScript and JSX work with no extra setup. <strong>jsdom</strong> is a fake browser in Node, so
+components can render without opening Chrome. T19.3 sets both up:</p>
+<pre data-file="frontend/web/vite.config.ts, test part (planned in T19.3, sketch)"><code>test: {
+  environment: "jsdom",
+  setupFiles: ["./src/test-setup.ts"],   <span class="c">// e.g. extra matchers like toBeDisabled()</span>
+},</code></pre>
+<p>Tests live next to the code: <code>http.ts</code> → <code>http.test.ts</code>,
+<code>report-form.tsx</code> → <code>report-form.test.tsx</code> (spec: <code>src/**/*.test.tsx</code>).</p>
+
+<h3>Testing the client (T19.6: "unit-test a 409 and a 429")</h3>
+<pre data-file="src/shared/api/http.test.ts (sketch)"><code>import { afterEach, expect, it, vi } from "vitest";
+import { get, ProblemError } from "./http";
+
+function problem(status: number, body: object, headers: Record&lt;string, string&gt; = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/problem+json", ...headers },
+  });
+}
+
+afterEach(() =&gt; vi.unstubAllGlobals());
+
+it("turns a 409 into a ProblemError with code and traceId", async () =&gt; {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(problem(409, {
+    type: "https://campus.edu/problems/conflict", title: "Conflict", status: 409,
+    detail: "Section S1 has no seats left", code: "CONFLICT", traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+  })));
+
+  const error = await get("/api/v1/platform/ping").catch((e: unknown) =&gt; e);
+
+  expect(error).toBeInstanceOf(ProblemError);
+  expect(error).toMatchObject({ status: 409, code: "CONFLICT", traceId: "4bf92f3577b34da6a3ce929d0e0e4736" });
+});
+
+it("reads Retry-After on a 429", async () =&gt; {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+    problem(429, { code: "RATE_LIMITED", status: 429 }, { "Retry-After": "3" })));
+
+  await expect(get("/api/v1/platform/ping")).rejects.toMatchObject({ code: "RATE_LIMITED", retryAfter: 3 });
+});</code></pre>
+<p><code>vi.stubGlobal</code> replaces the global <code>fetch</code> with a fake for this test, and
+<code>vi.unstubAllGlobals</code> puts the real one back. No server, no network: the test is fast and
+always gives the same result.</p>
+
+<h3>Testing a component like a user</h3>
+<p><strong>Testing Library</strong> has one idea: <em>test what the user sees and does, not the
+inside of the component</em>. You find elements the way a user (or a screen reader) would: by
+<strong>role</strong> and <strong>accessible name</strong>.</p>
+<pre data-file="src/modules/lostfound/report-form.test.tsx (sketch)"><code>import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { expect, it, vi } from "vitest";
+import { ReportForm } from "./report-form";
+
+it("sends the trimmed title when the user submits", async () =&gt; {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn();
+  render(&lt;ReportForm onSubmit={onSubmit} /&gt;);
+
+  const button = screen.getByRole("button", { name: "Report" });
+  expect(button).toBeDisabled();
+
+  await user.type(screen.getByRole("textbox", { name: /what did you lose/i }), "  Blue umbrella ");
+  await user.click(button);
+
+  expect(onSubmit).toHaveBeenCalledWith("Blue umbrella");
+});</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Query</th><th>When nothing matches</th><th>Use it for</th></tr></thead>
+<tbody>
+<tr><td><code>getByRole(…)</code></td><td>throws at once</td><td>Things that must be there now (first choice)</td></tr>
+<tr><td><code>findByRole(…)</code></td><td>waits, then throws (returns a Promise)</td><td>Things that appear later, e.g. after a query loads</td></tr>
+<tr><td><code>queryByRole(…)</code></td><td>returns <code>null</code></td><td>Checking that something is <em>not</em> there</td></tr>
+</tbody></table></div>
+<p>Prefer <code>ByRole</code>, then <code>ByLabelText</code>, then <code>ByText</code>. Use
+<code>data-testid</code> only as a last resort. A test that finds a button by role also checks that
+the button is accessible. <code>user-event</code> types and clicks like a real user (focus, key
+presses), which is closer to reality than firing one raw event. <code>toBeDisabled()</code> comes
+from <code>@testing-library/jest-dom</code>, loaded in the setup file (check its docs for the Vitest
+import).</p>
+
+<h3>Components that use TanStack Query</h3>
+<p>Give each test its own fresh <code>QueryClient</code> with <code>retry: false</code>, so tests do
+not share a cache and errors appear at once:</p>
+<pre data-file="A small test helper (sketch)"><code>import type { ReactElement } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+
+export function renderWithQuery(ui: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(&lt;QueryClientProvider client={client}&gt;{ui}&lt;/QueryClientProvider&gt;);
+}
+
+it("shows the app name from ping", async () =&gt; {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ app: "core-app", version: "0.1.0" })));
+  renderWithQuery(&lt;PingStatus /&gt;);
+  expect(await screen.findByText(/core-app 0\.1\.0 is up/)).toBeInTheDocument();
+});</code></pre>
+
+<h2 id="lint">8. ESLint, Prettier and the "up to date" check</h2>
+<div class="compare">
+  <div class="good"><h4>ESLint: finds bugs</h4>
+    <p>Hooks called inside an <code>if</code>, missing effect dependencies, unused variables,
+    <code>any</code> (via typescript-eslint). <code>npm run lint</code>.</p></div>
+  <div class="good"><h4>Prettier: formats</h4>
+    <p>Spaces, quotes, line breaks. No discussions about style in reviews.
+    <code>npm run format</code>. Like Spotless on the Java side.</p></div>
+</div>
+<p>They must not fight: ESLint's style rules are switched off (commonly with
+<code>eslint-config-prettier</code>) and Prettier owns formatting. The generated folder is
+<strong>excluded</strong> from linting (T19.5): it is not our code and we never edit it.</p>
+<pre data-file="frontend/web/eslint.config.js (part, sketch)"><code>export default [
+  { ignores: ["dist", "src/shared/api/generated"] },
+  <span class="c">// … typescript-eslint, react-hooks, prettier configs …</span>
+];</code></pre>
+
+<h3>Proving the generated files are up to date</h3>
+<p>A generated file in Git can go stale: someone changes a controller, exports the JSON, but forgets
+<code>gen:api</code>. CI (T20) catches this in two steps, one per side:</p>
+<pre data-file=".github/workflows/ci.yml (planned in T20, part)"><code><span class="c"># backend job (T20.2)</span>
+- run: ./mvnw verify -Pexport-openapi
+- run: git diff --exit-code docs/api
+
+<span class="c"># frontend job (T20.3)</span>
+- run: npm --prefix frontend/web ci
+- run: npm --prefix frontend/web run gen:api
+- run: git diff --exit-code</code></pre>
+<p><code>git diff --exit-code</code> prints the differences and exits with code 1 if there are any.
+A non-zero exit code fails the CI step. So the rule is simple: <strong>regenerate, then the working
+tree must be unchanged</strong>. If it changed, the committed file was stale, and the PR is red
+until you run the command and commit the result. (The backend side is already checked in every
+normal build since T9: <code>OpenApiExportIT</code> compares the export with the committed file.)</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>OpenAPI JSON (source of the types)</td><td><code>docs/api/core-app-platform.json</code> (exists)</td><td>T9</td></tr>
+<tr><td>Export + "is it stale?" check, backend</td><td><code>backend/core-app/src/test/java/edu/campus/OpenApiExportIT.java</code> (exists)</td><td>T9</td></tr>
+<tr><td><code>Problem</code> schema in the docs</td><td><code>backend/platform-starter/.../starter/openapi/ProblemSchemaCustomizer.java</code> (exists)</td><td>T9</td></tr>
+<tr><td>Error codes</td><td><code>backend/shared-kernel/.../kernel/error/ProblemCode.java</code> (exists)</td><td>T4</td></tr>
+<tr><td><code>gen:api</code> script, generated types</td><td><code>frontend/web/package.json</code>, <code>src/shared/api/generated/</code> (planned)</td><td>T19.5</td></tr>
+<tr><td>Fetch client + <code>ProblemError</code> + tests</td><td><code>frontend/web/src/shared/api/http.ts</code>, <code>http.test.ts</code> (planned)</td><td>T19.6</td></tr>
+<tr><td>Vitest + Testing Library, ESLint + Prettier</td><td><code>frontend/web/</code> config (planned)</td><td>T19.2, T19.3</td></tr>
+<tr><td>Home page shows ping</td><td><code>frontend/web/src/main.tsx</code> (planned)</td><td>T19.7</td></tr>
+<tr><td>CI "types up to date" check</td><td><code>.github/workflows/ci.yml</code> (planned)</td><td>T20.2, T20.3</td></tr>
+<tr><td>TanStack Query hooks per module</td><td><code>frontend/web/src/modules/&lt;id&gt;/</code></td><td>modules 3–14</td></tr>
+</tbody></table></div>
+<p>The learning note <a href="../learn/platform/task9.md">docs/learn/platform/task9.md</a> explains
+how the OpenAPI export works on the backend side.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Not checking <code>res.ok</code>.</strong> <code>fetch</code> does not throw for 4xx/5xx.
+      Always go through <code>http.ts</code>.</li>
+  <li><strong>Writing API types by hand.</strong> They drift from the backend. Use the generated
+      ones; if a type is wrong, fix the Java side (for example mark a field as required) and
+      regenerate.</li>
+  <li><strong>Editing generated files.</strong> Your change is overwritten and CI fails.</li>
+  <li><strong>Showing <code>detail</code> or matching on message text.</strong> Use
+      <code>code</code> for logic and translations.</li>
+  <li><strong>Forgetting an input in the query key.</strong> Page 2 then shows page 1's cached
+      data.</li>
+  <li><strong>Forgetting to invalidate after a mutation.</strong> The list still shows old data.</li>
+  <li><strong>Retrying 4xx errors.</strong> A 409 or 404 will not fix itself; retrying only adds load
+      (and a 429 makes the rate limit worse).</li>
+  <li><strong>Testing implementation details</strong> (state values, CSS classes) instead of what the
+      user sees. Such tests break on every refactor.</li>
+  <li><strong>Calling the real backend in unit tests.</strong> Stub <code>fetch</code>; tests must run
+      without Docker.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Open <code>docs/api/core-app-platform.json</code>. Find the <code>Ping</code> and
+      <code>Problem</code> schemas. Which fields are required? Predict which fields will get a
+      <code>?</code> in TypeScript.</p></li>
+  <li><p>In a scratch folder, generate types from the real file and read the output (versions are not
+      pinned here; this is only practice):</p>
+<pre><code>npx openapi-typescript "C:/Smart Campus/docs/api/core-app-platform.json" -o core-app-platform.ts</code></pre></li>
+  <li><p>Write a <code>problemText</code> test for each of the five <code>ProblemCode</code> values.
+      What should the user see for <code>INTERNAL_ERROR</code>, and why must the trace id be in it?</p></li>
+  <li><p>(After T19) Run the four checks from the T19 "Verify" box:</p>
+<pre><code>npm --prefix frontend/web run gen:api
+npm --prefix frontend/web run lint
+npm --prefix frontend/web run test
+npm --prefix frontend/web run build</code></pre></li>
+  <li><p>(After T19) Rename the <code>app</code> field of <code>Ping</code> in
+      <code>PingController</code> to <code>name</code>, run <code>.\mvnw.cmd verify -Pexport-openapi</code>
+      and <code>gen:api</code>, then <code>build</code>. Read the TypeScript error. Then undo the
+      change. This is the safety net working.</p></li>
+  <li><p>(After T19) Write a test that renders <code>PingStatus</code> with a stubbed 429 response and
+      checks that the text "Try again in 3 s" appears (use <code>findByRole("alert")</code>).</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Promise</td><td>An object for a value that will arrive later.</td></tr>
+<tr><td><code>async</code>/<code>await</code></td><td>Syntax to wait for a Promise in readable, top-to-bottom code.</td></tr>
+<tr><td>OpenAPI</td><td>A standard JSON file describing every endpoint, input and answer.</td></tr>
+<tr><td>Code generation</td><td>A tool writing code (here, types) from another file, so nobody types it by hand.</td></tr>
+<tr><td>Problem JSON</td><td>The RFC 7807 error body, <code>application/problem+json</code>, with our <code>code</code> and <code>traceId</code>.</td></tr>
+<tr><td>Server state</td><td>Data that lives on the server; the page only shows a cached copy.</td></tr>
+<tr><td>Query key</td><td>The array that names one piece of cached data.</td></tr>
+<tr><td>Stale</td><td>Cached data that may be old and will be refreshed.</td></tr>
+<tr><td>Mutation</td><td>A request that changes data on the server (POST, PUT, PATCH, DELETE).</td></tr>
+<tr><td>Invalidate</td><td>Mark cached data as stale so it is fetched again.</td></tr>
+<tr><td>Stub / mock</td><td>A fake replacement (here for <code>fetch</code>) used in a test.</td></tr>
+<tr><td>jsdom</td><td>A fake browser inside Node, used by tests.</td></tr>
+<tr><td>Role (ARIA)</td><td>What an element is for a screen reader: button, textbox, alert…</td></tr>
+<tr><td>Exit code</td><td>The number a command returns: 0 = success, anything else = failure.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why generate TypeScript types from the OpenAPI file instead of writing them?</summary>
+    <p>Hand-written types drift from the backend silently. Generated types change when the backend
+    contract changes, so a breaking change shows up as a compile error in the frontend build (and in
+    CI), not as a broken page for students.</p></details>
+  <details><summary>2. Why does the client turn every error into one <code>ProblemError</code> class?</summary>
+    <p>All 14 modules then handle errors the same way: one <code>instanceof</code> check, then switch
+    on <code>code</code>. The <code>traceId</code> and <code>retryAfter</code> are always in the same
+    place, and the logic is tested once (T19.6) instead of in every screen.</p></details>
+  <details><summary>3. Why switch on <code>code</code> and not on <code>detail</code>?</summary>
+    <p><code>code</code> is a stable machine contract from <code>ProblemCode</code>. <code>detail</code>
+    is a human sentence that can be reworded or translated at any time, which would silently break
+    the frontend logic.</p></details>
+  <details><summary>4. Why must every input of a query (page, filter, id) be part of the query key?</summary>
+    <p>The key is how TanStack Query finds data in the cache. If page 2 has the same key as page 1,
+    the cache returns page 1's data, and invalidation cannot target the right entries.</p></details>
+  <details><summary>5. Why do Testing Library tests find elements by role and name?</summary>
+    <p>That is how users and screen readers find them, so the test checks real behaviour and also
+    proves the element is accessible. Tests that use roles survive refactors of class names and
+    internal structure.</p></details>
+  <details><summary>6. How does <code>gen:api</code> + <code>git diff --exit-code</code> prove the types are up to date?</summary>
+    <p>CI regenerates the types from the committed JSON. If the result differs from the committed
+    types, <code>git diff --exit-code</code> returns 1 and the job fails. So a PR cannot be merged with
+    stale generated files.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">MDN: Using the Fetch API</a> and <a href="https://developer.mozilla.org/en-US/docs/Learn_web_development/Extensions/Async_JS/Promises">MDN: How to use promises</a>.</li>
+  <li><a href="https://openapi-ts.dev/introduction">openapi-typescript docs</a>: CLI and how to use the generated types.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457: Problem Details for HTTP APIs</a> (the update of RFC 7807).</li>
+  <li><a href="https://tanstack.com/query/latest/docs/framework/react/overview">TanStack Query docs (React)</a>: queries, query keys, mutations, invalidation, testing.</li>
+  <li><a href="https://vitest.dev/guide/">Vitest guide</a> and <a href="https://vitest.dev/api/vi.html">the <code>vi</code> API</a>.</li>
+  <li><a href="https://testing-library.com/docs/queries/about">Testing Library: queries</a> and <a href="https://testing-library.com/docs/user-event/intro">user-event</a>.</li>
+  <li><a href="https://eslint.org/docs/latest/">ESLint docs</a>, <a href="https://typescript-eslint.io/">typescript-eslint</a>, <a href="https://prettier.io/docs/">Prettier docs</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

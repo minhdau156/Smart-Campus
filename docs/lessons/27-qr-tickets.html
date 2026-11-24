@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR Tickets Lesson</title>
+<meta name="description" content="Smart Campus lesson 27: QR codes, signed ticket tokens, event quotas without overselling, one-time check-in, browser scanning and club roles.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="27">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 27 · Part 2: Feature modules</div>
+<h1>QR tickets and signed tokens</h1>
+<p class="lede">A club event has 200 seats. 600 students click "Get ticket" in the first minute.
+At the door, a club member scans phones with a laptop camera. How do we sell exactly 200 tickets,
+stop fake and copied tickets, and let each ticket in only once?</p>
+
+<div class="meta">
+  <span class="badge module">club</span>
+  <span class="badge module">payment (paid tickets)</span>
+  <span class="badge task">CLUB-1 … CLUB-8</span>
+  <span class="badge task">C3, C10</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Planned module</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="17-spring-security.html">17 (roles and <code>@PreAuthorize</code>)</a>,
+  <a href="20-redis-concurrency.html">20 (concurrency and the seat rush)</a> and
+  <a href="26-payments-webhooks.html">26 (payments)</a>. <code>SPEC-club.md</code> does not exist
+  yet: code and table names here are <strong>planned</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#qr">A QR code is only text</a></li>
+    <li><a href="#token">Put a signed token in the code</a></li>
+    <li><a href="#quota">Quotas without overselling</a></li>
+    <li><a href="#checkin">One-time check-in</a></li>
+    <li><a href="#image">Making the QR image</a></li>
+    <li><a href="#scan">Scanning at the door</a></li>
+    <li><a href="#roles">Attendees, club roles, club approval</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Story</th><th>Who</th><th>Wants</th></tr></thead>
+<tbody>
+<tr><td>CLUB-1</td><td>Student</td><td>Browse clubs and ask to join</td></tr>
+<tr><td>CLUB-2</td><td>Club manager</td><td>Approve members and give club roles</td></tr>
+<tr><td>CLUB-3</td><td>Club manager</td><td>Create events with a ticket quota and a price, so events do not overfill</td></tr>
+<tr><td>CLUB-4</td><td>Student</td><td>Get a free or paid ticket with a QR code</td></tr>
+<tr><td>CLUB-5</td><td>Club manager</td><td>Scan QR codes at the door and reject used ones</td></tr>
+<tr><td>CLUB-6</td><td>Club manager</td><td>See the attendee list and the check-in count</td></tr>
+<tr><td>CLUB-7</td><td>Student</td><td>Cancel a ticket and get a refund before the deadline</td></tr>
+<tr><td>CLUB-8</td><td>Academic admin</td><td>Approve new clubs</td></tr>
+</tbody></table></div>
+<p>The <code>club</code> module (module 11) runs in <code>core-app</code> with schema
+<code>club</code>. The Plan's tables are <code>clubs</code>, <code>club_members</code>,
+<code>events</code> (with <code>ticket_quota</code>, <code>tickets_sold</code>, <code>price</code>)
+and <code>tickets</code> (with <code>qr_code UNIQUE</code>, status
+<code>ISSUED / USED / CANCELLED</code> and <code>UNIQUE(event_id, user_id)</code>). It depends on
+<code>identity</code> and <code>payment</code>, and publishes <code>EventCreated</code> and
+<code>TicketIssued</code>.</p>
+
+<h2 id="qr">2. A QR code is only text</h2>
+<p>A QR code is a square picture of black and white dots that stores <strong>a short piece of
+text</strong>. That is all. It has no security of its own: anyone can read it with any phone, and
+anyone can make a QR code with any text inside. A screenshot of a QR code works exactly like the
+original.</p>
+<p>QR codes can still be read when part of them is dirty or covered, thanks to
+<strong>error correction</strong>: extra data that lets the reader rebuild missing parts. There are
+four levels:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Level</th><th>Can recover about</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td>L</td><td>7% damage</td><td>Smallest code</td></tr>
+<tr><td>M</td><td>15%</td><td>A good default for screens</td></tr>
+<tr><td>Q</td><td>25%</td><td>Bigger code</td></tr>
+<tr><td>H</td><td>30%</td><td>Biggest; used for printed codes or codes with a logo on top</td></tr>
+</tbody></table></div>
+<p>More text or a higher level means more, smaller dots, which are harder for a laptop camera to
+read in a dark hall. So: <strong>keep the text short</strong>. A ticket token of 100 to 150
+characters scans easily on a phone screen.</p>
+
+<h2 id="token">3. Put a signed token in the code</h2>
+<p>What text should the QR hold? Three options:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Inside the QR</th><th>Can someone forge one?</th><th>Can the scanner check it without the server?</th></tr></thead>
+<tbody>
+<tr><td>A counting ticket number: <code>1042</code></td><td><strong>Yes.</strong> Try 1043, 1044…</td><td>No</td></tr>
+<tr><td>A random secret: a UUID v4 (122 random bits)</td><td>No, it is impossible to guess</td><td>No, it must look it up</td></tr>
+<tr><td>A <strong>signed token</strong>: ticket id, event id, expiry + signature</td><td>No, without the key nobody can sign</td><td><strong>Yes</strong>, it can check the signature and the event</td></tr>
+</tbody></table></div>
+<p>A random secret is already safe against guessing. A <strong>signed token</strong> adds useful
+things: the scanner knows at once that the code is for <em>this</em> event and is not expired, and
+it can check the signature even without the network (section 7). The Plan's
+<code>qr_code</code> column can hold the token, or a hash of it.</p>
+
+<h3>HMAC token or JWS</h3>
+<p>A simple, short format is "payload, then signature", both Base64URL text:</p>
+<pre data-file="club/internal/ticket/TicketTokens.java (planned, HMAC version)"><code>package edu.campus.club.internal.ticket;
+
+record TicketClaims(UUID ticketId, UUID eventId, Instant expiresAt) { }
+
+final class TicketTokens {
+    private static final Base64.Encoder B64 = Base64.getUrlEncoder().withoutPadding();
+    private final byte[] secret;          <span class="c">// from env / secret store, never from Git</span>
+    private final Clock clock;
+
+    TicketTokens(byte[] secret, Clock clock) {
+        this.secret = secret.clone();
+        this.clock = clock;
+    }
+
+    String issue(TicketClaims c) {
+        String payload = B64.encodeToString("%s.%s.%d".formatted(
+                c.ticketId(), c.eventId(), c.expiresAt().getEpochSecond()).getBytes(StandardCharsets.UTF_8));
+        return "t1." + payload + "." + B64.encodeToString(hmac(payload));   <span class="c">// "t1" = format/key version</span>
+    }
+
+    Optional&lt;TicketClaims&gt; verify(String token) {
+        String[] parts = token.split("\\.");
+        if (parts.length != 3 || !parts[0].equals("t1")) return Optional.empty();
+        byte[] given;
+        try { given = Base64.getUrlDecoder().decode(parts[2]); }
+        catch (IllegalArgumentException e) { return Optional.empty(); }
+        if (!MessageDigest.isEqual(hmac(parts[1]), given)) return Optional.empty();  <span class="c">// constant time</span>
+        TicketClaims c = parse(parts[1]);
+        return c.expiresAt().isAfter(clock.instant()) ? Optional.of(c) : Optional.empty();
+    }
+    …
+}</code></pre>
+<p>The standard alternative is a <strong>JWS</strong> (JSON Web Signature, the signed part of a
+JWT), made with a library such as Nimbus JOSE + JWT (Spring Security already uses it). JWS gives
+you a well-known format and a choice of algorithms, at the cost of a longer string.</p>
+<div class="compare">
+  <div class="good"><h4>HMAC (shared secret)</h4>
+    <p>Short and fast. But <strong>the same key both signs and checks</strong>. If a scanner device
+    holds the key, anyone who copies it from that device can make valid tickets. So with HMAC, only
+    the server checks tokens.</p></div>
+  <div class="good"><h4>Public-key signature (for example ES256 in a JWS)</h4>
+    <p>The server signs with a <strong>private key</strong>; scanners check with the
+    <strong>public key</strong>, which cannot sign. Safe to put on a door laptop for offline
+    checks. Longer token.</p></div>
+</div>
+<p>The signature stops <strong>forgery</strong> (making a new ticket). It does not stop
+<strong>copying</strong>: a screenshot sent to a friend has a perfect signature. Copying is stopped
+by the one-time check-in (section 5).</p>
+
+<h2 id="quota">4. Quotas without overselling (CLUB-3, CLUB-4)</h2>
+<p>200 seats, 600 clicks in the same second. The naive code reads, checks, then writes:</p>
+<pre><code>Event e = events.find(id);
+if (e.ticketsSold() &lt; e.ticketQuota()) {     <span class="c">// 600 threads all see 199 &lt; 200 …</span>
+    e.sell();                                  <span class="c">// … and all sell. 799 tickets.</span>
+}</code></pre>
+<p>This is a <strong>race condition</strong>: the check and the write are two steps, and other
+requests run between them. The fix is to make the database do both in <strong>one atomic
+statement</strong>:</p>
+<pre data-file="club, inside one transaction (planned)"><code>UPDATE club.events
+SET tickets_sold = tickets_sold + 1
+WHERE id = :eventId AND tickets_sold &lt; ticket_quota;     <span class="c">-- 1 row: you got a seat. 0 rows: sold out</span>
+
+INSERT INTO club.tickets (id, event_id, user_id, qr_code, status, issued_at)
+VALUES (:id, :eventId, :userId, :token, 'ISSUED', :now);  <span class="c">-- UNIQUE(event_id, user_id): one per student</span></code></pre>
+<p>PostgreSQL locks the event row during the <code>UPDATE</code>, so the 600 requests take turns on
+that one row, and the condition is checked again for each. Exactly 200 succeed. If the insert
+fails (the student already has a ticket), the whole transaction rolls back, including the +1.
+Also add <code>CHECK (tickets_sold &lt;= ticket_quota)</code> as a last guard. For a few hundred
+seats this is enough; the registration rush (thousands per second) needed Redis
+(<a href="20-redis-concurrency.html">lesson 20</a>).</p>
+
+<h3>Paid tickets: hold the seat</h3>
+<p>For a paid event, the student first goes to the payment gateway, which takes minutes. If we
+counted the seat only after <code>PaymentConfirmed</code>, 300 people could pay for 200 seats. So:</p>
+<ol>
+  <li>Click "Buy": take the seat now with the atomic update, and save a <strong>reservation</strong>
+      (status <code>HELD</code>, <code>expires_at</code> in 15 minutes). Then create the payment.</li>
+  <li><code>PaymentConfirmed</code> arrives from Kafka (deduped): turn the hold into an
+      <code>ISSUED</code> ticket and make its QR token.</li>
+  <li>Payment <code>FAILED</code> or <code>EXPIRED</code>, or the hold times out: give the seat
+      back (<code>tickets_sold - 1</code>, with a condition so it happens once).</li>
+</ol>
+<p>Cancelling (CLUB-7) also gives the seat back. The exact states are a decision for
+<code>SPEC-club.md</code>.</p>
+
+<h2 id="checkin">5. One-time check-in (CLUB-5)</h2>
+<p>At the door, the scanner sends the token to the server. The server checks the signature, the
+event, and then marks the ticket used with <strong>one conditional update</strong>:</p>
+<pre data-file="club/internal/checkin/CheckInService.java (planned)"><code><span class="k">@Transactional</span>
+CheckInResult checkIn(UUID eventId, String token, UUID staffId) {
+    TicketClaims claims = tokens.verify(token).orElse(null);
+    if (claims == null) return CheckInResult.invalid();              <span class="c">// forged, broken or expired</span>
+    if (!claims.eventId().equals(eventId)) return CheckInResult.wrongEvent();
+
+    int changed = jdbc.sql("""
+            UPDATE club.tickets
+            SET status = 'USED', checked_in_at = :now, checked_in_by = :staff
+            WHERE id = :id AND event_id = :event AND status = 'ISSUED' AND checked_in_at IS NULL
+            """)
+            .param("now", Timestamp.from(clock.instant()))
+            .param("staff", staffId).param("id", claims.ticketId()).param("event", eventId)
+            .update();
+    if (changed == 1) return CheckInResult.welcome(claims.ticketId());
+    return CheckInResult.rejected(tickets.whyNot(claims.ticketId()));   <span class="c">// "already used at 19:02", "cancelled"</span>
+}</code></pre>
+<p>Two doors scan the same screenshot at the same moment. Both send the token. The database runs the
+two updates one after the other: the first changes 1 row, the second finds
+<code>checked_in_at</code> already set and changes 0 rows. <strong>Only one person enters.</strong>
+Showing "already used at 19:02 by door 2" helps the staff talk to the student.</p>
+
+<h2 id="image">6. Making the QR image</h2>
+<div class="compare">
+  <div class="good"><h4>On the server (Java)</h4>
+    <p>The ZXing library makes a PNG. The browser just shows
+    <code>&lt;img src="/api/v1/club/tickets/{id}/qr.png"&gt;</code>. The image endpoint must check
+    that the ticket belongs to the caller, and should say <code>Cache-Control: no-store</code>.</p></div>
+  <div class="good"><h4>In the browser (TypeScript)</h4>
+    <p>The API returns the token text; a small JavaScript QR library draws it. No image traffic,
+    and the page can redraw it larger in a dark hall. The token is still only shown to its owner.</p></div>
+</div>
+<pre data-file="club/internal/ticket/QrImages.java (planned, server version)"><code>byte[] png(String token) throws WriterException, IOException {
+    Map&lt;EncodeHintType, Object&gt; hints = Map.of(
+            EncodeHintType.ERROR_CORRECTION, ErrorCorrectionLevel.M,
+            EncodeHintType.MARGIN, 2);                       <span class="c">// the white border readers need</span>
+    BitMatrix matrix = new QRCodeWriter().encode(token, BarcodeFormat.QR_CODE, 320, 320, hints);
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    MatrixToImageWriter.writeToStream(matrix, "PNG", out);   <span class="c">// from ZXing's "javase" artifact</span>
+    return out.toByteArray();
+}</code></pre>
+<p>Either way, the <strong>token</strong> is the ticket, not the picture. Never put the student's
+name or email in the QR text: it would be readable by anyone who sees the screen.</p>
+
+<h2 id="scan">7. Scanning at the door</h2>
+<p>Smart Campus is <strong>website only</strong>, so the door scanner is a web page on a laptop or
+a phone's browser. Two browser parts are involved:</p>
+<ol>
+  <li><code>navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })</code>
+      opens the camera (the back camera on a phone). It only works on a <strong>secure
+      origin</strong>: HTTPS, or <code>localhost</code> in dev. The user must allow camera access.</li>
+  <li>Something must find the QR code in the video frames:
+    <ul>
+      <li>the <strong>BarcodeDetector</strong> API, built into some browsers but <strong>not in
+          every browser</strong> (check MDN's compatibility table before you rely on it), or</li>
+      <li>a JavaScript library (for example a JavaScript port of ZXing) as the fallback that
+          works everywhere.</li>
+    </ul></li>
+</ol>
+<pre data-file="frontend/web/src/modules/club/scanner.ts (planned, simplified)"><code>export async function startScanner(video: HTMLVideoElement, onCode: (text: string) =&gt; void) {
+  video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+  await video.play();
+
+  if ("BarcodeDetector" in window) {
+    const detector = new (window as any).BarcodeDetector({ formats: ["qr_code"] });
+    const tick = async () =&gt; {
+      const codes = await detector.detect(video);
+      if (codes.length &gt; 0) onCode(codes[0].rawValue);
+      requestAnimationFrame(tick);
+    };
+    tick();
+  } else {
+    startLibraryScanner(video, onCode);     // fallback: a JS QR library
+  }
+}</code></pre>
+<p>Make the screen easy for the staff: a big green "Welcome" or red "Already used", a sound, and
+ignore the same code for two seconds so one phone is not sent ten times.</p>
+
+<h3>Offline scanning: the trade-off</h3>
+<div class="compare">
+  <div class="good"><h4>Online (recommended first)</h4>
+    <p>Every scan asks the server. Perfect "only once" across all doors. Needs Wi-Fi at the door.</p></div>
+  <div class="poor"><h4>Offline</h4>
+    <p>The scanner checks the signature with a <strong>public key</strong> and keeps a local list of
+    used tickets, then uploads it later. Works without network, but two offline doors can both let
+    the same screenshot in. And an HMAC key must never be on the device.</p></div>
+</div>
+
+<h2 id="roles">8. Attendees, club roles, club approval</h2>
+<h3>Attendee list and check-in count (CLUB-6)</h3>
+<pre><code>SELECT count(*) FILTER (WHERE status IN ('ISSUED', 'USED')) AS tickets,
+       count(*) FILTER (WHERE status = 'USED')              AS checked_in
+FROM club.tickets
+WHERE event_id = :eventId;</code></pre>
+<p>Names come from a local copy of user profiles (from <code>UserProvisioned</code> events) or
+identity's public API, because <code>club</code> may not read <code>identity</code>'s tables. A live
+counter can poll this every few seconds; the list is only for the club's managers.</p>
+
+<h3>Per-club roles (C3, CLUB-2)</h3>
+<p>Resolution <strong>C3</strong>: Keycloak has realm roles like <code>STUDENT</code> and
+<code>CLUB_MANAGER</code>, but <strong>per-club permissions live in
+<code>club_members.role</code></strong>. Being a manager of the Chess Club does not let you scan
+tickets for the Music Club. So a realm role alone is not enough; check the club too:</p>
+<pre data-file="club/ClubAccess.java (planned)"><code><span class="k">@Component</span>("clubAccess")
+public class ClubAccess {
+    private final ClubMemberRepository members;
+
+    public ClubAccess(ClubMemberRepository members) {
+        this.members = members;
+    }
+
+    public boolean canManage(UUID clubId, Authentication auth) {
+        UUID userId = UUID.fromString(auth.getName());            <span class="c">// JWT sub</span>
+        return members.roleOf(clubId, userId)
+                .map(role -&gt; role == ClubRole.PRESIDENT || role == ClubRole.OFFICER)
+                .orElse(false);
+    }
+}
+
+<span class="c">// in a controller</span>
+<span class="k">@PreAuthorize</span>("@clubAccess.canManage(#clubId, authentication)")
+<span class="k">@PostMapping</span>("/api/v1/club/clubs/{clubId}/events/{eventId}/check-ins")
+CheckInResponse checkIn(<span class="k">@PathVariable</span> UUID clubId, …) { … }</code></pre>
+<p>Remember to check that the event really belongs to that club, or a manager of club A could pass
+club A's id with club B's event.</p>
+
+<h3>Club approval (CLUB-8)</h3>
+<p>C10 lists club approval as a table the spec must design. A simple way: <code>clubs.status</code>
+<code>PENDING → APPROVED</code> or <code>REJECTED</code>, changed only by
+<code>ACADEMIC_ADMIN</code>. Lists and event creation show and allow only <code>APPROVED</code>
+clubs, so "only recognised clubs appear".</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Schema <code>club</code></td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>Exists</td></tr>
+<tr><td>Realm roles incl. <code>CLUB_MANAGER</code>, <code>ACADEMIC_ADMIN</code></td><td>Keycloak realm (identity module)</td><td>Planned (C3)</td></tr>
+<tr><td>Clubs, members, events, tickets, holds</td><td><code>core-app/.../club/</code>, <code>SPEC-club.md</code></td><td>Planned (module 11)</td></tr>
+<tr><td>Ticket token signing, QR image, check-in</td><td>club module</td><td>Planned</td></tr>
+<tr><td>Door scanner page</td><td><code>frontend/web/src/modules/club/</code></td><td>Planned</td></tr>
+<tr><td>Paid tickets via <code>PaymentConfirmed</code></td><td>payment → club over Kafka</td><td>Planned (C7)</td></tr>
+<tr><td>Problem JSON for "sold out", "already has a ticket"</td><td><code>shared-kernel/.../kernel/error/ProblemCode.java</code> (new codes later)</td><td>Base exists</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Read, check, then write</strong> for the quota. Use one conditional
+      <code>UPDATE</code>.</li>
+  <li><strong>Counting the paid seat only after payment.</strong> Hold the seat first, release it
+      on failure or timeout.</li>
+  <li><strong>A counting ticket number in the QR.</strong> Easy to forge. Use a signed token or a
+      random secret.</li>
+  <li><strong>Thinking the signature stops screenshots.</strong> It does not. The one-time
+      check-in does.</li>
+  <li><strong>Putting an HMAC key in the scanner page.</strong> Anyone can then sign tickets.</li>
+  <li><strong>Checking only the realm role</strong> instead of the role in this club.</li>
+  <li><strong>Personal data inside the QR text.</strong> Keep only ids, expiry and a signature.</li>
+  <li><strong>Relying on BarcodeDetector everywhere.</strong> Have a library fallback.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Open any QR generator, make a code with the text <code>hello</code>, and scan it with your
+      phone. Then make one with 300 characters at level H and compare how dense it looks.</p></li>
+  <li><p>In JShell, write <code>issue</code> and <code>verify</code> for the HMAC token above. Change
+      one character of the payload and check that <code>verify</code> returns empty.</p></li>
+  <li><p>In a scratch PostgreSQL database, create <code>events(id, ticket_quota, tickets_sold)</code>
+      with quota 5. Open two <code>psql</code> windows and run the conditional update in both, with
+      <code>BEGIN</code> but no commit in the first. What does the second one do? What happens after
+      you commit the first?</p></li>
+  <li><p>Make a small HTML page on <code>localhost</code> that opens your camera with
+      <code>getUserMedia</code>. In the browser console, check whether
+      <code>"BarcodeDetector" in window</code> is true in your browser.</p></li>
+  <li><p>On paper: list the states of a paid ticket from "Buy" to "checked in", including payment
+      failure, hold timeout and cancel with refund.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>QR code</td><td>A square barcode that stores a short text.</td></tr>
+<tr><td>Error correction level</td><td>How much damage a QR code can survive (L, M, Q, H).</td></tr>
+<tr><td>Token</td><td>A piece of text that proves something, here "this is ticket X for event Y".</td></tr>
+<tr><td>JWS</td><td>JSON Web Signature: a standard format for signed data.</td></tr>
+<tr><td>Public / private key</td><td>The private key signs; the public key can only check.</td></tr>
+<tr><td>Forgery</td><td>Making a fake ticket that looks real.</td></tr>
+<tr><td>Race condition</td><td>A bug when two requests run between a check and a write.</td></tr>
+<tr><td>Atomic update</td><td>One statement that checks and changes in one step.</td></tr>
+<tr><td>Overselling</td><td>Selling more tickets than seats.</td></tr>
+<tr><td>Hold</td><td>A seat kept for a short time while the student pays.</td></tr>
+<tr><td>Secure origin</td><td>HTTPS or localhost; needed for the camera.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why is the QR text a signed token and not just the ticket number?</summary>
+    <p>A counting number can be guessed, so people could make fake tickets. A signed token cannot
+    be made without the key, and it also tells the scanner the event and expiry.</p></details>
+  <details><summary>2. A student sends a screenshot of their ticket to a friend. What stops both from entering?</summary>
+    <p>The one-time check-in: the conditional <code>UPDATE … WHERE checked_in_at IS NULL</code>
+    succeeds only once. The second scan changes zero rows and is rejected.</p></details>
+  <details><summary>3. Why does <code>UPDATE … WHERE tickets_sold &lt; ticket_quota</code> stop overselling when "read, check, write" does not?</summary>
+    <p>The database checks the condition and changes the row in one atomic step, with a row lock.
+    Requests take turns, and each sees the latest count. With read-check-write, many requests see
+    the same old count between the read and the write.</p></details>
+  <details><summary>4. Why must a paid ticket hold the seat before the payment?</summary>
+    <p>Paying takes minutes. If seats were counted only after <code>PaymentConfirmed</code>, more
+    people could pay than there are seats, and some would need refunds.</p></details>
+  <details><summary>5. Why is an HMAC key dangerous on an offline scanner, but a public key is fine?</summary>
+    <p>With HMAC, the same key signs and checks, so whoever copies it can make tickets. A public key
+    can only check signatures; signing needs the private key, which stays on the server.</p></details>
+  <details><summary>6. Why is the realm role <code>CLUB_MANAGER</code> not enough to scan tickets for an event?</summary>
+    <p>It says "manages some club", not which one. Per-club permission lives in
+    <code>club_members.role</code> (C3), so we must check the role in the event's own club.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://github.com/zxing/zxing">ZXing on GitHub</a>: the Java barcode library.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc7515">RFC 7515: JSON Web Signature (JWS)</a>.</li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia">MDN: <code>getUserMedia</code></a> and <a href="https://developer.mozilla.org/en-US/docs/Web/API/Barcode_Detection_API">MDN: Barcode Detection API</a> (see the browser compatibility table).</li>
+  <li><a href="https://www.postgresql.org/docs/current/sql-update.html">PostgreSQL docs: UPDATE</a> and <a href="https://www.postgresql.org/docs/current/transaction-iso.html">Transaction isolation</a>.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html">Spring Security reference: Method security</a>: <code>@PreAuthorize</code> with a bean.</li>
+  <li><a href="https://www.iso.org/standard/62021.html">ISO/IEC 18004: the QR code standard</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

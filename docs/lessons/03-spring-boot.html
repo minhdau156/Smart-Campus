@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spring Boot Basics</title>
+<meta name="description" content="Smart Campus lesson 03: beans, dependency injection, configuration, auto-configuration, how platform-starter works, @Transactional proxies and what changed in Boot 4.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="03">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 03 · Part 1: Foundations</div>
+<h1>Spring Boot 4 basics</h1>
+<p class="lede">Every backend app in Smart Campus is a Spring Boot app. Spring creates your objects,
+connects them, reads your settings, and switches on features just because a jar is on the
+classpath. This lesson shows how, using core-app and our own <code>platform-starter</code>.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module</span>
+  <span class="badge task">T6 (done)</span>
+  <span class="badge task">T8 (done)</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="01-java-21.html">01 (Java 21)</a> and <a href="02-maven.html">02 (Maven: starters
+  are just dependencies)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">What Spring Boot does</a></li>
+    <li><a href="#beans">Beans and dependency injection</a></li>
+    <li><a href="#config">Configuration and profiles</a></li>
+    <li><a href="#auto">Starters and auto-configuration</a></li>
+    <li><a href="#starter">Inside platform-starter</a></li>
+    <li><a href="#web">REST, JSON and Actuator</a></li>
+    <li><a href="#proxies">Proxies: @Transactional and @Scheduled</a></li>
+    <li><a href="#boot4">From Boot 3 to Boot 4</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. What Spring Boot does</h2>
+<p>A backend app needs many parts: a web server, a database connection pool, JSON, Kafka clients,
+health checks, logging. Wiring them by hand is long and easy to get wrong.</p>
+<p><strong>Spring Framework</strong> gives an <strong>IoC container</strong> ("inversion of
+control"). Instead of your code creating its helpers with <code>new</code>, the container creates
+all objects and hands each one the helpers it needs. Think of a restaurant kitchen: the cook does
+not grow vegetables. They ask, and the ingredients arrive.</p>
+<p><strong>Spring Boot</strong> adds three things on top:</p>
+<ul>
+  <li><strong>Starters</strong>: one dependency per feature (<code>spring-boot-starter-webmvc</code>,
+      <code>spring-boot-starter-jdbc</code> …).</li>
+  <li><strong>Auto-configuration</strong>: good default objects are created for you when a library
+      is present (a <code>DataSource</code> when a JDBC driver and a URL exist).</li>
+  <li><strong>Externalized configuration</strong>: settings in <code>application.yml</code>,
+      environment variables or the command line, not in code.</li>
+</ul>
+<pre data-file="backend/core-app/src/main/java/edu/campus/CoreApplication.java"><code><span class="k">@SpringBootApplication</span>
+public class CoreApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(CoreApplication.class, args);
+    }
+}</code></pre>
+<p><code>@SpringBootApplication</code> turns on auto-configuration and <strong>component
+scanning</strong> of the package <code>edu.campus</code> and every package below it.</p>
+
+<h2 id="beans">2. Beans and dependency injection</h2>
+<p>A <strong>bean</strong> is an object that Spring creates and manages. By default there is
+<strong>one</strong> of each (scope "singleton"), shared by everyone who asks.</p>
+<h3>Two ways to make a bean</h3>
+<div class="compare">
+  <div class="good"><h4>1. A stereotype on your class</h4>
+    <p>Component scanning finds classes with these annotations:</p>
+    <ul>
+      <li><code>@Component</code>: a general bean</li>
+      <li><code>@Service</code>: business logic (<code>OutboxProbeService</code>)</li>
+      <li><code>@Repository</code>: database access</li>
+      <li><code>@RestController</code>: HTTP endpoints (<code>PingController</code>)</li>
+      <li><code>@Configuration</code>: a class that holds <code>@Bean</code> methods</li>
+    </ul></div>
+  <div class="good"><h4>2. A <code>@Bean</code> method</h4>
+    <p>For objects you cannot annotate (JDK or library classes):</p>
+<pre><code><span class="k">@Configuration</span>(proxyBeanMethods = false)
+class ClockConfiguration {
+    <span class="k">@Bean</span>
+    Clock clock() {
+        return Clock.systemUTC();
+    }
+}</code></pre></div>
+</div>
+<p><code>proxyBeanMethods = false</code> tells Spring not to wrap the class, because no
+<code>@Bean</code> method calls another one. It starts a little faster. You will see it on every
+configuration class in this project.</p>
+
+<h3>Constructor injection</h3>
+<p><strong>Dependency injection (DI)</strong> = Spring passes the beans a class needs into it. The
+project rule: <strong>constructor injection only</strong>. If a class has one constructor, Spring
+uses it; no <code>@Autowired</code> is needed.</p>
+<pre data-file="backend/core-app/.../platform/internal/OutboxProbeService.java (part)"><code><span class="k">@Service</span>
+class OutboxProbeService {
+    private final JdbcTemplate jdbc;
+    private final ApplicationEventPublisher events;
+    private final Clock clock;
+
+    OutboxProbeService(JdbcTemplate jdbc, ApplicationEventPublisher events, Clock clock) {
+        this.jdbc = jdbc;
+        this.events = events;
+        this.clock = clock;
+    }
+}</code></pre>
+<p>Why constructors and not <code>@Autowired</code> on fields?</p>
+<ul>
+  <li>Fields can be <code>final</code>: the object is complete and cannot change.</li>
+  <li>A test can call <code>new OutboxProbeService(fakeJdbc, fakeEvents, fixedClock)</code> with no
+      Spring at all.</li>
+  <li>A long constructor is a warning sign: the class does too much.</li>
+</ul>
+<p>If two beans of the same type exist, Spring cannot choose and startup fails ("expected single
+matching bean"). That is why <code>Clock</code> lives in its own configuration class: the
+controller test (<code>PingControllerTest</code>) can give its own fixed <code>Clock</code> without
+a clash.</p>
+
+<h2 id="config">3. Configuration and profiles</h2>
+<h3>application.yml</h3>
+<p>Settings live in <code>src/main/resources/application.yml</code>. One file can hold several
+<strong>documents</strong>, separated by <code>---</code>. A document with
+<code>spring.config.activate.on-profile</code> is used only when that <strong>profile</strong> is
+active.</p>
+<pre data-file="backend/core-app/src/main/resources/application.yml (shortened)"><code>spring:
+  application:
+    name: core-app
+  datasource:
+    username: core_app                 <span class="c"># the DB user for core-app (lesson 04)</span>
+  flyway:
+    default-schema: platform
+server:
+  port: 8081
+campus:
+  version: "@project.version@"         <span class="c"># Maven fills this in while copying the file</span>
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev                  <span class="c"># your laptop + Docker Compose</span>
+    import: optional:file:../../infra/.env[.properties]
+  datasource:
+    url: jdbc:postgresql://localhost:5432/${POSTGRES_DB:campus}
+    password: ${CORE_APP_DB_PASSWORD}  <span class="c"># read from infra/.env, never written here</span>
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test                 <span class="c"># integration tests; Testcontainers gives the URL</span></code></pre>
+<p><code>${NAME:default}</code> is a <strong>placeholder</strong>: the value of another setting or
+environment variable, with a default after the colon. The <code>dev</code> profile is switched on
+by the Maven plugin for <code>spring-boot:run</code>; the ITs use <code>@ActiveProfiles("test")</code>.</p>
+
+<h3>Who wins?</h3>
+<p>Spring reads settings from many <strong>property sources</strong>. When two set the same key, the
+higher one wins:</p>
+<pre class="diagram">  command line            --server.port=9000                 (highest)
+  environment variables   SERVER_PORT=9000
+  profile documents       the "dev" or "test" block of application.yml
+  application.yml         the first block
+  platform-starter        campus-platform-defaults.yml        (lowest, see section 5)</pre>
+<p>Environment variables use <strong>relaxed binding</strong>: <code>campus.outbox.retry-interval</code>
+can be set as <code>CAMPUS_OUTBOX_RETRYINTERVAL</code> (dots become <code>_</code>, dashes are dropped,
+upper case). Containers in T15 are configured this way.</p>
+
+<h3>Reading settings in code</h3>
+<div class="compare">
+  <div class="good"><h4><code>@Value</code>: one value</h4>
+<pre><code>PingController(Clock clock,
+    <span class="k">@Value</span>("${spring.application.name}") String app,
+    <span class="k">@Value</span>("${campus.version}") String version)</code></pre>
+    <p>Fine for one or two values (used in <code>PingController</code>).</p></div>
+  <div class="good"><h4><code>@ConfigurationProperties</code>: a group</h4>
+<pre><code><span class="k">@ConfigurationProperties</span>("campus.outbox")
+public record OutboxProperties(Duration retryInterval) {}</code></pre>
+    <p>A typed record for a whole group. <code>30s</code> becomes a <code>Duration</code>. Register
+    it with <code>@EnableConfigurationProperties(OutboxProperties.class)</code>. (Example only:
+    today the retry job reads the value with a placeholder.)</p></div>
+</div>
+
+<h2 id="auto">4. Starters and auto-configuration</h2>
+<p>A <strong>starter</strong> is a dependency that brings a feature's libraries. Look at core-app's
+pom: <code>spring-boot-starter-webmvc</code> (Tomcat + Spring MVC), <code>-actuator</code>,
+<code>-jdbc</code>, <code>-flyway</code>, <code>-kafka</code>. You add the jar; Spring Boot does the
+setup.</p>
+<p><strong>Auto-configuration</strong> classes are normal <code>@Configuration</code> classes inside
+those jars, guarded by <strong>conditions</strong>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Condition</th><th>Creates the beans only if …</th></tr></thead>
+<tbody>
+<tr><td><code>@ConditionalOnClass(X.class)</code></td><td>class X is on the classpath (the library is there)</td></tr>
+<tr><td><code>@ConditionalOnBean(X.class)</code></td><td>a bean of type X already exists</td></tr>
+<tr><td><code>@ConditionalOnMissingBean</code></td><td>the app has <strong>not</strong> made its own bean of this type</td></tr>
+<tr><td><code>@ConditionalOnProperty</code></td><td>a setting has a given value</td></tr>
+<tr><td><code>@ConditionalOnWebApplication(type = SERVLET)</code></td><td>the app is a Spring MVC (servlet) app</td></tr>
+</tbody></table></div>
+<p><code>@ConditionalOnMissingBean</code> is the key to "defaults you can replace": Boot creates a
+<code>JdbcTemplate</code> unless you made one yourself. Your bean always wins.</p>
+<div class="callout tip">
+  <span class="title">See what was switched on, and why</span>
+  Start the app with <code>--debug</code> (or set <code>debug: true</code>). Boot prints the
+  <strong>condition evaluation report</strong>: every auto-configuration, matched or not, with the
+  reason.
+</div>
+
+<h2 id="starter">5. Inside platform-starter</h2>
+<p><code>backend/platform-starter</code> is <strong>our own starter</strong> (T8). core-app only lists
+it in its pom, and gets problem JSON, a trace id, the outbox setup and the Modulith rules, with no
+annotation and no import. How does Spring find it? Through plain text files inside the jar:</p>
+<div class="flow">
+  <div class="box project"><b>1. Settings, very early</b><code>META-INF/spring.factories</code> → <code>PlatformDefaultsEnvironmentPostProcessor</code> adds <code>campus-platform-defaults.yml</code> at the lowest priority</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>2. Beans</b><code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> lists 3 auto-configurations</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>3. Conditions</b>each one switches on only if the app has the right libraries</div>
+</div>
+
+<h3>Step 1: shared default settings</h3>
+<pre data-file="backend/platform-starter/.../starter/config/PlatformDefaultsEnvironmentPostProcessor.java (part)"><code>public class PlatformDefaultsEnvironmentPostProcessor implements EnvironmentPostProcessor {
+    static final String FILE = "campus-platform-defaults.yml";
+
+    <span class="k">@Override</span>
+    public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
+        List&lt;PropertySource&lt;?&gt;&gt; sources =
+                new YamlPropertySourceLoader().load("platform-starter defaults", new ClassPathResource(FILE));
+        sources.forEach(environment.getPropertySources()::addLast);   <span class="c">// LAST = lowest priority</span>
+    }
+}</code></pre>
+<p>An <strong>EnvironmentPostProcessor</strong> runs before any bean exists, while Spring is still
+collecting settings. <code>addLast</code> puts our file at the bottom of the list, so every app can
+still override a value (core-app's <code>test</code> profile sets <code>retry-interval: 2s</code>,
+and it wins). It is like a parent pom, but for settings.</p>
+
+<h3>Step 2 and 3: conditional beans</h3>
+<pre data-file="backend/platform-starter/.../starter/outbox/OutboxAutoConfiguration.java"><code><span class="k">@AutoConfiguration</span>(afterName = "org.springframework.modulith.events.config.EventPublicationAutoConfiguration")
+<span class="k">@ConditionalOnClass</span>(FailedEventPublications.class)   <span class="c">// Modulith events library present</span>
+<span class="k">@ConditionalOnBean</span>(FailedEventPublications.class)    <span class="c">// and Modulith really made the registry</span>
+<span class="k">@EnableScheduling</span>
+public class OutboxAutoConfiguration {
+    <span class="k">@Bean</span>
+    OutboxRetryJob outboxRetryJob(FailedEventPublications failed) {
+        return new OutboxRetryJob(failed);
+    }
+}</code></pre>
+<p><code>afterName</code> makes Spring evaluate this class after Modulith's own auto-configuration.
+Otherwise <code>@ConditionalOnBean</code> could run too early and always say "no".
+<code>ProblemHandlingAutoConfiguration</code> uses <code>@ConditionalOnWebApplication(type =
+SERVLET)</code>, so the planned WebFlux gateway (T13) does not get the MVC error handler.</p>
+<p>The same <code>spring.factories</code> file also registers <code>CampusModuleDetection</code> for
+Spring Modulith (<a href="06-spring-modulith.html">lesson 06</a>).</p>
+
+<h2 id="web">6. REST, JSON and Actuator</h2>
+<h3>A controller</h3>
+<pre data-file="backend/core-app/.../platform/PingController.java (part)"><code><span class="k">@RestController</span>
+<span class="k">@RequestMapping</span>("/api/v1/platform")
+class PingController {
+
+    record Ping(String app, String version, Instant time) {}
+
+    <span class="k">@GetMapping</span>("/ping")
+    Ping ping() {
+        return new Ping(app, version, clock.instant());
+    }
+}</code></pre>
+<p><code>@RestController</code> means "every method's return value is the response body". Spring
+turns the <code>Ping</code> record into JSON:
+<code>{"app":"core-app","version":"0.1.0-SNAPSHOT","time":"2026-09-07T08:00:00Z"}</code>. Other
+annotations you will use: <code>@PostMapping</code>, <code>@PathVariable</code>,
+<code>@RequestParam</code>, <code>@RequestBody</code>, <code>@Valid</code>,
+<code>@ResponseStatus(HttpStatus.CREATED)</code>. <a href="09-rest-problem-openapi.html">Lesson
+09</a> covers API design and errors.</p>
+
+<h3>Jackson 3</h3>
+<p>The JSON library is <strong>Jackson</strong>. Boot 4 uses <strong>Jackson 3</strong>, whose
+packages start with <code>tools.jackson</code> (Jackson 2 used <code>com.fasterxml.jackson</code>).
+Spring Boot makes a <code>JsonMapper</code> bean you can inject (<code>CoreApplicationIT</code> does).
+Two details:</p>
+<ul>
+  <li>The <strong>annotations</strong> such as <code>@JsonInclude</code> still come from
+      <code>com.fasterxml.jackson.annotation</code> (see <code>ProblemBody</code> in platform-starter).</li>
+  <li>Records and <code>Instant</code> work with no setup, and an <code>Instant</code> is written as
+      ISO-8601 text. <code>DomainEventJsonTest</code> proves this with a plain
+      <code>JsonMapper.builder().build()</code>.</li>
+</ul>
+
+<h3>Actuator</h3>
+<p><strong>Actuator</strong> (<code>spring-boot-starter-actuator</code>) adds operations endpoints
+under <code>/actuator</code>. core-app shows only two on the web:</p>
+<pre data-file="application.yml (part)"><code>management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+  endpoint:
+    health:
+      show-details: always   <span class="c"># dev and test only: show db, kafka … parts</span></code></pre>
+<p><code>GET /actuator/health</code> answers <code>{"status":"UP", …}</code>. Docker Compose (T15) and
+the gateway smoke test use it. Actuator also collects <strong>metrics</strong> with Micrometer
+(request counts, JVM memory). They are not exposed on the web yet: T18 adds
+<code>/actuator/prometheus</code> (<a href="12-observability.html">lesson 12</a>).</p>
+
+<h2 id="proxies">7. Proxies: @Transactional and @Scheduled</h2>
+<h3>What a proxy is</h3>
+<p>For some annotations, Spring does not give other beans your object directly. It gives a
+<strong>proxy</strong>: a wrapper object, like a receptionist in front of an office. Calls go
+through the receptionist, who does extra work before and after (open a transaction, commit or roll
+back), then calls the real method.</p>
+<pre class="diagram">  Controller ──► [ proxy of OutboxProbeService ] ──► real OutboxProbeService.create()
+                   BEGIN transaction                   INSERT …, publishEvent(…)
+                   COMMIT, or ROLLBACK on an exception</pre>
+
+<h3>@Transactional</h3>
+<p><code>@Transactional</code> on a method means: everything in it runs in <strong>one database
+transaction</strong> (<a href="04-postgres-flyway.html">lesson 04</a>). This is how the outbox works:
+the business row and the event row commit together (<a href="08-outbox-idempotency.html">lesson
+08</a>). Rules to remember:</p>
+<ul>
+  <li>By default Spring <strong>rolls back on unchecked exceptions</strong>
+      (<code>RuntimeException</code>, so also <code>CampusProblem</code>) and on <code>Error</code>.
+      It <strong>commits</strong> on a checked exception, unless you set <code>rollbackFor</code>.</li>
+  <li>Private methods are never intercepted. Use public or package-private methods
+      (<code>OutboxProbeService.create</code> is package-private and works).</li>
+</ul>
+<div class="callout bad">
+  <span class="title">The self-invocation trap</span>
+  A call from one method to another <strong>inside the same object</strong> does not go through the
+  proxy. So its <code>@Transactional</code> is silently ignored.
+</div>
+<div class="compare">
+  <div class="poor"><h4>No transaction!</h4>
+<pre><code><span class="k">@Service</span>
+class EnrollmentService {
+    void confirmAll(List&lt;UUID&gt; ids) {
+        ids.forEach(this::confirm);  <span class="c">// this = real object</span>
+    }
+    <span class="k">@Transactional</span>
+    void confirm(UUID id) { … }
+}</code></pre></div>
+  <div class="good"><h4>Fixes</h4>
+    <ul>
+      <li>Put <code>@Transactional</code> on the method that is called from outside
+          (<code>confirmAll</code>).</li>
+      <li>Or move <code>confirm</code> to another bean and inject it.</li>
+      <li>Or use <code>TransactionTemplate</code> in code for full control.</li>
+    </ul></div>
+</div>
+
+<h3>@Scheduled</h3>
+<p><code>@Scheduled</code> runs a bean method again and again, on a timer inside the app. It needs
+<code>@EnableScheduling</code> somewhere (here: <code>OutboxAutoConfiguration</code>).</p>
+<pre data-file="backend/platform-starter/.../starter/outbox/OutboxRetryJob.java (part)"><code><span class="k">@Scheduled</span>(
+        initialDelayString = "${campus.outbox.retry-interval}",
+        fixedDelayString = "${campus.outbox.retry-interval}")   <span class="c">// 30s, or 2s in tests</span>
+public void resubmitFailed() {
+    failed.resubmit(ResubmissionOptions.defaults());
+}</code></pre>
+<p><code>fixedDelay</code> waits the interval <em>after</em> each run ends; <code>fixedRate</code>
+starts on a fixed beat; <code>cron = "0 0 2 * * *"</code> with <code>zone = "Asia/Ho_Chi_Minh"</code>
+runs at 02:00 Vietnam time. Careful: with three copies of an app, the job runs in all three. Later
+modules (for example the planned lost-and-found archive job) must make jobs safe to run twice
+(<a href="25-scheduled-jobs-feeds.html">lesson 25</a>).</p>
+
+<h3>The Clock bean</h3>
+<p>Time is a dependency too. <code>ClockConfiguration</code> makes one <code>Clock</code> bean
+(<code>Clock.systemUTC()</code>), every class that needs the time injects it, and tests replace it
+with a fixed clock (<a href="01-java-21.html#time">lesson 01</a>).</p>
+
+<h2 id="boot4">8. From Boot 3 to Boot 4</h2>
+<p>Most tutorials online are still for Spring Boot 3. Smart Campus uses <strong>Boot 4.1.3</strong>
+(spec Q1). The differences you will meet in this code base:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Area</th><th>Boot 3 tutorials say</th><th>Boot 4 / this project</th></tr></thead>
+<tbody>
+<tr><td>Base</td><td>Spring Framework 6</td><td>Spring Framework 7</td></tr>
+<tr><td>JSON</td><td>Jackson 2, <code>com.fasterxml.jackson.databind</code></td><td>Jackson 3, <code>tools.jackson.databind</code> (annotations unchanged)</td></tr>
+<tr><td>Web starter</td><td><code>spring-boot-starter-web</code></td><td><code>spring-boot-starter-webmvc</code></td></tr>
+<tr><td>Flyway, Kafka</td><td>add <code>flyway-core</code> / <code>spring-kafka</code></td><td>their own starters: <code>spring-boot-starter-flyway</code>, <code>spring-boot-starter-kafka</code></td></tr>
+<tr><td>Test slices</td><td>everything in <code>spring-boot-starter-test</code></td><td>per-technology test starters, e.g. <code>spring-boot-starter-webmvc-test</code> for <code>@WebMvcTest</code></td></tr>
+<tr><td>Package names</td><td><code>org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest</code></td><td><code>org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest</code></td></tr>
+<tr><td>Settings hook</td><td><code>org.springframework.boot.env.EnvironmentPostProcessor</code></td><td><code>org.springframework.boot.EnvironmentPostProcessor</code></td></tr>
+</tbody></table></div>
+<p>The main idea behind most changes: Boot 4 split its big auto-configuration jar into
+<strong>smaller modules</strong>, one per technology. So a feature often needs its own starter, and
+some classes moved to new packages. When a tutorial's import does not compile, search the Boot 4
+docs or the migration guide for the new name, and check our code for an example first.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Main class, component scan</td><td><code>backend/core-app/src/main/java/edu/campus/CoreApplication.java</code></td><td>T6</td></tr>
+<tr><td>Settings + dev/test profiles</td><td><code>backend/core-app/src/main/resources/application.yml</code></td><td>T6, T7</td></tr>
+<tr><td><code>@Bean</code> method, Clock</td><td><code>backend/core-app/.../platform/ClockConfiguration.java</code></td><td>T6</td></tr>
+<tr><td>Controller + record JSON</td><td><code>backend/core-app/.../platform/PingController.java</code></td><td>T6</td></tr>
+<tr><td><code>@Service</code> + <code>@Transactional</code></td><td><code>backend/core-app/.../platform/internal/OutboxProbeService.java</code></td><td>T7</td></tr>
+<tr><td>Auto-configuration list</td><td><code>platform-starter/src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code></td><td>T8, T9</td></tr>
+<tr><td>Settings hook + defaults</td><td><code>platform-starter/.../starter/config/PlatformDefaultsEnvironmentPostProcessor.java</code>, <code>campus-platform-defaults.yml</code>, <code>META-INF/spring.factories</code></td><td>T8</td></tr>
+<tr><td>Conditions, <code>@Scheduled</code></td><td><code>platform-starter/.../starter/outbox/</code></td><td>T8</td></tr>
+<tr><td>Conditional MVC beans</td><td><code>platform-starter/.../starter/problem/ProblemHandlingAutoConfiguration.java</code></td><td>T8</td></tr>
+<tr><td>More apps using the starter</td><td><code>registration-service</code>, <code>notification-service</code>, <code>gateway</code> (planned)</td><td>T10, T11, T13</td></tr>
+</tbody></table></div>
+<p>Also read <a href="../learn/platform/task6.md">docs/learn/platform/task6.md</a> and
+<a href="../learn/platform/task8.md">task8.md</a>.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong><code>@Autowired</code> on fields.</strong> Use a constructor and <code>final</code> fields.</li>
+  <li><strong>Calling <code>new</code> on a bean class</strong> inside production code. You get an
+      object without its dependencies and without its proxy (so no transaction).</li>
+  <li><strong>Self-invocation</strong>: calling a <code>@Transactional</code> method from the same
+      class and expecting a transaction.</li>
+  <li><strong>Catching an exception inside a <code>@Transactional</code> method and not rethrowing
+      it.</strong> Spring sees no exception, so it commits half the work.</li>
+  <li><strong>Writing passwords in <code>application.yml</code>.</strong> Use a placeholder and
+      <code>infra/.env</code> (dev) or environment variables (containers).</li>
+  <li><strong>Copying shared settings into each app.</strong> Shared defaults belong in
+      <code>campus-platform-defaults.yml</code>; an app only overrides what is different.</li>
+  <li><strong>Following a Boot 3 tutorial blindly.</strong> Check starter names, Jackson packages and
+      test annotations against section 8.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infrastructure, then core-app, and call it:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+.\mvnw.cmd -pl backend/core-app spring-boot:run
+curl.exe -s localhost:8081/api/v1/platform/ping
+curl.exe -s localhost:8081/actuator/health</code></pre>
+      <p>(In PowerShell, <code>curl</code> is an alias for another command; <code>curl.exe</code> is the real curl.)</p></li>
+  <li><p>Stop the app. Start it again with a different port from the command line and check which
+      value won:</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app spring-boot:run "-Dspring-boot.run.arguments=--server.port=9081"</code></pre></li>
+  <li><p>Start with <code>--debug</code> in the same way and find
+      <code>OutboxAutoConfiguration</code> and <code>ProblemHandlingAutoConfiguration</code> in the
+      condition report. Which conditions matched?</p></li>
+  <li><p>Read <code>OutboxIT</code>'s rollback test. Explain in two sentences why the event row
+      disappears too. Which proxy made that happen?</p></li>
+  <li><p>On paper: write the <code>EnrollmentService</code> from section 7 so that
+      <code>confirmAll</code> runs each confirm in its <strong>own</strong> transaction. (Hint: two
+      beans.)</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>IoC container</td><td>The part of Spring that creates objects and connects them.</td></tr>
+<tr><td>Bean</td><td>An object Spring creates and manages (one per app by default).</td></tr>
+<tr><td>Dependency injection</td><td>Spring passes the beans a class needs into its constructor.</td></tr>
+<tr><td>Stereotype</td><td>An annotation like <code>@Service</code> that marks a class as a bean.</td></tr>
+<tr><td>Component scan</td><td>Spring searching packages for stereotype classes.</td></tr>
+<tr><td>Starter</td><td>A dependency that brings everything for one feature.</td></tr>
+<tr><td>Auto-configuration</td><td>Configuration in a jar that switches on by itself when its conditions are true.</td></tr>
+<tr><td>Condition</td><td>A rule like "only if this class exists" on a configuration.</td></tr>
+<tr><td>Property source</td><td>One place settings come from (yml, env vars, command line).</td></tr>
+<tr><td>Profile (Spring)</td><td>A named set of settings, like <code>dev</code> or <code>test</code>.</td></tr>
+<tr><td>EnvironmentPostProcessor</td><td>A hook that adds settings very early at startup.</td></tr>
+<tr><td>Proxy</td><td>A wrapper object that adds work (like a transaction) around your method.</td></tr>
+<tr><td>Self-invocation</td><td>A call inside the same object; it skips the proxy.</td></tr>
+<tr><td>Actuator</td><td>Built-in endpoints for health, info and metrics.</td></tr>
+<tr><td>Jackson</td><td>The library that turns Java objects into JSON and back.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why does the project insist on constructor injection?</summary>
+    <p>Fields can be <code>final</code>, so the object is always complete; tests can build the class
+    with <code>new</code> and fakes, without Spring; and a long constructor shows that a class does
+    too much.</p></details>
+  <details><summary>2. Why does <code>PlatformDefaultsEnvironmentPostProcessor</code> use <code>addLast</code>?</summary>
+    <p><code>addLast</code> gives the shared defaults the lowest priority. Every app can still
+    override any value in its own yml, environment or command line, like core-app's test profile
+    does with a 2-second retry interval.</p></details>
+  <details><summary>3. How does core-app get problem JSON without any annotation or import?</summary>
+    <p>platform-starter's jar contains an <code>AutoConfiguration.imports</code> file that lists
+    <code>ProblemHandlingAutoConfiguration</code>. Spring Boot reads that file at startup and, because
+    the app is a servlet web app, creates the handler beans.</p></details>
+  <details><summary>4. A method calls <code>this.save(x)</code>, and <code>save</code> has <code>@Transactional</code>. Why is there no transaction?</summary>
+    <p>The transaction is started by the proxy around the bean. A call through <code>this</code>
+    goes straight to the real object and never passes the proxy, so nothing starts a transaction.</p></details>
+  <details><summary>5. Why must <code>OutboxAutoConfiguration</code> run after Modulith's auto-configuration?</summary>
+    <p>It uses <code>@ConditionalOnBean(FailedEventPublications.class)</code>. That bean is made by
+    Modulith. If our condition were checked first, the bean would not exist yet, and the retry job
+    would never be created.</p></details>
+  <details><summary>6. Why is the <code>Clock</code> a bean and not a static call?</summary>
+    <p>As a bean it can be replaced: production gets the system clock, tests get a fixed one. A
+    static <code>Instant.now()</code> cannot be replaced, so time-based rules cannot be tested
+    reliably.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-boot/reference/index.html">Spring Boot reference</a>: start here.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/features/external-config.html">Spring Boot: Externalized configuration</a>: property sources, profiles, <code>@ConfigurationProperties</code>, relaxed binding.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html">Spring Boot: Creating your own auto-configuration</a>: the <code>.imports</code> file and conditions.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/actuator/index.html">Spring Boot: Actuator</a>.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/core/beans.html">Spring Framework: The IoC container</a>.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative.html">Spring Framework: Declarative transactions</a>: proxies, rollback rules, self-invocation.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html">Spring Framework: Task scheduling</a>: <code>@Scheduled</code>.</li>
+  <li><a href="https://github.com/spring-projects/spring-boot/wiki">Spring Boot wiki</a>: release notes and the Boot 4 migration guide.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modern Java Lesson</title>
+<meta name="description" content="Smart Campus lesson 01: the Java 21 features this project uses every day, from records and enums to pattern matching, Clock and BigDecimal.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="01">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 01 · Part 1: Foundations</div>
+<h1>Modern Java 21 for this project</h1>
+<p class="lede">Smart Campus is written in Java 21. Java changed a lot after Java 8: records, pattern
+matching, sealed types, text blocks. This lesson teaches the parts you will read and write in every
+module, using the real code in <code>shared-kernel</code>.</p>
+
+<div class="meta">
+  <span class="badge module">shared-kernel</span>
+  <span class="badge module">every module</span>
+  <span class="badge task">T4 (done)</span>
+  <span class="badge task">T5 (done)</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Basics</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Nothing. Start here. You need JDK 21 on your computer: <code>java -version</code> should print
+  <code>21.x</code>. You should know basic Java (classes, methods, <code>if</code>, loops).
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why Java 21</a></li>
+    <li><a href="#records">Records and immutability</a></li>
+    <li><a href="#enums">Enums with fields</a></li>
+    <li><a href="#patterns">Pattern matching, switch, sealed types</a></li>
+    <li><a href="#generics">Generics</a></li>
+    <li><a href="#tools">var, Optional, streams, text blocks</a></li>
+    <li><a href="#time">Time: Instant, ZoneId, Clock</a></li>
+    <li><a href="#money">Money and errors</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why Java 21</h2>
+<p>Java 21 is an <strong>LTS</strong> release ("long-term support"): it gets security fixes for
+many years, so companies build on it. Spring Boot 4, Spring Modulith 2 and the other libraries in
+this project all run on it. The version is set once, in the root <code>pom.xml</code>:
+<code>&lt;java.version&gt;21&lt;/java.version&gt;</code> (see <a href="02-maven.html">lesson 02</a>).</p>
+<p>Modern Java helps us write <strong>small, safe types</strong>. The project rules in
+<code>SPEC-platform.md</code> say:</p>
+<ul>
+  <li><strong>Records</strong> for DTOs (data sent over HTTP), events and value objects.</li>
+  <li><strong>Constructor injection</strong> only, and <strong>no Lombok</strong> (a library that
+      writes code for you with annotations). Records already remove most of the boring code.</li>
+  <li><code>var</code> only when the type is obvious.</li>
+  <li>Inject a <code>Clock</code> and <strong>never call <code>Instant.now()</code></strong>.</li>
+</ul>
+<p>Think of these rules like building with checked bricks. Each brick (a record) tests itself when
+it is made. A broken brick can never get into the wall.</p>
+
+<h2 id="records">2. Records and immutability</h2>
+<p>A <strong>record</strong> is a short way to write a class that only carries data. You write the
+fields once, in the header. Java writes the rest: the constructor, one read method per field
+(<code>eventId()</code>, not <code>getEventId()</code>), <code>equals</code>, <code>hashCode</code>
+and <code>toString</code>.</p>
+
+<pre data-file="backend/shared-kernel/.../kernel/event/DomainEvent.java"><code>public record DomainEvent&lt;P&gt;(
+        UUID eventId, String type, int schemaVersion, Instant occurredAt, String aggregateId, P payload) {
+
+    public DomainEvent {                                <span class="c">// compact constructor</span>
+        Objects.requireNonNull(eventId, "eventId");
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(occurredAt, "occurredAt");
+        Objects.requireNonNull(aggregateId, "aggregateId");
+        Objects.requireNonNull(payload, "payload");
+        if (type.isBlank()) {
+            throw new IllegalArgumentException("type must not be blank");
+        }
+        if (schemaVersion &lt; 1) {
+            throw new IllegalArgumentException("schemaVersion must be &gt;= 1, but got " + schemaVersion);
+        }
+    }
+}</code></pre>
+
+<h3>The compact constructor</h3>
+<p><code>public DomainEvent { ... }</code> has no parameter list. It is a <strong>compact
+constructor</strong>: it runs <em>before</em> the fields are set, with the parameters already in
+scope. This is where a record checks its rules. If a rule fails, it throws, and the object is never
+created. So <strong>an invalid <code>DomainEvent</code> cannot exist</strong> anywhere in the
+program.</p>
+<p>A compact constructor can also <strong>change</strong> a value before it is stored. <code>Money</code>
+does this to fix the number of decimals:</p>
+<pre data-file="backend/shared-kernel/.../kernel/money/Money.java (part)"><code>public record Money(BigDecimal amount, Currency currency) {
+    public Money {
+        Objects.requireNonNull(amount, "amount");
+        Objects.requireNonNull(currency, "currency");
+        int decimals = currency.getDefaultFractionDigits();           <span class="c">// VND → 0, USD → 2</span>
+        try {
+            amount = amount.setScale(decimals, RoundingMode.UNNECESSARY); <span class="c">// reassign the parameter</span>
+        } catch (ArithmeticException tooManyDecimals) {
+            throw new IllegalArgumentException(...);
+        }
+    }
+}</code></pre>
+
+<h3>Typed ids: one tiny record per kind of id</h3>
+<p>Every id in Smart Campus is a <code>UUID</code>. But if every method takes a plain
+<code>UUID</code>, nothing stops you from passing a course id where a student id is expected. So
+each module writes small records that implement <code>TypedId</code>:</p>
+<pre data-file="The pattern from backend/shared-kernel/.../kernel/id/TypedId.java"><code>public record StudentId(UUID value) implements TypedId {
+    public StudentId {
+        Ids.requireId(value, "StudentId");   <span class="c">// a null id is never allowed</span>
+    }
+}
+
+void enroll(StudentId student, SectionId section) { … }
+enroll(sectionId, studentId);                  <span class="c">// does not compile: good!</span></code></pre>
+<p><code>shared-kernel</code> does not contain <code>StudentId</code> itself. Ids belong to their
+module (for example the planned <code>identity</code> module). The kernel only gives the interface
+and the <code>Ids</code> helper.</p>
+
+<h3>equals and hashCode for free</h3>
+<p>Two records are <strong>equal when all their fields are equal</strong>. This is called
+<em>value equality</em>, and it is what we want for value objects: two "1 000 VND" are the same
+money. Because <code>Money</code> stores every amount with the currency's scale, even
+<code>10.5 USD</code> and <code>10.50 USD</code> are equal (the test <code>equalsIgnoresScale</code>
+in <code>MoneyTest</code> proves it). Equal objects also get the same <code>hashCode</code>, so
+records work correctly as keys in a <code>HashMap</code> or items in a <code>HashSet</code>.</p>
+
+<h3>Immutability</h3>
+<p><strong>Immutable</strong> means "cannot change after it is made". Record fields are
+<code>final</code>, and there are no setters. To "change" money, you make a new one:
+<code>fee.plus(tax)</code> returns a new <code>Money</code>. Immutable objects are safe to share
+between threads and between modules, because nobody can change them behind your back.</p>
+<div class="callout warn">
+  <span class="title">Records are only "shallowly" immutable</span>
+  If a record holds a <code>List</code>, the list itself can still be changed by whoever has it.
+  Copy it in the compact constructor: <code>items = List.copyOf(items);</code>. <code>List.copyOf</code>
+  makes an unmodifiable copy (and rejects <code>null</code> items).
+</div>
+
+<h2 id="enums">3. Enums with fields</h2>
+<p>An <strong>enum</strong> is a fixed list of named values. In Java, each value can carry its own
+fields and methods, like a tiny class. We use this for lists that are known when the code is
+written and that the build should check.</p>
+<pre data-file="backend/shared-kernel/.../kernel/error/ProblemCode.java (part)"><code>public enum ProblemCode {
+    INTERNAL_ERROR(500, "Internal error"),
+    VALIDATION_FAILED(400, "Validation failed"),
+    NOT_FOUND(404, "Not found"),
+    CONFLICT(409, "Conflict"),
+    RATE_LIMITED(429, "Rate limited");
+
+    private final int status;
+    private final String title;
+    private final URI type;
+
+    ProblemCode(int status, String title) {          <span class="c">// enum constructors are always private</span>
+        this.status = status;
+        this.title = title;
+        this.type = URI.create(TYPE_BASE + name().toLowerCase(Locale.ROOT).replace('_', '-'));
+    }
+}</code></pre>
+<p><code>Topics</code> is the same idea with four fields per value: the Kafka topic name, the
+partition count, the key field and a <code>replayable</code> flag
+(<code>REGISTRATION_REQUESTS("registration.requests", 12, "sectionId", false)</code>). Useful
+built-in methods:</p>
+<ul>
+  <li><code>values()</code> gives all constants. <code>TopicsTest</code> uses it to check there are
+      exactly 5 topics.</li>
+  <li><code>name()</code> gives the constant's name, e.g. <code>"NOT_FOUND"</code>.</li>
+  <li><code>valueOf("NOT_FOUND")</code> finds a constant by its name.</li>
+</ul>
+<p>Why <code>Locale.ROOT</code>? Lower-casing depends on the language. In Turkish, <code>"I"</code>
+becomes a dotless <code>"ı"</code>. <code>Locale.ROOT</code> gives the same result on every
+computer.</p>
+
+<h2 id="patterns">4. Pattern matching, switch, sealed types</h2>
+<h3>Pattern matching for instanceof</h3>
+<p>Old Java needed a test and then a cast. Java 21 does both in one step and gives the result a
+name:</p>
+<div class="compare">
+  <div class="poor"><h4>Old style</h4>
+<pre><code>if (value instanceof TypedId) {
+    TypedId id = (TypedId) value;
+    return id.value().toString();
+}</code></pre></div>
+  <div class="good"><h4>Java 21 (from Topics.keyOf)</h4>
+<pre><code>return value instanceof TypedId id
+        ? id.value().toString()
+        : value.toString();</code></pre></div>
+</div>
+<p><code>ProbeTopic.isProbeEvent</code> in core-app uses the same pattern with <code>&amp;&amp;</code>:
+<code>event instanceof DomainEvent&lt;?&gt; envelope &amp;&amp; EVENT_TYPE.equals(envelope.type())</code>.
+The name <code>envelope</code> exists only where the test is known to be true.</p>
+
+<h3>Switch expressions</h3>
+<p>A <strong>switch expression</strong> gives back a value. It uses arrows (<code>-&gt;</code>), so
+there is no fall-through and no <code>break</code>:</p>
+<pre><code>String hint = switch (code) {
+    case NOT_FOUND -&gt; "Check the id in the URL";
+    case CONFLICT, RATE_LIMITED -&gt; "Wait a moment and try again";
+    default -&gt; "Contact support with the traceId";
+};</code></pre>
+
+<h3>Sealed interfaces and record patterns</h3>
+<p>A <strong>sealed</strong> interface lists every class that may implement it. Nobody else can add
+one. Then the compiler knows <em>all</em> the cases, and a <code>switch</code> over it needs no
+<code>default</code>. If someone adds a new case later, every switch that forgets it stops
+compiling. That is a safety net for business rules.</p>
+<p>A <strong>record pattern</strong> takes a record apart inside the <code>case</code>, so you get
+its fields directly. Here is an example in the style of the planned <code>registration</code> module
+(names may change):</p>
+<pre data-file="Example: the result of a seat request (planned, names may change)"><code>public sealed interface SeatResult
+        permits SeatResult.Confirmed, SeatResult.Waitlisted, SeatResult.Rejected {
+
+    record Confirmed(UUID enrollmentId) implements SeatResult {}
+    record Waitlisted(int position) implements SeatResult {}
+    record Rejected(String reason) implements SeatResult {}
+}
+
+String message(SeatResult result) {
+    return switch (result) {                                   <span class="c">// no default needed</span>
+        case SeatResult.Confirmed c -&gt; "You got the seat!";
+        case SeatResult.Waitlisted(int position) -&gt; "You are number " + position + " on the waitlist";
+        case SeatResult.Rejected(String reason) -&gt; "Sorry: " + reason;
+    };
+}</code></pre>
+<div class="callout tip">
+  <span class="title">When to use a sealed type</span>
+  Use it when an answer can be one of a few shapes, each with different data: a seat result, a
+  payment outcome, a grade-import row that is valid or has errors. It is clearer than one class
+  with many nullable fields and a "status" string.
+</div>
+
+<h2 id="generics">5. Generics</h2>
+<p><strong>Generics</strong> let one class work with many types, while the compiler still checks
+them. <code>DomainEvent&lt;P&gt;</code> has a <strong>type parameter</strong> <code>P</code> for the
+payload. <code>DomainEvent&lt;EnrollmentConfirmed&gt;</code> is an envelope whose
+<code>payload()</code> returns an <code>EnrollmentConfirmed</code>, with no cast.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>You see</th><th>It means</th><th>Real example</th></tr></thead>
+<tbody>
+<tr><td><code>DomainEvent&lt;P&gt;</code></td><td>A class with a type parameter</td><td><code>DomainEvent.java</code></td></tr>
+<tr><td><code>DomainEvent&lt;?&gt;</code></td><td>"An envelope of some payload type; I don't care which"</td><td><code>Topics.keyOf(DomainEvent&lt;?&gt; event)</code></td></tr>
+<tr><td><code>Class&lt;?&gt;</code></td><td>"Some class object"</td><td><code>EventTypes</code>: <code>Map&lt;String, Class&lt;?&gt;&gt;</code></td></tr>
+<tr><td><code>new DomainEvent&lt;&gt;(…)</code></td><td>The "diamond": Java works out the type</td><td><code>OutboxProbeService.create</code></td></tr>
+<tr><td><code>&lt;T extends TypedId&gt;</code></td><td>"T must be some kind of TypedId"</td><td>for your own helper methods</td></tr>
+</tbody></table></div>
+<p><strong>Type erasure</strong>: generic types exist only for the compiler. When the program runs,
+a <code>DomainEvent&lt;EnrollmentConfirmed&gt;</code> is just a <code>DomainEvent</code>. That is why
+a consumer reading JSON cannot know the payload class by itself. It reads the <code>type</code>
+text and asks <code>EventTypes</code>: <code>"EnrollmentConfirmed"</code> →
+<code>EnrollmentConfirmed.class</code> (<a href="08-outbox-idempotency.html">lesson 08</a> shows
+why the envelope matters).</p>
+
+<h2 id="tools">6. var, Optional, streams, text blocks</h2>
+<h3>var</h3>
+<p><code>var</code> lets Java work out the type of a <strong>local variable</strong> from the right
+side. Project rule: use it only when the type is obvious from that line.</p>
+<div class="compare">
+  <div class="good"><h4>OK</h4>
+<pre><code>var accessor = component.getAccessor();   <span class="c">// from Topics</span>
+var events = new ArrayList&lt;DomainEvent&lt;?&gt;&gt;();</code></pre></div>
+  <div class="poor"><h4>Not OK</h4>
+<pre><code>var x = service.process(input);   <span class="c">// what is x?</span>
+var n = 10;                       <span class="c">// int? long? say it</span></code></pre></div>
+</div>
+
+<h3>Optional</h3>
+<p><code>Optional&lt;T&gt;</code> is a box that holds one value or nothing. Use it as a
+<strong>return type</strong> when "not found" is a normal answer. It forces the caller to decide
+what to do when the box is empty. From <code>CampusProblemHandler</code> in platform-starter:</p>
+<pre><code>Optional&lt;ProblemCode&gt; known = forStatus(status.value());        <span class="c">// 404 → NOT_FOUND, 405 → empty</span>
+String code = known.map(Enum::name).orElseGet(() -&gt; codeName(status));</code></pre>
+<p>Do not use <code>Optional</code> for fields or method parameters, and never call
+<code>get()</code> without checking. Use <code>map</code>, <code>orElse</code>,
+<code>orElseGet</code> or <code>orElseThrow</code>.</p>
+
+<h3>Streams</h3>
+<p>A <strong>stream</strong> is a pipeline over a collection: filter, change, collect. It reads
+like a sentence. From <code>Topics.byName</code>:</p>
+<pre><code>return Arrays.stream(values())
+        .filter(t -&gt; t.topicName.equals(topicName))
+        .findFirst()                                               <span class="c">// Optional&lt;Topics&gt;</span>
+        .orElseThrow(() -&gt; new IllegalArgumentException("Unknown topic '%s'".formatted(topicName)));</code></pre>
+<p><code>.toList()</code> (Java 16+) ends a stream with an <strong>unmodifiable</strong> list. The
+problem handler uses it to build the list of invalid fields. <code>t -&gt; …</code> is a
+<strong>lambda</strong> (a small function without a name), and <code>Enum::name</code> is a
+<strong>method reference</strong> (a short form of <code>e -&gt; e.name()</code>).</p>
+
+<h3>Text blocks and formatted</h3>
+<p>A <strong>text block</strong> is a multi-line string between <code>"""</code>. It is perfect for
+SQL, because you can keep the query readable:</p>
+<pre data-file="Example: SQL for a JdbcTemplate call (lesson 04)"><code>private static final String FIND_UNFINISHED = """
+        SELECT id, event_type, publication_date
+        FROM platform.event_publication
+        WHERE completion_date IS NULL
+        ORDER BY publication_date
+        """;</code></pre>
+<p>Java removes the common indentation for you. For values, the project uses
+<code>"Course %s does not exist".formatted(id)</code> everywhere. Never glue user input into SQL
+text: pass values as <code>?</code> parameters (<a href="04-postgres-flyway.html">lesson 04</a>).</p>
+
+<h2 id="time">7. Time: Instant, ZoneId, Clock</h2>
+<p>The <code>java.time</code> package has a type for each meaning of "time":</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>Meaning</th><th>Smart Campus use</th></tr></thead>
+<tbody>
+<tr><td><code>Instant</code></td><td>One exact point on the world timeline, in UTC</td><td><code>occurredAt</code>, <code>created_at</code>, <code>TimeRange</code>, JSON times</td></tr>
+<tr><td><code>ZoneId</code></td><td>A time zone with its rules, e.g. <code>Asia/Ho_Chi_Minh</code></td><td>Showing times to students in Vietnam (UTC+7)</td></tr>
+<tr><td><code>ZonedDateTime</code></td><td>An instant seen in one zone</td><td>"Class starts Monday 08:00 local time"</td></tr>
+<tr><td><code>LocalDate</code></td><td>A date with no time and no zone</td><td>Semester start date, birthday</td></tr>
+<tr><td><code>Duration</code></td><td>An amount of time</td><td><code>retry-interval: 30s</code>, class length</td></tr>
+</tbody></table></div>
+<p>The rule: <strong>store and send <code>Instant</code> (UTC)</strong>. Convert to
+<code>Asia/Ho_Chi_Minh</code> only at the edge, when you show a time or when a rule depends on the
+local day:</p>
+<pre><code>static final ZoneId CAMPUS_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
+
+LocalDate today = LocalDate.ofInstant(clock.instant(), CAMPUS_ZONE);   <span class="c">// "today" in Vietnam</span>
+ZonedDateTime start = ZonedDateTime.of(2026, 9, 7, 8, 0, 0, 0, CAMPUS_ZONE);
+Instant startUtc = start.toInstant();                                  <span class="c">// 2026-09-07T01:00:00Z</span></code></pre>
+
+<h3>Why we inject a Clock</h3>
+<p><code>Instant.now()</code> reads the real computer time. A test that uses it gets a different
+answer every run, and a rule like "registration closes at 17:00" cannot be tested at 09:00. So the
+spec says: ask Spring for a <code>Clock</code> in the constructor, and call
+<code>clock.instant()</code>.</p>
+<div class="flow">
+  <div class="box project"><b>Production</b><code>ClockConfiguration</code> makes one bean: <code>Clock.systemUTC()</code></div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>Your class</b>takes <code>Clock clock</code> in its constructor, calls <code>clock.instant()</code></div>
+  <div class="arrow">←</div>
+  <div class="box ok"><b>Tests</b>pass <code>Clocks.fixedAt("2026-09-07T08:00:00Z")</code>: same time every run</div>
+</div>
+<pre data-file="backend/core-app/.../platform/PingController.java (part)"><code>PingController(Clock clock, @Value("${spring.application.name}") String app, …) {
+    this.clock = clock;
+}
+
+@GetMapping("/ping")
+Ping ping() {
+    return new Ping(app, version, clock.instant());   <span class="c">// never Instant.now()</span>
+}</code></pre>
+<p><code>PingControllerTest</code> gives a fixed clock and can expect exactly
+<code>"2026-09-07T08:00:00Z"</code> in the JSON. <code>Clocks.offset(base, Duration.ofHours(2))</code>
+moves a test clock forward to test "after the deadline".</p>
+
+<h2 id="money">8. Money and errors</h2>
+<h3>BigDecimal for money</h3>
+<p><code>double</code> stores numbers in binary, so <code>0.1 + 0.2</code> gives
+<code>0.30000000000000004</code>. For money that is not acceptable. <code>BigDecimal</code> stores
+exact decimal numbers.</p>
+<ul>
+  <li>Create it from a <strong>string</strong>: <code>new BigDecimal("0.1")</code>. The constructor
+      that takes a <code>double</code> copies the binary error in.</li>
+  <li><strong>Scale</strong> = digits after the point. VND has 0, USD has 2.</li>
+  <li><code>BigDecimal.equals</code> looks at the scale (<code>10.5</code> ≠ <code>10.50</code>);
+      <code>compareTo</code> does not. <code>Money</code> avoids the trap by fixing the scale.</li>
+  <li><code>RoundingMode.UNNECESSARY</code> means "never round; fail instead". Half a đồng does
+      not exist, so <code>Money.of("1000.5", "VND")</code> throws.</li>
+</ul>
+<p>Always use <code>Money</code>, never a bare <code>BigDecimal</code>, because an amount without a
+currency is a bug waiting to happen. <code>plus</code> refuses to add USD to VND.</p>
+
+<h3>Unchecked exceptions and CampusProblem</h3>
+<p>Java has two kinds of exceptions. <strong>Checked</strong> ones (like <code>IOException</code>)
+must be declared with <code>throws</code> or caught. <strong>Unchecked</strong> ones extend
+<code>RuntimeException</code> and can be thrown anywhere. Our business errors are unchecked:</p>
+<pre data-file="backend/shared-kernel/.../kernel/error/CampusProblem.java (use)"><code>throw new CampusProblem(ProblemCode.NOT_FOUND, "Course %s does not exist".formatted(id));</code></pre>
+<p>The platform-starter catches it and writes problem JSON with status 404, the code
+<code>NOT_FOUND</code> and a <code>traceId</code> (<a href="09-rest-problem-openapi.html">lesson 09</a>).
+Value objects throw plain <code>IllegalArgumentException</code> (bad value) or
+<code>NullPointerException</code> (missing value). They stay plain Java and do not know about HTTP.</p>
+
+<h3>Objects.requireNonNull</h3>
+<p><code>Objects.requireNonNull(amount, "amount")</code> returns the value if it is not null, and
+throws a <code>NullPointerException</code> with the message <code>"amount"</code> if it is. Failing
+<strong>early</strong>, at construction, with the field name, is far easier to debug than a crash
+ten calls later. <code>Ids.requireId</code> uses the form that takes a <code>Supplier</code>, so the
+message string is only built when it is needed.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Record + compact constructor + generics</td><td><code>backend/shared-kernel/.../kernel/event/DomainEvent.java</code></td><td>T5</td></tr>
+<tr><td>Typed ids</td><td><code>backend/shared-kernel/.../kernel/id/TypedId.java</code>, <code>Ids.java</code></td><td>T4</td></tr>
+<tr><td>BigDecimal value object</td><td><code>backend/shared-kernel/.../kernel/money/Money.java</code></td><td>T4</td></tr>
+<tr><td>Instant range with overlap rule</td><td><code>backend/shared-kernel/.../kernel/time/TimeRange.java</code></td><td>T4</td></tr>
+<tr><td>Enums with fields</td><td><code>kernel/error/ProblemCode.java</code>, <code>kernel/event/Topics.java</code></td><td>T4, T5</td></tr>
+<tr><td>Unchecked business error</td><td><code>kernel/error/CampusProblem.java</code></td><td>T4</td></tr>
+<tr><td>Test clocks</td><td><code>backend/shared-kernel/src/test/java/edu/campus/kernel/testing/Clocks.java</code> (shared as a test-jar)</td><td>T4</td></tr>
+<tr><td>The one <code>Clock</code> bean</td><td><code>backend/core-app/.../platform/ClockConfiguration.java</code></td><td>T6</td></tr>
+<tr><td>instanceof patterns, Optional, streams</td><td><code>Topics.keyOf</code>, <code>ProbeTopic</code>, <code>CampusProblemHandler</code></td><td>T5, T7, T8</td></tr>
+<tr><td>Sealed results, more records</td><td>Feature modules: <code>course</code>, <code>registration</code>, <code>grade</code> … (planned)</td><td>modules 2–14</td></tr>
+</tbody></table></div>
+<p>Also read the learning notes <a href="../learn/platform/task4.md">docs/learn/platform/task4.md</a>
+and <a href="../learn/platform/task5.md">task5.md</a>.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Calling <code>Instant.now()</code> or <code>LocalDate.now()</code>.</strong> Ask for a
+      <code>Clock</code> instead. Without a clock argument, <code>LocalDate.now()</code> also uses
+      the server's zone, which may not be Vietnam.</li>
+  <li><strong>Using <code>LocalDateTime</code> for a moment in time.</strong> It has no zone, so
+      "08:00" is not a real point on the timeline. Store <code>Instant</code>.</li>
+  <li><strong>Using <code>double</code> or a bare <code>BigDecimal</code> for money.</strong> Use
+      <code>Money</code>.</li>
+  <li><strong>Checking rules outside the record.</strong> Put the check in the compact constructor,
+      so no code path can skip it.</li>
+  <li><strong>Passing plain <code>UUID</code>s around.</strong> Use the module's typed id.</li>
+  <li><strong>Adding a <code>default</code> to a switch over a sealed type.</strong> Then the
+      compiler cannot warn you when a new case is added.</li>
+  <li><strong>Catching an exception and doing nothing.</strong> Let it travel up to the problem
+      handler, or turn it into a <code>CampusProblem</code> with a clear code.</li>
+  <li><strong>Field injection or Lombok.</strong> Both are against the project rules. Write the
+      constructor (records do it for you).</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Run the shared-kernel tests and open the coverage report
+      <code>backend/shared-kernel/target/site/jacoco/index.html</code>:</p>
+<pre><code>.\mvnw.cmd -pl backend/shared-kernel test</code></pre></li>
+  <li><p>Play with the real classes in <strong>jshell</strong> (an interactive Java console that
+      comes with the JDK):</p>
+<pre><code>jshell --class-path backend/shared-kernel/target/classes
+jshell&gt; import edu.campus.kernel.money.Money;
+jshell&gt; Money.of("10.5", "USD").equals(Money.of("10.50", "USD"))
+jshell&gt; Money.of("1000.5", "VND")</code></pre>
+      <p>Explain each answer in one sentence.</p></li>
+  <li><p>In a scratch test, write <code>record SectionId(UUID value) implements TypedId</code> with a
+      compact constructor that uses <code>Ids.requireId</code>. Check that <code>new SectionId(null)</code>
+      throws, and that two <code>SectionId</code>s with the same UUID are equal.</p></li>
+  <li><p>Write a small class <code>RegistrationWindow</code> that takes a <code>Clock</code> and a
+      <code>TimeRange</code>, with a method <code>isOpen()</code>. Test it with
+      <code>Clocks.fixedAt(...)</code> before, inside and exactly at the end of the range. Is the end
+      inside? (Read <code>TimeRange</code>'s Javadoc.)</p></li>
+  <li><p>Write the <code>SeatResult</code> sealed interface from section 4 and its
+      <code>message</code> switch. Then add a fourth record <code>Queued</code> and see what the
+      compiler says.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>LTS</td><td>"Long-term support": a Java version that gets fixes for many years.</td></tr>
+<tr><td>Record</td><td>A short class for data. Java writes constructor, accessors, equals, hashCode, toString.</td></tr>
+<tr><td>Compact constructor</td><td>The <code>Name { … }</code> block in a record, where values are checked.</td></tr>
+<tr><td>Value object</td><td>A small object defined only by its values (Money, TimeRange, a typed id).</td></tr>
+<tr><td>Immutable</td><td>Cannot be changed after it is created.</td></tr>
+<tr><td>Enum</td><td>A fixed list of named values, each can have fields.</td></tr>
+<tr><td>Pattern matching</td><td>Test the type (or shape) of a value and name the parts in one step.</td></tr>
+<tr><td>Sealed interface</td><td>An interface that lists every allowed implementation.</td></tr>
+<tr><td>Generic / type parameter</td><td>A placeholder type like <code>P</code> in <code>DomainEvent&lt;P&gt;</code>.</td></tr>
+<tr><td>Type erasure</td><td>Generic types are removed after compiling; the running program does not know them.</td></tr>
+<tr><td>Optional</td><td>A box with one value or nothing, used as a return type.</td></tr>
+<tr><td>Stream</td><td>A pipeline of steps (filter, map, collect) over many items.</td></tr>
+<tr><td>Lambda</td><td>A small function without a name: <code>t -&gt; t.name()</code>.</td></tr>
+<tr><td>Text block</td><td>A multi-line string between <code>"""</code>.</td></tr>
+<tr><td>Instant</td><td>A point in time in UTC.</td></tr>
+<tr><td>Clock</td><td>An object that tells the time; can be real or fixed for tests.</td></tr>
+<tr><td>Scale</td><td>The number of digits after the decimal point of a <code>BigDecimal</code>.</td></tr>
+<tr><td>Unchecked exception</td><td>A <code>RuntimeException</code>; no <code>throws</code> needed.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do the rules of <code>DomainEvent</code> live in the compact constructor and not in the code that publishes events?</summary>
+    <p>The compact constructor runs every time an envelope is created, on every code path. So an
+    invalid envelope can never exist, and no publisher can forget the check. A check in the
+    publisher would have to be copied, and one copy would be forgotten.</p></details>
+  <details><summary>2. Why does <code>Money</code> change the scale in its constructor?</summary>
+    <p>So that the same amount always has the same form (<code>10.50 USD</code>). Then the record's
+    generated <code>equals</code> and <code>hashCode</code> work, even though plain
+    <code>BigDecimal.equals</code> sees <code>10.5</code> and <code>10.50</code> as different.</p></details>
+  <details><summary>3. What do we gain from <code>StudentId</code> instead of a plain <code>UUID</code>?</summary>
+    <p>The compiler catches mixed-up ids. <code>enroll(sectionId, studentId)</code> with the
+    arguments swapped does not compile. With plain UUIDs, it would compile and corrupt data.</p></details>
+  <details><summary>4. Why must production code take a <code>Clock</code> instead of calling <code>Instant.now()</code>?</summary>
+    <p>So tests can control time. With a fixed clock, a test gets the same result on every run and
+    can check rules like "the window is closed after 17:00" at any time of day.</p></details>
+  <details><summary>5. Why is a <code>default</code> branch a bad idea in a switch over a sealed interface?</summary>
+    <p>Without <code>default</code>, the compiler checks that every case is handled. When someone
+    adds a new case, every switch that misses it fails to compile. A <code>default</code> hides
+    the new case silently.</p></details>
+  <details><summary>6. Why does <code>EventTypes</code> exist, if <code>DomainEvent</code> is already generic?</summary>
+    <p>Because of type erasure: at runtime the payload type is gone, and JSON contains no Java
+    classes. The consumer reads the <code>type</code> text and needs a table to find the payload
+    class to build.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/language/records.html">Java 21 language guide: Records</a>: records and compact constructors.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/language/pattern-matching.html">Java 21 language guide: Pattern matching</a>: instanceof, switch and record patterns.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/language/sealed-classes-and-interfaces.html">Java 21 language guide: Sealed classes and interfaces</a>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/text-blocks/index.html">Programmer's guide to text blocks</a>.</li>
+  <li><a href="https://openjdk.org/jeps/441">JEP 441: Pattern matching for switch</a> and <a href="https://openjdk.org/jeps/440">JEP 440: Record patterns</a>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/package-summary.html">java.time package (Java 21 API)</a>: <code>Instant</code>, <code>ZoneId</code>, <code>Clock</code>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/math/BigDecimal.html">BigDecimal (Java 21 API)</a>: scale, rounding and <code>equals</code> vs <code>compareTo</code>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Optional.html">Optional (Java 21 API)</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

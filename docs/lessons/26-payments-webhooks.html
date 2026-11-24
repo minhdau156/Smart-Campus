@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payments and Webhooks</title>
+<meta name="description" content="Smart Campus lesson 26: payment gateway redirects, verified webhooks with HMAC, a payment state machine, VND money, idempotency keys, refunds and reconciliation.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="26">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 26 · Part 2: Feature modules</div>
+<h1>Payments, webhooks and idempotency</h1>
+<p class="lede">A student pays 50 000 VND for a club event ticket. Money moves in a system we do not
+control, messages arrive late, twice, or are faked. This lesson shows how to take payments so that
+nobody pays without a ticket, and nobody gets a ticket without paying.</p>
+
+<div class="meta">
+  <span class="badge module">payment ★</span>
+  <span class="badge module">club</span>
+  <span class="badge task">CLUB-4 (paid)</span>
+  <span class="badge task">CLUB-7</span>
+  <span class="badge task">C7</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Planned module</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="08-outbox-idempotency.html">08 (outbox, idempotent consumers)</a>,
+  <a href="09-rest-problem-openapi.html">09 (REST and problem JSON)</a> and
+  <a href="19-domain-modeling.html">19 (aggregates and rules)</a>. <code>SPEC-payment.md</code> is
+  not written yet: all payment code here is <strong>planned</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#flow">The redirect flow</a></li>
+    <li><a href="#hmac">Checking the signature</a></li>
+    <li><a href="#state">The payment state machine</a></li>
+    <li><a href="#duplicates">Webhooks that arrive many times</a></li>
+    <li><a href="#money">Money in VND</a></li>
+    <li><a href="#our-api">Idempotency-Key, events, refunds, reconciliation</a></li>
+    <li><a href="#dev">The mock webhook and secrets</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>CLUB-4 says a student gets a free <em>or paid</em> ticket. CLUB-7 says they can cancel and get
+a refund before the deadline. The Architecture says a payment gateway (for example VNPay or MoMo)
+confirms payment with a <strong>webhook</strong>, and <code>club</code> consumes
+<code>PaymentConfirmed</code>. But no module produced that event. Resolution <strong>C7</strong>
+created a new module for it: <code>payment</code> ★ (module 10, in <code>core-app</code>, schema
+<code>payment</code>). It publishes <code>PaymentConfirmed</code> and <code>PaymentRefunded</code>.</p>
+<div class="flow">
+  <div class="box project"><b>club</b>student wants a paid ticket</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>payment</b>creates a payment, redirects to the gateway, verifies the webhook</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>Kafka</b><code>PaymentConfirmed</code></div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>club</b>issues the QR ticket (<a href="27-qr-tickets.html">lesson 27</a>)</div>
+</div>
+<p>Assumption 4: external systems are stubbed. In dev we use the provider's
+<strong>sandbox</strong> (a test copy of their system with fake money) or a
+<strong>mock webhook</strong> (section 8).</p>
+
+<h2 id="flow">2. The redirect flow</h2>
+<p>We never see card or bank details. The student types them on the gateway's own page. Our job is
+to send them there with the right order, and to learn the result. Most Vietnamese gateways work
+like this (names of fields differ, so always follow the provider's official docs):</p>
+<pre class="diagram">Browser            Smart Campus (payment)             Payment gateway
+   │ POST /api/v1/payment/payments ──►│
+   │   (Idempotency-Key: …)           │ save payment PENDING
+   │◄── 201 { redirectUrl } ──────────│ build URL: order ref, amount,
+   │                                  │ return URL, expiry, + signature
+   │ ── browser goes to redirectUrl ──────────────────────────────►│
+   │                                  │          student pays      │
+   │                                  │◄── IPN / webhook (server to server, signed)
+   │                                  │ verify, mark PAID, outbox event
+   │                                  │── "received" answer ───────►│
+   │◄── browser sent back to return URL (signed query string) ─────│
+   │ GET /api/v1/payment/payments/{id} → "PAID"</pre>
+<ol>
+  <li>Our backend saves a <code>payments</code> row with status <code>PENDING</code> and a unique
+      <strong>order reference</strong> (the id the gateway will send back to us).</li>
+  <li>It builds the gateway URL with the amount, the order reference, a return URL and an expiry
+      time, and <strong>signs</strong> it with a secret key shared only with the gateway.</li>
+  <li>The browser goes to the gateway. The student pays there.</li>
+  <li>The gateway calls our <strong>webhook</strong> (VNPay calls it IPN: Instant Payment
+      Notification) directly from its servers, and also sends the browser back to our return URL.</li>
+</ol>
+
+<h3 id="return-vs-ipn">Return URL vs webhook (IPN)</h3>
+<div class="compare">
+  <div class="poor"><h4>Return URL (browser comes back)</h4>
+    <p>Travels <strong>through the student's browser</strong>. The student can edit it, bookmark
+    it, or never arrive (closed the tab, phone battery died, network lost). Use it only to show a
+    nice "checking your payment…" page.</p></div>
+  <div class="good"><h4>Webhook / IPN (server to server)</h4>
+    <p>The gateway's server calls our server. It is signed, and gateways retry it if we do not
+    answer. This is the <strong>only</strong> message that may change a payment to
+    <code>PAID</code>.</p></div>
+</div>
+<p>An analogy: the return URL is the customer saying "I paid, look at my phone screen". The
+webhook is the bank calling the shop directly. You give the goods based on the bank's call.</p>
+<p>So the return page does not trust its query string. It polls our own API,
+<code>GET /api/v1/payment/payments/{id}</code>, until the status is final, and shows the result.</p>
+
+<h2 id="hmac">3. Checking the signature</h2>
+<p>Anyone on the internet can send a POST to our webhook URL. To know the message really comes from
+the gateway, gateways sign it with an <strong>HMAC</strong>: a hash of the message mixed with a
+secret key that only we and the gateway know. Without the key, nobody can make a valid signature,
+and changing one character of the message breaks it.</p>
+<p>The general steps (the exact field list, order and hash, for example HMAC-SHA256 or HMAC-SHA512,
+come from the provider's docs):</p>
+<ol>
+  <li>Take the fields the provider lists, in the exact order and format they describe.</li>
+  <li>Compute the HMAC with our secret.</li>
+  <li>Compare it with the signature in the message using a <strong>constant-time compare</strong>.</li>
+</ol>
+<pre data-file="payment/internal/gateway/SignatureVerifier.java (planned)"><code>package edu.campus.payment.internal.gateway;
+
+final class SignatureVerifier {
+    private final SecretKeySpec key;
+    private final String algorithm;                     <span class="c">// e.g. "HmacSHA512", from the provider's docs</span>
+
+    SignatureVerifier(byte[] secret, String algorithm) {
+        this.key = new SecretKeySpec(secret, algorithm);
+        this.algorithm = algorithm;
+    }
+
+    boolean isValid(String signedData, String receivedHex) {
+        byte[] expected = hmac(signedData);
+        byte[] received;
+        try {
+            received = HexFormat.of().parseHex(receivedHex.toLowerCase(Locale.ROOT));
+        } catch (IllegalArgumentException notHex) {
+            return false;
+        }
+        return MessageDigest.isEqual(expected, received);   <span class="c">// constant time</span>
+    }
+
+    private byte[] hmac(String data) {
+        try {
+            Mac mac = Mac.getInstance(algorithm);
+            mac.init(key);
+            return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("HMAC not available", e);
+        }
+    }
+}</code></pre>
+<div class="callout warn">
+  <span class="title">Why constant time?</span>
+  <code>String.equals</code> stops at the first different character. An attacker who measures the
+  answer time very precisely can guess the signature one character at a time (a <strong>timing
+  attack</strong>). <code>MessageDigest.isEqual</code> takes the same time whatever the input.
+</div>
+<p>A valid signature is not the end. After it, also check:</p>
+<ul>
+  <li>the <strong>order reference</strong> exists in our <code>payments</code> table,</li>
+  <li>the <strong>amount</strong> equals what <em>we</em> saved (never trust an amount from the
+      message alone),</li>
+  <li>the <strong>result code</strong> really means "success" (gateways send webhooks for failures too).</li>
+</ul>
+<p>Then answer the gateway in the format its docs require. If we do not answer correctly, it will
+retry, which is fine because we are idempotent (section 5).</p>
+
+<h2 id="state">4. The payment state machine</h2>
+<p>A <strong>state machine</strong> is a list of states and the only moves allowed between them.
+Writing it down stops impossible changes like "REFUNDED → PAID".</p>
+<pre class="diagram">                ┌──► PAID ──► REFUND_PENDING ──► REFUNDED
+   PENDING ─────┼──► FAILED          (gateway confirms the refund)
+                └──► EXPIRED   (nobody paid before the deadline)</pre>
+<pre data-file="payment/internal/PaymentStatus.java (planned)"><code>enum PaymentStatus {
+    PENDING, PAID, FAILED, EXPIRED, REFUND_PENDING, REFUNDED;
+
+    boolean canMoveTo(PaymentStatus next) {
+        return switch (this) {
+            case PENDING -&gt; next == PAID || next == FAILED || next == EXPIRED;
+            case PAID -&gt; next == REFUND_PENDING;
+            case REFUND_PENDING -&gt; next == REFUNDED || next == PAID;   <span class="c">// refund rejected</span>
+            case FAILED, EXPIRED, REFUNDED -&gt; false;                   <span class="c">// final states</span>
+        };
+    }
+}</code></pre>
+<p>In SQL, make each move a <strong>conditional update</strong>, so two threads cannot both
+"win":</p>
+<pre><code>UPDATE payment.payments
+SET status = 'PAID', paid_at = :now, provider_txn_ref = :txnRef
+WHERE id = :id AND status = 'PENDING';        <span class="c">-- 1 row = we moved it; 0 rows = already final</span></code></pre>
+<h3>A hard case: paid after it expired</h3>
+<p>Our payment expires after 15 minutes, but a slow bank confirms at minute 16. The money is gone
+from the student's account. Do not ignore it. Record it (for example status <code>PAID</code> with a
+"late" flag, or a separate state the spec defines), then either give the ticket if seats remain or
+start a refund automatically. Decide this in <code>SPEC-payment.md</code> and <code>SPEC-club.md</code>.</p>
+
+<h2 id="duplicates">5. Webhooks that arrive many times</h2>
+<p>Gateways retry webhooks until they get the "received" answer. Network problems can also deliver
+the same webhook twice. Exactly like Kafka events (<a href="08-outbox-idempotency.html">lesson 08</a>),
+the handler must be idempotent:</p>
+<pre data-file="payment/V…__payments.sql (planned sketch)"><code>CREATE TABLE payment.payments (
+    id               UUID PRIMARY KEY,
+    order_ref        TEXT NOT NULL UNIQUE,        <span class="c">-- what we send to the gateway</span>
+    payer_id         UUID NOT NULL,
+    purpose_type     TEXT NOT NULL,               <span class="c">-- e.g. CLUB_TICKET</span>
+    purpose_id       UUID NOT NULL,               <span class="c">-- e.g. the ticket reservation id (bare UUID)</span>
+    amount           NUMERIC(19, 0) NOT NULL,     <span class="c">-- VND has no decimals</span>
+    currency         CHAR(3) NOT NULL,
+    status           TEXT NOT NULL,
+    provider         TEXT NOT NULL,               <span class="c">-- VNPAY, MOMO, MOCK</span>
+    provider_txn_ref TEXT,
+    expires_at       TIMESTAMPTZ NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL,
+    paid_at          TIMESTAMPTZ,
+    UNIQUE (provider, provider_txn_ref)           <span class="c">-- one gateway transaction, one payment</span>
+);</code></pre>
+<pre data-file="payment/internal/WebhookService.java (planned, simplified)"><code><span class="k">@Transactional</span>
+WebhookAnswer handle(GatewayNotice notice) {
+    if (!verifier.isValid(notice.signedData(), notice.signature())) {
+        return WebhookAnswer.badSignature();                <span class="c">// log the order ref, never the secret</span>
+    }
+    Payment p = payments.findByOrderRef(notice.orderRef()).orElse(null);
+    if (p == null) return WebhookAnswer.unknownOrder();
+    if (!p.amount().equals(notice.amount())) return WebhookAnswer.wrongAmount();
+
+    if (notice.success() &amp;&amp; payments.markPaid(p.id(), notice.txnRef(), clock.instant())) {
+        events.publishEvent(PaymentEvents.confirmed(p, clock.instant()));   <span class="c">// outbox, same tx</span>
+    } else if (!notice.success()) {
+        payments.markFailed(p.id(), clock.instant());       <span class="c">// WHERE status = 'PENDING'</span>
+    }
+    return WebhookAnswer.received();                        <span class="c">// also for a repeat: "yes, we have it"</span>
+}</code></pre>
+<p><code>markPaid</code> returns <code>true</code> only when the conditional update changed one row.
+A second copy changes zero rows, so <strong>no second event</strong> is published. And because the
+event goes through the outbox, it is sent if and only if the payment became <code>PAID</code>.</p>
+
+<h2 id="money">6. Money in VND</h2>
+<p>Never use <code>double</code> for money: <code>0.1 + 0.2</code> is not exactly
+<code>0.3</code> in binary. Our <code>shared-kernel</code> already has a <code>Money</code> record
+built on <code>BigDecimal</code>:</p>
+<pre data-file="backend/shared-kernel/.../kernel/money/Money.java (part)"><code>public record Money(BigDecimal amount, Currency currency) {
+    public Money {
+        …
+        int decimals = currency.getDefaultFractionDigits();      <span class="c">// VND → 0, USD → 2</span>
+        amount = amount.setScale(decimals, RoundingMode.UNNECESSARY);  <span class="c">// throws if too many decimals</span>
+    }
+    public static Money of(String amount, String currencyCode) { … }
+}</code></pre>
+<ul>
+  <li><strong>VND has no minor unit.</strong> There is no "0.5 đồng". <code>Money.of("50000.5", "VND")</code>
+      throws instead of rounding: a hidden rounding in money code is a bug.</li>
+  <li>Is <code>Money.of("50000", "VND")</code> equal to <code>Money.of("50000.0", "VND")</code>?
+      Yes. The text <code>"50000.0"</code> is written with one decimal, but its value is whole, so
+      <code>setScale(0, UNNECESSARY)</code> works and both become <code>50000</code>. Read
+      <code>MoneyTest.java</code> to see the exact rules.</li>
+  <li>Some gateways want the amount in a special form (for example a whole number, sometimes
+      multiplied by a factor). Do this conversion in <strong>one adapter method</strong> per
+      provider, with a unit test, never spread around the code.</li>
+  <li>In SQL, store <code>NUMERIC</code> plus the currency code, never a float.</li>
+</ul>
+
+<h2 id="our-api">7. Idempotency-Key, events, refunds, reconciliation</h2>
+<h3>Our own POST needs an Idempotency-Key</h3>
+<p>The Architecture's API conventions say: an <code>Idempotency-Key</code> header is
+<strong>required on POSTs that create enrollments, tickets or payments</strong>. The student
+double-clicks "Pay", or the network drops the answer and the browser retries. Without a key we
+would create two payments.</p>
+<pre data-file="payment/V…__idempotency.sql (planned sketch)"><code>CREATE TABLE payment.idempotency_keys (
+    user_id       UUID NOT NULL,
+    idem_key      TEXT NOT NULL,                 <span class="c">-- a UUID the browser makes once per click</span>
+    request_hash  TEXT NOT NULL,                 <span class="c">-- hash of the request body</span>
+    payment_id    UUID NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (user_id, idem_key)
+);</code></pre>
+<ul>
+  <li>Same key, same body → return the <strong>same</strong> payment again (same status code,
+      same body). No new row.</li>
+  <li>Same key, different body → reject with problem JSON (for example 409 or 422, decided in the
+      spec). The client reused a key by mistake.</li>
+  <li>Key missing → 400 problem JSON.</li>
+</ul>
+
+<h3>Events</h3>
+<p><code>PaymentConfirmed</code> and <code>PaymentRefunded</code> are published with
+<code>publishEvent</code> (the outbox, spec D1). <code>club</code> consumes them from Kafka with the
+<code>processed_events</code> dedupe (D2), even though both modules run in <code>core-app</code>
+(D5). The payload carries ids and facts: payment id, purpose type and id, payer id, amount. Which
+topic and key they use is decided in <code>SPEC-payment.md</code> (the existing
+<code>campus.events</code> topic is keyed by <code>aggregateId</code>).</p>
+
+<h3>Refunds (CLUB-7)</h3>
+<ol>
+  <li><code>club</code> checks its own rule: is it before the cancellation deadline? Is the ticket
+      unused?</li>
+  <li><code>club</code> cancels the ticket and asks <code>payment</code> for a refund, through
+      payment's <strong>public API</strong> (club depends on payment, so it may call it).</li>
+  <li><code>payment</code> moves <code>PAID → REFUND_PENDING</code> and calls the gateway's refund
+      API. Refunds can take time and can fail, so this is a state, not one call.</li>
+  <li>When the gateway confirms, <code>REFUND_PENDING → REFUNDED</code> and
+      <code>PaymentRefunded</code> goes out through the outbox. Notification tells the student.</li>
+</ol>
+
+<h3>Reconciliation job</h3>
+<p>What if the webhook never arrives (our server was down for an hour, and the gateway gave up)?
+A scheduled <strong>reconciliation</strong> job asks the gateway directly about every payment that
+is still <code>PENDING</code> after some minutes, using the provider's "query transaction" API,
+and applies the answer through the same idempotent code as the webhook. It also moves old unpaid
+payments to <code>EXPIRED</code>. Run it with the patterns from
+<a href="25-scheduled-jobs-feeds.html">lesson 25</a> (<code>SKIP LOCKED</code>, chunks, a time zone).
+A daily check of our totals against the provider's report is also common in real shops.</p>
+
+<h2 id="dev">8. The mock webhook and secrets</h2>
+<p>A real sandbox must call our webhook from the internet, but in dev our app is on
+<code>localhost</code>, which the gateway cannot reach. So for most dev work we use a
+<strong>mock gateway</strong> (assumption 4): a dev-only page and endpoint that pretend to be the
+gateway. The important trick: the mock <strong>signs</strong> its webhook with the dev secret and
+calls the <strong>real</strong> webhook endpoint. So the signature check, the amount check and the
+idempotency code all run in dev and in tests.</p>
+<pre data-file="payment/internal/gateway/MockGatewayController.java (planned, dev profile only)"><code><span class="k">@RestController</span>
+<span class="k">@Profile</span>("dev")
+<span class="k">@RequestMapping</span>("/api/v1/payment/dev/mock-gateway")
+class MockGatewayController {
+    private final MockGateway mock;
+
+    MockGatewayController(MockGateway mock) {
+        this.mock = mock;
+    }
+
+    <span class="k">@PostMapping</span>("/{orderRef}/pay")          <span class="c">// "student clicks Pay" on the fake page</span>
+    void pay(<span class="k">@PathVariable</span> String orderRef, <span class="k">@RequestParam</span> boolean success) {
+        mock.sendSignedWebhook(orderRef, success);   <span class="c">// builds + signs a notice, POSTs to our webhook</span>
+    }
+}</code></pre>
+<p>Integration tests (<a href="10-testing.html">lesson 10</a>) do the same with a fixed clock:
+send the webhook twice, send one with a wrong signature, send one with a wrong amount.</p>
+<h3>Never log secrets</h3>
+<ul>
+  <li>The gateway secret comes from environment variables or a secret store, never from Git
+      (<code>infra/.env</code> is gitignored for this reason).</li>
+  <li>Do not log full webhook bodies or URLs with signatures. Log the order reference, the result
+      and "signature valid: yes/no".</li>
+  <li>The webhook endpoint has no JWT (the gateway has no user), so it is public at the gateway.
+      The HMAC is its only proof. Keep it behind the per-IP rate limit
+      (<a href="11-gateway-rate-limit.html">lesson 11</a>).</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td><code>Money</code> (VND 0 decimals, no hidden rounding)</td><td><code>backend/shared-kernel/.../kernel/money/Money.java</code>, <code>MoneyTest.java</code></td><td>Exists</td></tr>
+<tr><td>Outbox for <code>PaymentConfirmed</code> / <code>PaymentRefunded</code></td><td>Spring Modulith registry (D1)</td><td>Exists (T7, T8)</td></tr>
+<tr><td>Schema <code>payment</code></td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>Exists</td></tr>
+<tr><td>Problem JSON errors</td><td><code>shared-kernel/.../kernel/error/</code>, <code>platform-starter/.../starter/problem/</code></td><td>Exists (T8)</td></tr>
+<tr><td>Payments, webhook, signature check, state machine</td><td><code>core-app/.../payment/</code>, <code>SPEC-payment.md</code></td><td>Planned (module 10, C7)</td></tr>
+<tr><td>Idempotency-Key on POST</td><td>payment and club specs</td><td>Planned (Arch API conventions)</td></tr>
+<tr><td>Mock gateway + sandbox</td><td>payment, dev profile</td><td>Planned (assumption 4)</td></tr>
+<tr><td>Consumer of <code>PaymentConfirmed</code></td><td><code>core-app/.../club/</code></td><td>Planned (module 11)</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Marking PAID from the return URL.</strong> The browser can lie or never come back.</li>
+  <li><strong>Comparing signatures with <code>equals</code></strong>. Use
+      <code>MessageDigest.isEqual</code>.</li>
+  <li><strong>Trusting the amount in the webhook.</strong> Compare it with the amount you saved.</li>
+  <li><strong>Publishing <code>PaymentConfirmed</code> on every webhook copy.</strong> Publish
+      only when the conditional update changed a row.</li>
+  <li><strong>Using <code>double</code> or <code>float</code> for money.</strong> Use
+      <code>Money</code> and <code>NUMERIC</code>.</li>
+  <li><strong>Calling the gateway inside a long database transaction.</strong> A slow network call
+      holds locks. Save first, call outside the transaction, then save the result.</li>
+  <li><strong>Ignoring payments that never got a webhook.</strong> Add a reconciliation job.</li>
+  <li><strong>Committing the secret key</strong> or printing it in logs.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Read <code>Money.java</code> and <code>MoneyTest.java</code> in
+      <code>backend/shared-kernel</code>. Write down what <code>Money.of("1000.5", "VND")</code>
+      does and why. Run the tests:</p>
+<pre><code>.\mvnw.cmd -pl backend/shared-kernel test</code></pre></li>
+  <li><p>In a scratch Java file (JShell works: run <code>jshell</code>), compute an HMAC-SHA256 of
+      the text <code>"orderRef=A1&amp;amount=50000"</code> with the key <code>"dev-secret"</code>,
+      and print it as hex with <code>HexFormat.of().formatHex(...)</code>. Change one character and
+      see the whole result change.</p></li>
+  <li><p>Draw the state machine on paper and add the "paid after expired" case. Which events go
+      out, and what does the student see?</p></li>
+  <li><p>Write the test list (names only) for the webhook handler: valid, repeated, bad signature,
+      unknown order, wrong amount, failure code, late payment.</p></li>
+  <li><p>Open the official developer docs of one Vietnamese gateway (VNPay or MoMo). Find: the
+      hash algorithm, the list of signed fields, the IPN answer format, and the sandbox URL. Do
+      not copy secrets anywhere.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Payment gateway</td><td>A company (VNPay, MoMo…) that takes the money for us.</td></tr>
+<tr><td>Sandbox</td><td>A test version of the gateway with fake money.</td></tr>
+<tr><td>Return URL</td><td>Where the gateway sends the student's browser after paying. Not trusted.</td></tr>
+<tr><td>Webhook / IPN</td><td>The gateway's server calling our server to report the result. Trusted after checks.</td></tr>
+<tr><td>HMAC</td><td>A signature made from a message and a shared secret key.</td></tr>
+<tr><td>Constant-time compare</td><td>A comparison that takes the same time for any input, to stop timing attacks.</td></tr>
+<tr><td>State machine</td><td>The allowed states and moves between them.</td></tr>
+<tr><td>Order reference</td><td>Our id for the payment, sent to and returned by the gateway.</td></tr>
+<tr><td>Idempotency key</td><td>A unique value per user action, so a repeated request does not act twice.</td></tr>
+<tr><td>Reconciliation</td><td>Checking our records against the gateway's and fixing differences.</td></tr>
+<tr><td>Minor unit</td><td>The small part of a currency (cents). VND has none.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why must only the webhook, not the return URL, mark a payment as PAID?</summary>
+    <p>The return URL goes through the student's browser, which can be edited or may never come
+    back. The webhook comes from the gateway's server, is signed, and is retried until we answer.</p></details>
+  <details><summary>2. The signature is valid. Why still compare the amount?</summary>
+    <p>A valid signature proves the gateway sent the message, not that it matches our order. A bug
+    or a tricked flow could report a smaller amount for our order reference. We give goods only for
+    the amount we asked for.</p></details>
+  <details><summary>3. The same webhook arrives three times. Why is only one <code>PaymentConfirmed</code> published?</summary>
+    <p>The update is conditional (<code>WHERE status = 'PENDING'</code>). Only the first copy
+    changes a row, and the event is published only in that case, in the same transaction (outbox).</p></details>
+  <details><summary>4. Why does <code>Money.of("1000.5", "VND")</code> throw instead of rounding?</summary>
+    <p>VND has no decimals, so the value is wrong input. Silent rounding would hide a bug and could
+    move real money in a way nobody notices.</p></details>
+  <details><summary>5. Why does the mock gateway sign its webhook and call the real endpoint?</summary>
+    <p>So the real verification, amount check and idempotency code run in dev and tests. A mock
+    that skipped them would test nothing important.</p></details>
+  <details><summary>6. Why do we need a reconciliation job if we already have webhooks?</summary>
+    <p>Webhooks can be lost: our server may be down longer than the gateway retries. The job asks
+    the gateway about stuck PENDING payments so no paid student is left without a ticket.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc2104">RFC 2104: HMAC</a>: how keyed hashes work.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/security/MessageDigest.html">Java 21 API: <code>MessageDigest</code> (see <code>isEqual</code>)</a> and <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/javax/crypto/Mac.html"><code>Mac</code></a>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/math/BigDecimal.html">Java 21 API: <code>BigDecimal</code></a>.</li>
+  <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/">IETF draft: The Idempotency-Key HTTP header</a>.</li>
+  <li><a href="https://sandbox.vnpayment.vn/apis/">VNPay developer docs</a> and <a href="https://developers.momo.vn/">MoMo developer docs</a>: the official source for field names, hashes and IPN answers.</li>
+  <li><a href="https://cheatsheetseries.owasp.org/">OWASP Cheat Sheet Series</a>: search it for payment and secrets management advice.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

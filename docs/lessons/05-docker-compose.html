@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docker and Compose</title>
+<meta name="description" content="Smart Campus lesson 05: images, containers, ports, volumes, .env, healthchecks and profiles in Docker Compose, plus the planned Spring Boot Dockerfile.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="05">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 05 · Part 1: Foundations</div>
+<h1>Docker, Compose and Dockerfiles</h1>
+<p class="lede">One command starts seven programs on your laptop: Postgres, Redis, Kafka, Keycloak,
+OpenSearch, RustFS and Mailpit. This lesson explains how Docker and Docker Compose do that, how to
+debug them, and how our own apps will become container images in T15.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module (local infra)</span>
+  <span class="badge task">T3 (done)</span>
+  <span class="badge task">T15</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Basics</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="02-maven.html">02 (Maven: layered jars, <code>package</code>)</a> and
+  <a href="04-postgres-flyway.html">04 (the Postgres schemas and users)</a>. Docker Desktop must be
+  installed and running.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why Docker</a></li>
+    <li><a href="#images">Images, containers, layers, tags</a></li>
+    <li><a href="#network">Ports and the Compose network</a></li>
+    <li><a href="#data">Volumes and .env</a></li>
+    <li><a href="#health">Healthchecks, depends_on, profiles</a></li>
+    <li><a href="#commands">Everyday commands</a></li>
+    <li><a href="#dockerfile">Our app image (T15)</a></li>
+    <li><a href="#testcontainers">Testcontainers and Windows tips</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why Docker</h2>
+<p>Without Docker, every developer would install seven servers by hand, each a different version
+with different settings. "It works on my machine" would be a daily problem.</p>
+<p><strong>Docker</strong> runs programs in <strong>containers</strong>: isolated boxes that carry
+the program and everything it needs. <strong>Docker Compose</strong> starts many containers together
+from one YAML file. Our file is <code>infra/docker-compose.yml</code>:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait    <span class="c"># start all, wait until healthy</span>
+docker compose -f infra/docker-compose.yml down             <span class="c"># stop and remove (data stays)</span></code></pre>
+<p>Like a shipping container: the port does not care what is inside, it handles every box the same
+way. Docker does not care if the box holds Postgres or Kafka.</p>
+
+<h2 id="images">2. Images, containers, layers, tags</h2>
+<div class="compare">
+  <div class="good"><h4>Image</h4>
+    <p>A read-only package: a small Linux file system with the program, at one exact version. Like
+    a recipe, or a class in Java. Example: <code>postgres:19.0-alpine3.24</code>.</p></div>
+  <div class="good"><h4>Container</h4>
+    <p>A running copy of an image, with its own writable layer, network and processes. Like a cake
+    made from the recipe, or an object made from a class. You can run many from one image.</p></div>
+</div>
+
+<h3>Layers</h3>
+<p>An image is a stack of <strong>layers</strong>. Each layer holds the file changes of one build
+step. Images share layers they have in common, and Docker <strong>caches</strong> layers: if a step
+and everything before it did not change, the old layer is reused. This is why our app image (section
+7) copies the big libraries first and our small code last.</p>
+
+<h3>Tags: always pinned</h3>
+<p>The part after <code>:</code> is the <strong>tag</strong>. Our compose file pins every tag
+exactly:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Service</th><th>Image</th><th>Host port(s)</th></tr></thead>
+<tbody>
+<tr><td>postgres</td><td><code>postgres:19.0-alpine3.24</code></td><td>5432</td></tr>
+<tr><td>redis</td><td><code>redis:8.8.4-alpine3.23</code></td><td>6379</td></tr>
+<tr><td>kafka</td><td><code>apache/kafka:4.4.0</code> (KRaft, no ZooKeeper)</td><td>9092</td></tr>
+<tr><td>keycloak</td><td><code>quay.io/keycloak/keycloak:26.8.2</code></td><td>8180</td></tr>
+<tr><td>opensearch</td><td><code>opensearchproject/opensearch:3.10.0</code></td><td>9200</td></tr>
+<tr><td>rustfs (S3 file store)</td><td><code>rustfs/rustfs:1.0.6</code></td><td>9000, 9001</td></tr>
+<tr><td>mailpit (fake mail)</td><td><code>axllent/mailpit:v1.34.0</code></td><td>1025, 8025</td></tr>
+</tbody></table></div>
+<div class="callout bad">
+  <span class="title">Never use <code>latest</code></span>
+  <code>latest</code> is just a name that moves to each new release. Today it means 19.0, next month
+  something else, and the same compose file gives a different setup. The spec forbids floating tags
+  everywhere, including Docker.
+</div>
+
+<h2 id="network">3. Ports and the Compose network</h2>
+<h3>Publishing ports</h3>
+<pre data-file="infra/docker-compose.yml (part)"><code>  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"     <span class="c"># host-address : host-port : container-port</span></code></pre>
+<p>A container has its own network. <code>ports</code> opens a door from your computer into it.
+<code>127.0.0.1</code> means only <strong>your computer</strong> can use the door, not other devices
+on your Wi-Fi. Our dev passwords are simple, so this matters.</p>
+
+<h3>Service names are host names</h3>
+<p>Compose puts all services of a project on one private network (here
+<code>smart-campus_default</code>, from <code>name: smart-campus</code>). Inside it, each
+<strong>service name is a host name</strong>. This is the most important rule for T15:</p>
+<div class="flow">
+  <div class="box accent"><b>App on your laptop</b>(<code>spring-boot:run</code>)<br>Postgres: <code>localhost:5432</code><br>Kafka: <code>localhost:9092</code></div>
+  <div class="box project"><b>App in a container</b>(profile <code>apps</code>, T15)<br>Postgres: <code>postgres:5432</code><br>Kafka: <code>kafka:29092</code></div>
+</div>
+<p>Inside a container, <code>localhost</code> means <strong>that container itself</strong>, not your
+laptop. Keycloak already uses the in-network address:
+<code>KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak</code>.</p>
+<p>Kafka is special: it tells clients where to connect next ("advertised listeners"). So it has two
+client listeners: <code>EXTERNAL://localhost:9092</code> for programs on your laptop and
+<code>INTERNAL://kafka:29092</code> for containers (<a href="07-kafka.html">lesson 07</a>).</p>
+
+<h2 id="data">4. Volumes and .env</h2>
+<h3>Volumes keep data</h3>
+<p>A container's own files disappear when the container is removed. A <strong>volume</strong> is
+storage that Docker keeps separately:</p>
+<pre data-file="infra/docker-compose.yml (part)"><code>    volumes:
+      - postgres-data:/var/lib/postgresql                     <span class="c"># named volume: the database files</span>
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro         <span class="c"># bind mount: our folder, read-only</span>
+…
+volumes:
+  postgres-data:
+  kafka-data:
+  opensearch-data:
+  rustfs-data:</code></pre>
+<ul>
+  <li>A <strong>named volume</strong> (<code>postgres-data</code>) is managed by Docker. It survives
+      <code>down</code> and is deleted only by <code>down -v</code>.</li>
+  <li>A <strong>bind mount</strong> (<code>./postgres/init</code>) shows a folder from the repo inside
+      the container. The Postgres image runs the scripts there <strong>only when its data folder is
+      empty</strong>, which is how our schemas and users are created once
+      (<a href="04-postgres-flyway.html#users">lesson 04</a>).</li>
+</ul>
+
+<h3>Settings and secrets: <code>.env</code></h3>
+<p>Passwords are not written in the compose file. Compose reads them from <code>infra/.env</code>
+(next to the compose file), and puts them in with <strong>interpolation</strong>:</p>
+<pre data-file="infra/docker-compose.yml (part)"><code>    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?copy infra/.env.example to infra/.env}
+      CORE_APP_DB_PASSWORD: ${CORE_APP_DB_PASSWORD:?set in infra/.env}</code></pre>
+<ul>
+  <li><code>${NAME}</code> = the value from <code>.env</code> or your shell.
+      <code>${NAME:?message}</code> = stop with this message if it is missing or empty.</li>
+  <li><code>$$</code> = a real <code>$</code> for the container's own shell (used in the healthcheck).</li>
+  <li><code>infra/.env.example</code> is the template and is in git. <code>infra/.env</code> holds
+      your values and is <strong>gitignored</strong>. First time: copy the example.</li>
+  <li>core-app's <code>dev</code> profile reads the same file
+      (<code>spring.config.import: optional:file:../../infra/.env[.properties]</code>), so a password
+      is written in exactly one place.</li>
+</ul>
+
+<h2 id="health">5. Healthchecks, depends_on, profiles</h2>
+<h3>Healthchecks</h3>
+<p>"Running" is not "ready". Postgres runs for a few seconds before it accepts connections. A
+<strong>healthcheck</strong> is a command Docker repeats to ask "are you ready?":</p>
+<pre data-file="infra/docker-compose.yml (part)"><code>    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20</code></pre>
+<p>Each service has one (<code>redis-cli ping</code>, Kafka's API-versions tool, OpenSearch's
+cluster health …). The Keycloak image has no <code>curl</code>, so its check sends a tiny HTTP
+request with plain bash. <code>up --wait</code> returns only when every container is healthy, so a
+script can safely start the apps next.</p>
+
+<h3>depends_on</h3>
+<pre data-file="infra/docker-compose.yml (keycloak, part)"><code>    depends_on:
+      postgres:
+        condition: service_healthy    <span class="c"># wait for the healthcheck, not just the start</span></code></pre>
+<p>In T15 each app container will wait like this for Postgres, Kafka and Redis.</p>
+
+<h3>Profiles</h3>
+<p>A Compose <strong>profile</strong> marks services that start only when asked. Services without a
+profile always start. The plan:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Profile</th><th>Adds</th><th>Command</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>(none)</td><td>the 7 infra services</td><td><code>up -d --wait</code></td><td>T3 (done)</td></tr>
+<tr><td><code>apps</code></td><td>core-app, registration-service, notification-service, gateway</td><td><code>--profile apps up -d --build --wait</code></td><td>T15 (planned)</td></tr>
+<tr><td><code>observability</code></td><td>OTel Collector, Tempo, Prometheus, Loki, Grafana</td><td><code>--profile observability up -d --wait</code></td><td>T16–T18 (planned)</td></tr>
+</tbody></table></div>
+<pre data-file="How a service joins a profile (planned shape)"><code>  core-app:
+    profiles: [apps]
+    build: …</code></pre>
+
+<h2 id="commands">6. Everyday commands</h2>
+<p>All commands start with <code>docker compose -f infra/docker-compose.yml</code>. Below, that part
+is shortened to <code>dc</code>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>dc up -d --wait</code></td><td>Start in the background (<code>-d</code>) and wait until healthy</td></tr>
+<tr><td><code>dc ps</code></td><td>List containers, their state and health</td></tr>
+<tr><td><code>dc logs -f kafka</code></td><td>Follow one service's log (Ctrl+C to stop following)</td></tr>
+<tr><td><code>dc exec postgres psql -U postgres -d campus</code></td><td>Run a command inside a running container</td></tr>
+<tr><td><code>dc stop</code> / <code>dc start</code></td><td>Stop / start again, keep the containers</td></tr>
+<tr><td><code>dc down</code></td><td>Remove containers and network; <strong>volumes stay</strong></td></tr>
+<tr><td><code>dc down -v</code></td><td>Also delete the volumes: <strong>all local data is gone</strong></td></tr>
+<tr><td><code>dc pause kafka</code> / <code>dc unpause kafka</code></td><td>Freeze a container (T7 used this to simulate a Kafka outage)</td></tr>
+<tr><td><code>dc config</code></td><td>Print the final file with <code>.env</code> values filled in (shows passwords!)</td></tr>
+<tr><td><code>docker stats</code></td><td>Live CPU and memory per container</td></tr>
+<tr><td><code>docker system df</code></td><td>Disk used by images, containers, volumes</td></tr>
+</tbody></table></div>
+
+<h2 id="dockerfile">7. Our app image (T15)</h2>
+<p>Today our apps run with <code>spring-boot:run</code>. In T15 they also run as containers, built
+from <strong>one shared Dockerfile</strong>, <code>infra/docker/spring-app.Dockerfile</code> (planned).
+A <strong>Dockerfile</strong> is the recipe for an image. T15 asks for:</p>
+<ul>
+  <li>a <strong>multi-stage</strong> build: stage 1 unpacks the jar, stage 2 is the small final image;</li>
+  <li>the layers of the Spring Boot jar copied <strong>dependencies first, our code last</strong>;</li>
+  <li>a <strong>pinned Eclipse Temurin 21 JRE</strong> base (a JRE runs Java; it cannot compile);</li>
+  <li>a <strong>non-root</strong> user, and the jar path as a <strong>build argument</strong>;</li>
+  <li>a healthcheck on <code>/actuator/health</code>.</li>
+</ul>
+<p>Here is a sketch of that shape. It is not the final file: T15 writes it and pins the real base
+tag.</p>
+<pre data-file="Sketch of infra/docker/spring-app.Dockerfile (planned in T15)"><code><span class="c"># ---- stage 1: unpack the layered jar ----</span>
+FROM eclipse-temurin:&lt;exact 21 JRE tag&gt; AS extract
+WORKDIR /build
+<span class="c"># the jar path, e.g. backend/core-app/target/core-app-0.1.0-SNAPSHOT.jar</span>
+ARG JAR_FILE
+COPY ${JAR_FILE} application.jar
+RUN java -Djarmode=tools -jar application.jar extract --layers --destination extracted
+
+<span class="c"># ---- stage 2: the image we ship ----</span>
+FROM eclipse-temurin:&lt;exact 21 JRE tag&gt;
+WORKDIR /app
+RUN groupadd --system app &amp;&amp; useradd --system --gid app app
+<span class="c"># big layers that rarely change first ...</span>
+COPY --from=extract /build/extracted/dependencies/ ./
+COPY --from=extract /build/extracted/spring-boot-loader/ ./
+COPY --from=extract /build/extracted/snapshot-dependencies/ ./
+<span class="c"># ... our small, often-changing code last</span>
+COPY --from=extract /build/extracted/application/ ./
+<span class="c"># run as a normal user, not root</span>
+USER app
+HEALTHCHECK CMD curl -fs http://localhost:8080/actuator/health || exit 1
+ENTRYPOINT ["java", "-jar", "application.jar"]</code></pre>
+<p>(In a Dockerfile, a <code>#</code> comment must be on its own line.)</p>
+<h3>Why each part</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Part</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Multi-stage</td><td>The unpack step and its leftovers stay in stage 1. Only the final files reach the shipped image.</td></tr>
+<tr><td><code>-Djarmode=tools … extract --layers</code></td><td>Spring Boot's jar can unpack itself into its layers (the root pom turned layers on in T2). Each layer becomes one Docker layer.</td></tr>
+<tr><td>Dependencies first</td><td>Change one line of Java → only the small <code>application</code> layer is rebuilt. The libraries come from the cache (T15.5 checks this).</td></tr>
+<tr><td>Pinned JRE tag</td><td>Same reason as everywhere: the same build tomorrow. A JRE is smaller than a JDK.</td></tr>
+<tr><td>Non-root user</td><td>If someone breaks into the app, they are not root inside the container. T15.5 checks <code>id -u</code> is not 0.</td></tr>
+<tr><td><code>HEALTHCHECK</code></td><td>Docker knows when the app is ready. Check that the base image really has <code>curl</code>; if not, T15 must use another way (the Keycloak check in our compose file shows a bash-only trick). The port depends on the app (8081 for core-app).</td></tr>
+</tbody></table></div>
+<p>Other T15 details: a <code>.dockerignore</code> so only the built jars are sent to Docker (not
+the whole repo); memory limits per container plus <code>JAVA_TOOL_OPTIONS</code> with
+<code>-XX:MaxRAMPercentage</code>, so Java sizes its memory from the container limit; and only the
+gateway's port 8080 is published. The build runs after Maven:</p>
+<pre><code>.\mvnw.cmd package -DskipTests
+docker compose -f infra/docker-compose.yml --profile apps up -d --build --wait</code></pre>
+<p>The spec chose a plain Dockerfile over Cloud Native Buildpacks because it is easier to read and to
+add the OpenTelemetry agent to later (T16).</p>
+
+<h2 id="testcontainers">8. Testcontainers and Windows tips</h2>
+<h3>Testcontainers: Docker inside your tests</h3>
+<p><strong>Testcontainers</strong> is a Java library that starts containers from a test. Our ITs use
+it to get a real Postgres and a real Kafka:</p>
+<pre data-file="backend/core-app/src/test/java/edu/campus/TestcontainersConfiguration.java (part)"><code><span class="k">@Bean</span>
+<span class="k">@ServiceConnection</span>
+PostgreSQLContainer postgres() {
+    return new PostgreSQLContainer("postgres:19.0-alpine3.24");   <span class="c">// same tag as Compose</span>
+}
+
+<span class="k">@Bean</span>
+<span class="k">@ServiceConnection</span>
+KafkaContainer kafka() {
+    return new KafkaContainer("apache/kafka:4.4.0");
+}</code></pre>
+<div class="compare">
+  <div class="good"><h4>Compose</h4>
+    <p>Long-lived, for you and for <code>spring-boot:run</code>. Fixed ports. Data kept in volumes.</p></div>
+  <div class="good"><h4>Testcontainers</h4>
+    <p>Short-lived, one fresh set per test run. Random free ports, given to Spring by
+    <code>@ServiceConnection</code>. Removed after the tests. Same images, so tests match dev.</p></div>
+</div>
+<p>So <code>.\mvnw.cmd test</code> needs no Docker, but <code>.\mvnw.cmd verify</code> (which runs the
+<code>*IT</code> classes) needs Docker Desktop running. The two do not share data, and Compose can be
+up or down while ITs run.</p>
+
+<h3>Windows tips</h3>
+<ul>
+  <li><strong>Docker Desktop must be running</strong> before <code>docker</code> or the ITs work. On
+      Windows it uses <strong>WSL 2</strong> (a real Linux kernel inside Windows).</li>
+  <li><strong>Memory:</strong> the infra uses about 2.2 GB at peak (T3). WSL 2 memory can be limited
+      in <code>%UserProfile%\.wslconfig</code> (<code>[wsl2]</code>, <code>memory=8GB</code>); leave
+      enough for Docker, the IDE and the apps.</li>
+  <li><strong>Line endings:</strong> a shell script with Windows line endings (CRLF) fails inside a
+      Linux container. Our <code>.gitattributes</code> keeps files in LF (only <code>.cmd</code>/<code>.bat</code>
+      use CRLF), which protects <code>infra/postgres/init/01-schemas-and-users.sh</code>.</li>
+  <li><strong>Port already in use:</strong> a Postgres installed on Windows may already hold 5432.
+      Find it with <code>Get-NetTCPConnection -LocalPort 5432</code> and stop that service.</li>
+  <li><strong>The space in <code>C:\Smart Campus</code>:</strong> always quote paths in scripts.</li>
+  <li><strong>From a container to your laptop:</strong> use <code>host.docker.internal</code> (T18's
+      Prometheus will reach <code>spring-boot:run</code> apps this way).</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>7 infra services, pinned tags, healthchecks, volumes</td><td><code>infra/docker-compose.yml</code></td><td>T3</td></tr>
+<tr><td>Settings template / your values</td><td><code>infra/.env.example</code> / <code>infra/.env</code> (gitignored)</td><td>T3</td></tr>
+<tr><td>First-start database setup</td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>T3</td></tr>
+<tr><td>Dev profile reads <code>.env</code></td><td><code>backend/core-app/src/main/resources/application.yml</code></td><td>T6</td></tr>
+<tr><td>Containers in tests</td><td><code>backend/core-app/src/test/java/edu/campus/TestcontainersConfiguration.java</code></td><td>T6, T7</td></tr>
+<tr><td>Kafka outage test with pause</td><td><code>backend/core-app/src/test/java/edu/campus/platform/internal/OutboxIT.java</code></td><td>T7</td></tr>
+<tr><td>App image, <code>.dockerignore</code>, <code>apps</code> profile</td><td><code>infra/docker/spring-app.Dockerfile</code>, <code>.dockerignore</code> (planned)</td><td>T15</td></tr>
+<tr><td><code>observability</code> profile</td><td><code>infra/otel/</code>, <code>infra/prometheus/</code>, <code>infra/grafana/</code> (planned)</td><td>T16–T18</td></tr>
+<tr><td>Image scan in CI</td><td>Trivy in <code>.github/workflows/ci.yml</code> (planned)</td><td>T20</td></tr>
+</tbody></table></div>
+<p>Also read <a href="../learn/platform/task3.md">docs/learn/platform/task3.md</a> and the task file
+<a href="../../tasks/platform/task15.md">tasks/platform/task15.md</a>.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Using <code>localhost</code> inside a container</strong> to reach another service. Use
+      the service name (<code>postgres</code>, <code>kafka:29092</code>).</li>
+  <li><strong>Running <code>down -v</code> by accident.</strong> It deletes every volume: all local
+      data, topics and users.</li>
+  <li><strong>Expecting a new password in <code>.env</code> to apply.</strong> The init script runs
+      only on an empty volume.</li>
+  <li><strong>Using <code>latest</code> or a short tag like <code>21</code>.</strong> Pin the exact tag.</li>
+  <li><strong>Committing <code>infra/.env</code>.</strong> It is gitignored for a reason.</li>
+  <li><strong>Publishing ports on <code>0.0.0.0</code></strong> (the default when you write only
+      <code>"5432:5432"</code>). Keep <code>127.0.0.1:</code>.</li>
+  <li><strong>Copying the app code before the libraries in a Dockerfile.</strong> Every code change
+      then rebuilds all layers.</li>
+  <li><strong>Running the app as root in the image.</strong></li>
+  <li><strong>Running Compose apps and <code>spring-boot:run</code> apps at the same time.</strong>
+      They want the same ports.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>First time only, create your settings file, then start everything and time it:</p>
+<pre><code>if (-not (Test-Path infra/.env)) { Copy-Item infra/.env.example infra/.env }
+Measure-Command { docker compose -f infra/docker-compose.yml up -d --wait }
+docker compose -f infra/docker-compose.yml ps</code></pre></li>
+  <li><p>Find the network and the volumes Compose created:</p>
+<pre><code>docker network ls
+docker volume ls</code></pre></li>
+  <li><p>Prove the "service name" rule. From inside the Redis container, reach Postgres by name,
+      then try <code>localhost</code>:</p>
+<pre><code>docker compose -f infra/docker-compose.yml exec redis sh -c "nc -z postgres 5432 &amp;&amp; echo reachable"
+docker compose -f infra/docker-compose.yml exec redis sh -c "nc -z localhost 5432 || echo not-here"</code></pre>
+      <p>(If <code>nc</code> is missing in the image, try the same idea with another container.)</p></li>
+  <li><p>Open Mailpit's web page at <code>http://localhost:8025</code> and RustFS's console at
+      <code>http://localhost:9001</code>. Which service answers on which port?</p></li>
+  <li><p>Follow Kafka's log in one window. In another, pause and unpause Kafka, and watch
+      <code>dc ps</code> change. Then read how <code>OutboxIT</code> uses the same trick.</p></li>
+  <li><p>On paper: write the <code>core-app</code> service block for the <code>apps</code> profile.
+      Which datasource URL, Kafka address and healthcheck does it need? What goes in
+      <code>depends_on</code>?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Image</td><td>A read-only package of a program and its files, at one version.</td></tr>
+<tr><td>Container</td><td>A running, isolated copy of an image.</td></tr>
+<tr><td>Layer</td><td>One step's file changes inside an image; cached and shared.</td></tr>
+<tr><td>Tag</td><td>The version name after <code>:</code> in an image name.</td></tr>
+<tr><td>Registry</td><td>A server that stores images (Docker Hub, Quay).</td></tr>
+<tr><td>Docker Compose</td><td>Starts many containers from one YAML file.</td></tr>
+<tr><td>Service</td><td>One entry in the compose file; also its host name on the network.</td></tr>
+<tr><td>Port publishing</td><td>Opening a door from your computer into a container.</td></tr>
+<tr><td>Named volume</td><td>Docker-managed storage that outlives containers.</td></tr>
+<tr><td>Bind mount</td><td>A folder from your computer shown inside a container.</td></tr>
+<tr><td>Interpolation</td><td>Compose replacing <code>${NAME}</code> with a value from <code>.env</code>.</td></tr>
+<tr><td>Healthcheck</td><td>A repeated command that says if a container is ready.</td></tr>
+<tr><td>Profile (Compose)</td><td>A group of services that start only when asked.</td></tr>
+<tr><td>Dockerfile</td><td>The recipe to build an image.</td></tr>
+<tr><td>Multi-stage build</td><td>A Dockerfile with several <code>FROM</code> steps; only the last is shipped.</td></tr>
+<tr><td>JRE</td><td>Java Runtime Environment: runs Java programs, cannot compile them.</td></tr>
+<tr><td>Testcontainers</td><td>A Java library that starts real containers for tests.</td></tr>
+<tr><td>WSL 2</td><td>Windows Subsystem for Linux; Docker Desktop runs on it.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why does an app in a container use <code>postgres:5432</code>, while <code>spring-boot:run</code> uses <code>localhost:5432</code>?</summary>
+    <p><code>localhost</code> always means "this machine". For an app on your laptop, the published
+    port on your laptop leads to Postgres. Inside a container, <code>localhost</code> is the
+    container itself, so it must use the service name, which Compose's network turns into
+    Postgres's address.</p></details>
+  <details><summary>2. You changed <code>CORE_APP_DB_PASSWORD</code> in <code>infra/.env</code> and now core-app cannot log in. Why?</summary>
+    <p>The user and its password were created by the init script on the first start, when the volume
+    was empty. The script does not run again. Either set the old password back, or run
+    <code>down -v</code> (deletes all local data) and start again.</p></details>
+  <details><summary>3. Why does <code>up --wait</code> matter in scripts and CI?</summary>
+    <p>It returns only when every healthcheck passes. Without it, the next step (starting an app,
+    running a smoke test) could run while Postgres or Kafka is still starting, and fail randomly.</p></details>
+  <details><summary>4. Why does the planned Dockerfile copy dependencies before our application code?</summary>
+    <p>Docker reuses cached layers until the first step that changed. Libraries rarely change, our
+    code changes often. With code last, a code change rebuilds only the small top layer.</p></details>
+  <details><summary>5. Why must the app container not run as root?</summary>
+    <p>If an attacker finds a hole in the app, they get the rights of the process. As a normal user
+    they can do much less inside the container, and it is harder to escape to the host.</p></details>
+  <details><summary>6. Why do Testcontainers use the same image tags as the compose file?</summary>
+    <p>So tests run against exactly the versions developers use. A test that passes on a different
+    Postgres or Kafka version proves little about the real setup.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.docker.com/get-started/docker-overview/">Docker overview</a>: images, containers, registries.</li>
+  <li><a href="https://docs.docker.com/reference/compose-file/services/">Compose file reference: services</a>: <code>ports</code>, <code>volumes</code>, <code>healthcheck</code>, <code>depends_on</code>, <code>profiles</code>.</li>
+  <li><a href="https://docs.docker.com/reference/compose-file/interpolation/">Compose: interpolation</a>: <code>${VAR:?error}</code> and <code>$$</code>.</li>
+  <li><a href="https://docs.docker.com/compose/how-tos/networking/">Compose: networking</a>: service names as host names.</li>
+  <li><a href="https://docs.docker.com/build/building/multi-stage/">Docker: multi-stage builds</a> and <a href="https://docs.docker.com/build/cache/">build cache</a>.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/efficient-images.html">Spring Boot: Efficient container images</a>: layers and the jarmode tools.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html">Spring Boot: Testcontainers</a>: <code>@ServiceConnection</code>.</li>
+  <li><a href="https://docs.docker.com/desktop/features/wsl/">Docker Desktop: WSL 2 backend</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

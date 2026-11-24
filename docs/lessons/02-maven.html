@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maven Builds Lesson</title>
+<meta name="description" content="Smart Campus lesson 02: how the Maven multi-module build works, from pom coordinates and BOMs to surefire, failsafe, profiles and quality gates.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="02">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 02 · Part 1: Foundations</div>
+<h1>Maven multi-module builds</h1>
+<p class="lede">One command, <code>.\mvnw.cmd verify</code>, compiles every backend module, runs
+all the tests, checks the code format and the test coverage. This lesson explains how the
+<code>pom.xml</code> files make that happen, so you can read them, change them, and fix a red build.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every backend module</span>
+  <span class="badge task">T1 (done)</span>
+  <span class="badge task">T2 (done)</span>
+  <span class="badge time">~60 min</span>
+  <span class="badge level">Basics</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="01-java-21.html">01 (Java 21)</a>. If you know npm and <code>package.json</code>,
+  section 8 compares the two.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">What Maven does for us</a></li>
+    <li><a href="#pom">Anatomy of a pom</a></li>
+    <li><a href="#parent">Parent pom, modules, reactor</a></li>
+    <li><a href="#deps">Versions, BOMs and scopes</a></li>
+    <li><a href="#lifecycle">Plugins and the lifecycle</a></li>
+    <li><a href="#tests">Unit tests, ITs and profiles</a></li>
+    <li><a href="#gates">Quality gates</a></li>
+    <li><a href="#wrapper">The wrapper and daily commands</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. What Maven does for us</h2>
+<p><strong>Maven</strong> is a build tool for Java. You describe the project in XML files called
+<strong>POMs</strong> (<code>pom.xml</code>, "Project Object Model"). Maven then:</p>
+<ul>
+  <li><strong>downloads libraries</strong> (dependencies) from Maven Central into a cache,
+      <code>~/.m2/repository</code>;</li>
+  <li><strong>compiles</strong> the code and <strong>runs the tests</strong>;</li>
+  <li><strong>packages</strong> jars, including the runnable Spring Boot jar;</li>
+  <li><strong>runs checks</strong>: code format, coverage, banned libraries.</li>
+</ul>
+<p>Smart Campus switched from Gradle to Maven on 2026-11-20 (spec decision Q2), because Maven's XML
+is easier to read: there is no code in it, only a description. The price is that XML is long. This
+lesson helps you find your way in it.</p>
+<p>Maven works by <strong>convention</strong>: if you put code where it expects
+(<code>src/main/java</code>, <code>src/test/java</code>, <code>src/main/resources</code>), you write
+almost no configuration. The build output goes to <code>target/</code> (gitignored).</p>
+
+<h2 id="pom">2. Anatomy of a pom</h2>
+<p>Every Maven project has <strong>coordinates</strong>, like a postal address, so it can be found
+in a repository:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Element</th><th>Smart Campus value</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>groupId</code></td><td><code>edu.campus</code></td><td>The organisation, like a reversed domain name</td></tr>
+<tr><td><code>artifactId</code></td><td><code>shared-kernel</code>, <code>core-app</code> …</td><td>The name of this one project</td></tr>
+<tr><td><code>version</code></td><td><code>0.1.0-SNAPSHOT</code></td><td><code>SNAPSHOT</code> = work in progress, not a release</td></tr>
+<tr><td><code>packaging</code></td><td><code>pom</code> (root) or <code>jar</code></td><td>What the build produces</td></tr>
+</tbody></table></div>
+<p>A pom has a few big blocks. You will see them again and again:</p>
+<pre class="diagram">pom.xml
+├── &lt;parent&gt;                 where to inherit settings from
+├── groupId / artifactId / version / packaging
+├── &lt;modules&gt;                (root only) the sub-projects to build
+├── &lt;properties&gt;             named values, used as ${name}
+├── &lt;dependencyManagement&gt;   versions only: "if you use X, use version Y"
+├── &lt;dependencies&gt;           libraries this project really uses
+├── &lt;build&gt;
+│   ├── &lt;pluginManagement&gt;   plugin settings, OFF until a module lists the plugin
+│   └── &lt;plugins&gt;            plugins that really run
+└── &lt;profiles&gt;               optional switches, turned on with -P&lt;id&gt;</pre>
+
+<h2 id="parent">3. Parent pom, modules, reactor</h2>
+<h3>A chain of parents</h3>
+<p>A pom can have a <strong>parent</strong>. It inherits the parent's properties, dependencies,
+plugin settings and versions. Smart Campus has a chain of three:</p>
+<div class="flow">
+  <div class="box accent"><b>spring-boot-starter-parent 4.1.3</b>versions of hundreds of libraries and plugins, Java release, UTF-8, <code>-parameters</code></div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>root pom.xml (smart-campus)</b>module list, our versions, shared build rules</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>backend/*/pom.xml</b>only what this module needs</div>
+</div>
+<pre data-file="backend/core-app/pom.xml (part)"><code>&lt;parent&gt;
+    &lt;groupId&gt;edu.campus&lt;/groupId&gt;
+    &lt;artifactId&gt;smart-campus&lt;/artifactId&gt;
+    &lt;version&gt;0.1.0-SNAPSHOT&lt;/version&gt;
+    &lt;relativePath&gt;../../pom.xml&lt;/relativePath&gt;   <span class="c">&lt;!-- two folders up --&gt;</span>
+&lt;/parent&gt;
+&lt;artifactId&gt;core-app&lt;/artifactId&gt;</code></pre>
+<p>The <code>&lt;version&gt;</code> inside <code>&lt;parent&gt;</code> is the only version a child pom
+writes. Everything else comes from above. To see the <strong>effective pom</strong> (the final pom
+after all parents are merged), run <code>.\mvnw.cmd -pl backend/core-app help:effective-pom</code>.</p>
+
+<h3>Modules and the reactor</h3>
+<p>The root pom has <code>&lt;packaging&gt;pom&lt;/packaging&gt;</code>: it builds nothing itself, it
+only groups <strong>modules</strong>:</p>
+<pre data-file="pom.xml (root, part)"><code>&lt;modules&gt;
+    &lt;module&gt;backend/shared-kernel&lt;/module&gt;
+    &lt;module&gt;backend/platform-starter&lt;/module&gt;
+    &lt;module&gt;backend/core-app&lt;/module&gt;
+&lt;/modules&gt;</code></pre>
+<p>When you build from the root, Maven's <strong>reactor</strong> (the part that plans a
+multi-module build) reads every module, sees who depends on whom, and builds them in the right
+order. <code>core-app</code> depends on <code>platform-starter</code>, which depends on
+<code>shared-kernel</code>, so the order is kernel → starter → core-app. Later tasks add
+<code>registration-service</code> (T10), <code>notification-service</code> (T11) and
+<code>gateway</code> (T13) to this list.</p>
+<div class="callout tip">
+  <span class="title">Build only part of the project: <code>-pl</code> and <code>-am</code></span>
+  <code>-pl backend/core-app</code> ("project list") builds only that module.
+  <code>-am</code> ("also make") adds the modules it needs. So
+  <code>.\mvnw.cmd -pl backend/core-app -am verify</code> builds kernel, starter and core-app, and
+  skips the others. Without <code>-am</code>, Maven must find the other modules' jars in
+  <code>~/.m2</code> already (from an earlier <code>install</code>), or it fails with "could not
+  resolve".
+</div>
+
+<h2 id="deps">4. Versions, BOMs and scopes</h2>
+<h3>Properties</h3>
+<p><code>&lt;properties&gt;</code> are named values. The root pom keeps <strong>every version in one
+place</strong>, with a comment that links to the official source of each number:</p>
+<pre data-file="pom.xml (root, part)"><code>&lt;properties&gt;
+    &lt;java.version&gt;21&lt;/java.version&gt;                    <span class="c">&lt;!-- read by the Boot parent --&gt;</span>
+    &lt;spring-cloud.version&gt;2025.1.5&lt;/spring-cloud.version&gt;
+    &lt;spring-modulith.version&gt;2.1.3&lt;/spring-modulith.version&gt;
+    &lt;springdoc.version&gt;3.2.0&lt;/springdoc.version&gt;
+    &lt;skipUTs&gt;false&lt;/skipUTs&gt;                            <span class="c">&lt;!-- our own build switch --&gt;</span>
+&lt;/properties&gt;</code></pre>
+
+<h3>dependencyManagement and BOMs</h3>
+<p><code>&lt;dependencyManagement&gt;</code> is a <strong>price list, not a shopping cart</strong>. It
+says "if a module uses this library, use this version", but it adds nothing to any module. A
+<strong>BOM</strong> ("bill of materials") is a whole price list published by a project, with
+versions tested together. You import it with <code>type pom</code> + <code>scope import</code>:</p>
+<pre data-file="pom.xml (root, part)"><code>&lt;dependencyManagement&gt;
+    &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.modulith&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-modulith-bom&lt;/artifactId&gt;
+            &lt;version&gt;${spring-modulith.version}&lt;/version&gt;
+            &lt;type&gt;pom&lt;/type&gt;
+            &lt;scope&gt;import&lt;/scope&gt;
+        &lt;/dependency&gt;
+        …
+</code></pre>
+<p>We import the Spring Cloud and Spring Modulith BOMs. Spring Boot's own list comes through the
+parent. Result: a module writes a dependency with <strong>no version</strong>, and Maven knows which
+one to use.</p>
+
+<h3>Dependency scopes</h3>
+<p>A <strong>scope</strong> says when a library is needed:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Scope</th><th>Needed for</th><th>Example in Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><code>compile</code> (default)</td><td>Compile, test and run. Passed on to users of this module</td><td><code>spring-boot-starter-webmvc</code> in core-app</td></tr>
+<tr><td><code>runtime</code></td><td>Run and test, but not to compile</td><td><code>postgresql</code> JDBC driver in core-app</td></tr>
+<tr><td><code>test</code></td><td>Only test code. Never in the real jar</td><td>JUnit, AssertJ, Testcontainers, <code>jackson-databind</code> in shared-kernel</td></tr>
+<tr><td><code>provided</code></td><td>Compile, but someone else gives it at run time</td><td>(not used yet)</td></tr>
+<tr><td><code>import</code></td><td>Only in <code>dependencyManagement</code>, to import a BOM</td><td>Spring Cloud and Modulith BOMs</td></tr>
+</tbody></table></div>
+<p><code>&lt;optional&gt;true&lt;/optional&gt;</code> is a related idea. In <code>platform-starter</code>,
+Spring MVC and Modulith are optional: the starter compiles against them, but an app that uses the
+starter does <strong>not</strong> get them automatically. Each part of the starter switches on only
+if the app has those libraries itself (<a href="03-spring-boot.html">lesson 03</a>).</p>
+<p>A <strong>transitive</strong> dependency is a library you get because another library needs it.
+See the whole tree with <code>.\mvnw.cmd -pl backend/core-app dependency:tree</code>.</p>
+
+<h2 id="lifecycle">5. Plugins and the lifecycle</h2>
+<h3>Phases and goals</h3>
+<p>Maven itself does almost nothing. <strong>Plugins</strong> do the work. Each plugin has
+<strong>goals</strong> (jobs), like <code>spotless:check</code> or <code>jacoco:report</code>. Goals are
+attached to <strong>phases</strong> of the <strong>lifecycle</strong>, a fixed list of steps:</p>
+<pre class="diagram">validate → compile → test-compile → test → package
+         → pre-integration-test → integration-test → post-integration-test
+         → verify → install → deploy
+
+   You ask for one phase. Maven runs every phase BEFORE it too.
+   ./mvnw test     = validate … test
+   ./mvnw verify   = validate … test … package … integration-test … verify
+   ./mvnw clean    = a separate lifecycle: delete target/</pre>
+<p>We almost always run <code>verify</code>: it is the "is everything OK?" command. We never run
+<code>deploy</code> (there is no artifact server).</p>
+
+<h3>plugins vs pluginManagement</h3>
+<p>Same idea as dependencies: <code>&lt;pluginManagement&gt;</code> prepares settings, but the plugin
+is <strong>off</strong> until a module lists it in <code>&lt;plugins&gt;</code>. The root pom uses this
+for <code>spring-boot-maven-plugin</code>: only runnable apps need it, and it would fail on a
+library like shared-kernel.</p>
+<div class="compare">
+  <div class="good"><h4>Root pom: prepared, off</h4>
+<pre><code>&lt;pluginManagement&gt;&lt;plugins&gt;
+  &lt;plugin&gt;
+    &lt;artifactId&gt;spring-boot-maven-plugin&lt;/artifactId&gt;
+    &lt;configuration&gt;
+      &lt;layers&gt;&lt;enabled&gt;true&lt;/enabled&gt;&lt;/layers&gt;
+    &lt;/configuration&gt;
+  &lt;/plugin&gt;
+&lt;/plugins&gt;&lt;/pluginManagement&gt;</code></pre></div>
+  <div class="good"><h4>core-app pom: switched on</h4>
+<pre><code>&lt;plugins&gt;
+  &lt;plugin&gt;
+    &lt;artifactId&gt;spring-boot-maven-plugin&lt;/artifactId&gt;
+    &lt;configuration&gt;
+      &lt;profiles&gt;&lt;profile&gt;dev&lt;/profile&gt;&lt;/profiles&gt;
+    &lt;/configuration&gt;
+  &lt;/plugin&gt;
+&lt;/plugins&gt;</code></pre></div>
+</div>
+<p>The plugin makes the runnable "fat" jar and gives the goal <code>spring-boot:run</code>.
+<strong>Layers</strong> split the jar into parts (libraries, loader, our code), so Docker can cache
+each part (<a href="05-docker-compose.html">lesson 05</a>). The <code>dev</code> profile setting
+means only <code>spring-boot:run</code> uses the dev settings; tests never do.</p>
+
+<h2 id="tests">6. Unit tests, ITs and profiles</h2>
+<h3>Two plugins, two kinds of test</h3>
+<p>Unit tests and integration tests live in the <strong>same folder</strong>,
+<code>src/test/java</code>. The <strong>class name ending</strong> decides who runs them:</p>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>Unit test</th><th>Integration test (IT)</th></tr></thead>
+<tbody>
+<tr><td>Name</td><td><code>MoneyTest</code>, <code>PingControllerTest</code></td><td><code>CoreApplicationIT</code>, <code>OutboxIT</code></td></tr>
+<tr><td>Plugin</td><td><code>maven-surefire-plugin</code></td><td><code>maven-failsafe-plugin</code></td></tr>
+<tr><td>Phase</td><td><code>test</code></td><td><code>integration-test</code>, then fails the build in <code>verify</code></td></tr>
+<tr><td>Speed / needs</td><td>Fast, no Docker</td><td>Slow, real Postgres and Kafka in Docker (Testcontainers)</td></tr>
+</tbody></table></div>
+<p>Why does failsafe wait until <code>verify</code> to fail? So the
+<code>post-integration-test</code> phase can still clean up (stop servers, containers) after a
+failed IT. That is the "fail-safe" in the name.</p>
+
+<h3>How <code>-DskipUTs</code> works</h3>
+<p>Maven's standard <code>-DskipTests</code> skips <strong>both</strong> kinds. We wanted a way to run
+only the ITs, so the root pom links surefire to our own property:</p>
+<pre data-file="pom.xml (root, part)"><code>&lt;properties&gt;
+    &lt;skipUTs&gt;false&lt;/skipUTs&gt;
+&lt;/properties&gt;
+…
+&lt;plugin&gt;
+    &lt;artifactId&gt;maven-surefire-plugin&lt;/artifactId&gt;
+    &lt;configuration&gt;
+        &lt;skipTests&gt;${skipUTs}&lt;/skipTests&gt;   <span class="c">&lt;!-- only surefire reads this --&gt;</span>
+    &lt;/configuration&gt;
+&lt;/plugin&gt;</code></pre>
+<p><code>-DskipUTs</code> on the command line sets the property. A <code>-D</code> with no value
+means <code>true</code>, so surefire skips, and failsafe still runs.</p>
+
+<h3>Profiles: <code>-Pexport-openapi</code></h3>
+<p>A Maven <strong>profile</strong> is a named block of extra settings, turned on with
+<code>-P&lt;id&gt;</code>. Smart Campus has one: <code>export-openapi</code> (T9). It writes the API
+documents to <code>docs/api/</code>:</p>
+<pre data-file="pom.xml (root, part)"><code>&lt;profile&gt;
+    &lt;id&gt;export-openapi&lt;/id&gt;
+    &lt;properties&gt;
+        &lt;skipUTs&gt;true&lt;/skipUTs&gt;                         <span class="c">&lt;!-- no unit tests --&gt;</span>
+        &lt;it.test&gt;OpenApiExportIT&lt;/it.test&gt;              <span class="c">&lt;!-- failsafe runs only this IT --&gt;</span>
+        &lt;failsafe.failIfNoSpecifiedTests&gt;false&lt;/failsafe.failIfNoSpecifiedTests&gt;
+    &lt;/properties&gt;
+    …  <span class="c">&lt;!-- + system property openapi.export=true: WRITE instead of compare --&gt;</span>
+&lt;/profile&gt;</code></pre>
+<p>Without the profile, the same <code>OpenApiExportIT</code> only <em>compares</em> the committed
+files with the live app, so a forgotten export fails the normal build. Do not confuse Maven
+profiles (<code>-P</code>) with Spring profiles (<code>dev</code>, <code>test</code>, lesson 03) or
+Compose profiles (<code>apps</code>, lesson 05): three tools, three meanings of "profile".</p>
+
+<h2 id="gates">7. Quality gates</h2>
+<p>A <strong>gate</strong> is a check that fails the build. A red build stops bad code early, on
+your computer, not in review.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Gate</th><th>Plugin</th><th>Where</th><th>Fails when</th></tr></thead>
+<tbody>
+<tr><td>Code format</td><td><code>spotless-maven-plugin</code> with <code>palantir-java-format</code></td><td>root pom, all modules, <code>verify</code></td><td>Any Java file is not formatted. Fix: <code>.\mvnw.cmd spotless:apply</code></td></tr>
+<tr><td>Coverage</td><td><code>jacoco-maven-plugin</code> goal <code>check</code></td><td>shared-kernel pom only</td><td>Tests run less than <strong>90%</strong> of the lines</td></tr>
+<tr><td>No Spring in the kernel</td><td><code>maven-enforcer-plugin</code>, <code>bannedDependencies</code></td><td>shared-kernel pom</td><td>Any <code>org.springframework*</code> library reaches the classpath, even transitively</td></tr>
+<tr><td>Tests</td><td>surefire + failsafe</td><td>root pom</td><td>Any test fails</td></tr>
+</tbody></table></div>
+<p><strong>JaCoCo</strong> works in steps: <code>prepare-agent</code> attaches a small helper (an
+"agent") to the test run that records which lines run; <code>report</code> writes HTML to
+<code>target/site/jacoco/</code> (we put it in the <code>test</code> phase so
+<code>.\mvnw.cmd test</code> already gives it); <code>check</code> compares with the 90% rule. Only
+shared-kernel has the gate now. Each feature module's spec will set its own.</p>
+<p>shared-kernel also builds a <strong>test-jar</strong> that holds only
+<code>edu.campus.kernel.testing</code> (the <code>Clocks</code> helper), so other modules' tests can
+use it with <code>&lt;type&gt;test-jar&lt;/type&gt;</code> and <code>&lt;scope&gt;test&lt;/scope&gt;</code>.</p>
+<div class="callout bad">
+  <span class="title">Never lower a gate to get green</span>
+  The spec's "Ask first" list includes "lowering a coverage gate or disabling a check". Write the
+  missing test, or run <code>spotless:apply</code>. Never add <code>-Dspotless.check.skip</code> or
+  <code>@Disabled</code> to make the build pass.
+</div>
+
+<h2 id="wrapper">8. The wrapper and daily commands</h2>
+<h3>The Maven Wrapper</h3>
+<p>Nobody installs Maven by hand. The repo has <strong>wrapper</strong> scripts: <code>mvnw</code>
+(Git Bash, Linux, macOS) and <code>mvnw.cmd</code> (PowerShell, cmd). On first use they download the
+exact Maven version written in <code>.mvn/wrapper/maven-wrapper.properties</code> (Maven 3.9.16)
+into <code>~/.m2/wrapper/</code>, and check its SHA-256 fingerprint. Everyone, including CI, uses the
+same Maven.</p>
+
+<h3>Commands you will use every day</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Command (PowerShell)</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>.\mvnw.cmd verify</code></td><td>Everything: compile, unit tests, ITs, Spotless, coverage. Run before "done"</td></tr>
+<tr><td><code>.\mvnw.cmd test</code></td><td>Unit tests only. Fast, no Docker</td></tr>
+<tr><td><code>.\mvnw.cmd verify -DskipUTs</code></td><td>ITs only (needs Docker)</td></tr>
+<tr><td><code>.\mvnw.cmd spotless:apply</code></td><td>Fix the code format</td></tr>
+<tr><td><code>.\mvnw.cmd -pl backend/core-app -am verify</code></td><td>One module plus what it needs</td></tr>
+<tr><td><code>.\mvnw.cmd -pl backend/core-app spring-boot:run</code></td><td>Start core-app on port 8081 with the <code>dev</code> profile</td></tr>
+<tr><td><code>.\mvnw.cmd package -DskipTests</code></td><td>Build the jars quickly (used before Docker images, T15)</td></tr>
+<tr><td><code>.\mvnw.cmd verify -Pexport-openapi</code></td><td>Refresh <code>docs/api/*.json</code></td></tr>
+<tr><td><code>.\mvnw.cmd -pl backend/shared-kernel "-Dtest=MoneyTest" test</code></td><td>Run one unit test class (in the module that has it; other modules would fail with "no tests matching")</td></tr>
+<tr><td><code>.\mvnw.cmd clean</code></td><td>Delete all <code>target/</code> folders</td></tr>
+</tbody></table></div>
+<div class="callout warn">
+  <span class="title">PowerShell and <code>-D</code></span>
+  PowerShell can split arguments that contain dots, like <code>-Dspring-boot.run.profiles=dev</code>.
+  Put such arguments in double quotes: <code>"-Dspring-boot.run.profiles=dev"</code>.
+</div>
+
+<h3>Maven vs npm</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>npm (frontend, T19)</th><th>Maven (backend)</th></tr></thead>
+<tbody>
+<tr><td><code>package.json</code></td><td><code>pom.xml</code></td></tr>
+<tr><td><code>dependencies</code> / <code>devDependencies</code></td><td>scope <code>compile</code> / scope <code>test</code></td></tr>
+<tr><td>npm workspaces</td><td><code>&lt;modules&gt;</code> + parent pom</td></tr>
+<tr><td><code>package-lock.json</code></td><td>no lock file; exact versions come from properties and BOMs</td></tr>
+<tr><td><code>node_modules/</code> per project</td><td><code>~/.m2/repository</code>, one shared cache</td></tr>
+<tr><td><code>"scripts": { "test": … }</code></td><td>lifecycle phases + plugin goals</td></tr>
+<tr><td><code>npm ci &amp;&amp; npm test</code></td><td><code>./mvnw verify</code></td></tr>
+<tr><td><code>dist/</code></td><td><code>target/</code></td></tr>
+</tbody></table></div>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Boot parent, modules, properties, BOMs</td><td><code>pom.xml</code> (root)</td><td>T1</td></tr>
+<tr><td>Surefire, failsafe, Spotless, JaCoCo report, <code>skipUTs</code></td><td><code>pom.xml</code> (root) <code>&lt;build&gt;</code></td><td>T2</td></tr>
+<tr><td><code>export-openapi</code> profile</td><td><code>pom.xml</code> (root) <code>&lt;profiles&gt;</code></td><td>T9</td></tr>
+<tr><td>Enforcer, test-jar, 90% gate</td><td><code>backend/shared-kernel/pom.xml</code></td><td>T4</td></tr>
+<tr><td>Optional dependencies</td><td><code>backend/platform-starter/pom.xml</code></td><td>T8</td></tr>
+<tr><td>App dependencies + Boot plugin with <code>dev</code></td><td><code>backend/core-app/pom.xml</code></td><td>T6, T7</td></tr>
+<tr><td>Wrapper</td><td><code>mvnw</code>, <code>mvnw.cmd</code>, <code>.mvn/wrapper/maven-wrapper.properties</code></td><td>T1</td></tr>
+<tr><td>New app modules</td><td><code>registration-service</code>, <code>notification-service</code>, <code>gateway</code> (planned)</td><td>T10, T11, T13</td></tr>
+<tr><td>CI runs the same commands</td><td><code>.github/workflows/ci.yml</code> (planned)</td><td>T20</td></tr>
+</tbody></table></div>
+<p>Also read <a href="../learn/platform/task1.md">docs/learn/platform/task1.md</a> and
+<a href="../learn/platform/task2.md">task2.md</a>.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Writing a <code>&lt;version&gt;</code> in a child pom.</strong> Versions live only in the
+      root pom (spec: "update the root pom's properties and nothing else for versions").</li>
+  <li><strong>Putting a library in the root <code>&lt;dependencies&gt;</code> when you meant
+      <code>&lt;dependencyManagement&gt;</code>.</strong> The first adds it to every module.</li>
+  <li><strong>Naming an IT <code>…Test</code>.</strong> Surefire runs it in the fast phase, and
+      <code>.\mvnw.cmd test</code> suddenly needs Docker. Integration tests end in <code>IT</code>.</li>
+  <li><strong>Using <code>-DskipTests</code> to "only run ITs".</strong> It skips both. Use
+      <code>-DskipUTs</code>.</li>
+  <li><strong>Forgetting <code>-am</code></strong> with <code>-pl</code>, then getting "could not
+      resolve <code>edu.campus:shared-kernel</code>".</li>
+  <li><strong>Using a floating version</strong> like a range or <code>LATEST</code>. The spec forbids
+      it: builds must be the same tomorrow.</li>
+  <li><strong>Committing <code>target/</code></strong>. It is build output and is gitignored.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Run the full build and read the "Reactor Summary" at the end. In which order were the
+      modules built, and why?</p>
+<pre><code>.\mvnw.cmd verify</code></pre></li>
+  <li><p>Look at the effective pom of core-app and find where <code>maven-failsafe-plugin</code>
+      gets its version and its goals:</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app help:effective-pom "-Doutput=target/effective-pom.xml"</code></pre></li>
+  <li><p>Print core-app's dependency tree. Find one library you did not add yourself, and the
+      dependency that brought it in:</p>
+<pre><code>.\mvnw.cmd -pl backend/core-app -am dependency:tree</code></pre></li>
+  <li><p>Break the format of one Java file (add spaces inside a method call), run
+      <code>.\mvnw.cmd -pl backend/shared-kernel verify</code>, read the error, then run
+      <code>spotless:apply</code> and see it fixed.</p></li>
+  <li><p>Run only the ITs, then only the unit tests, and compare the time each takes.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>POM</td><td>The <code>pom.xml</code> file that describes a Maven project.</td></tr>
+<tr><td>Coordinates</td><td><code>groupId:artifactId:version</code>, the address of a project.</td></tr>
+<tr><td>SNAPSHOT</td><td>A version that is still being worked on.</td></tr>
+<tr><td>Parent pom</td><td>A pom that other poms inherit from.</td></tr>
+<tr><td>Effective pom</td><td>The full pom after all parents are merged.</td></tr>
+<tr><td>Module</td><td>One sub-project with its own pom.</td></tr>
+<tr><td>Reactor</td><td>The part of Maven that orders and builds all modules.</td></tr>
+<tr><td>BOM</td><td>A published list of library versions that work together.</td></tr>
+<tr><td>Scope</td><td>When a dependency is needed: compile, runtime, test …</td></tr>
+<tr><td>Transitive dependency</td><td>A library you get because another library needs it.</td></tr>
+<tr><td>Plugin / goal</td><td>A Maven extension / one job it can do.</td></tr>
+<tr><td>Lifecycle / phase</td><td>The fixed list of build steps / one step in it.</td></tr>
+<tr><td>Surefire / failsafe</td><td>The plugins that run unit tests / integration tests.</td></tr>
+<tr><td>Profile (Maven)</td><td>A named block of extra settings, turned on with <code>-P</code>.</td></tr>
+<tr><td>Gate</td><td>A check that fails the build.</td></tr>
+<tr><td>Wrapper</td><td>Scripts that download and run the right Maven version.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do the child poms have no versions for Spring libraries?</summary>
+    <p>The versions come from above: the Spring Boot parent manages Boot's libraries, and the root
+    pom imports the Spring Cloud and Modulith BOMs. One place for versions means an upgrade is one
+    edit, and modules can never drift to different versions.</p></details>
+  <details><summary>2. Why is <code>spring-boot-maven-plugin</code> in <code>pluginManagement</code> in the root pom?</summary>
+    <p>Only runnable apps need it. In <code>&lt;plugins&gt;</code> it would run in every module,
+    including the libraries shared-kernel and platform-starter, which have no main class. In
+    <code>pluginManagement</code> it is prepared but off, and each app turns it on.</p></details>
+  <details><summary>3. Why does failsafe report IT failures in <code>verify</code>, not in <code>integration-test</code>?</summary>
+    <p>So the build can still run the <code>post-integration-test</code> clean-up steps after a
+    failed IT. Stopping at once could leave servers or containers running.</p></details>
+  <details><summary>4. Why do we have our own <code>-DskipUTs</code>?</summary>
+    <p><code>-DskipTests</code> stops both surefire and failsafe. We often want only the ITs (for
+    example in CI or after a Docker change). <code>skipUTs</code> is wired only into surefire.</p></details>
+  <details><summary>5. Why are Spring MVC and Modulith <code>optional</code> in platform-starter?</summary>
+    <p>So the starter does not force them on every app. The gateway is not a Spring MVC app; it must
+    not get Spring MVC just because it uses the starter. Each starter feature turns on only when the
+    app brings the library itself.</p></details>
+  <details><summary>6. Why is the coverage gate only on shared-kernel?</summary>
+    <p>The kernel is shared by every app, so a bug there spreads everywhere, and it is small, plain
+    Java that is easy to test fully. Other code gets gates when its module spec sets them.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://maven.apache.org/guides/introduction/introduction-to-the-pom.html">Maven: Introduction to the POM</a>: parents, inheritance, multi-module projects.</li>
+  <li><a href="https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html">Maven: Dependency mechanism</a>: scopes, <code>dependencyManagement</code>, BOM import.</li>
+  <li><a href="https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html">Maven: Build lifecycle</a>: phases and goals.</li>
+  <li><a href="https://maven.apache.org/guides/introduction/introduction-to-profiles.html">Maven: Profiles</a>.</li>
+  <li><a href="https://maven.apache.org/surefire/maven-surefire-plugin/">Surefire</a> and <a href="https://maven.apache.org/surefire/maven-failsafe-plugin/">Failsafe</a> plugin docs.</li>
+  <li><a href="https://maven.apache.org/tools/wrapper/">Maven Wrapper</a>.</li>
+  <li><a href="https://docs.spring.io/spring-boot/maven-plugin/index.html">Spring Boot Maven plugin</a>: the parent, <code>spring-boot:run</code>, layers.</li>
+  <li><a href="https://github.com/diffplug/spotless/tree/main/plugin-maven">Spotless Maven plugin</a> and <a href="https://www.jacoco.org/jacoco/trunk/doc/maven.html">JaCoCo Maven plugin</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

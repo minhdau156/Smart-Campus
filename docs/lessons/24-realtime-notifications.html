@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-time Notifications</title>
+<meta name="description" content="Smart Campus lesson 24: WebSocket with STOMP, browser push, email with Mailpit, the inbox, retries and safe sending.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="24">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 24 · Part 2: Feature modules</div>
+<h1>Real-time: WebSocket, push and email</h1>
+<p class="lede">A class is cancelled, a grade is published, an urgent announcement goes out. How
+does the student hear about it at once, in the open browser tab, as a browser push message, or
+by email, and never get the same message three times?</p>
+
+<div class="meta">
+  <span class="badge module">notification</span>
+  <span class="badge module">notification-service (separate app)</span>
+  <span class="badge task">NOTI-1, NOTI-2, NOTI-3</span>
+  <span class="badge task">TT-2, GR-4, ANN-4</span>
+  <span class="badge task">C8</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Planned module</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="08-outbox-idempotency.html">08 (outbox and idempotent consumers)</a>,
+  <a href="11-gateway-rate-limit.html">11 (the gateway)</a> and
+  <a href="17-spring-security.html">17 (JWT in Spring Security)</a>. The
+  <code>notification</code> module has no spec yet (<code>SPEC-notification.md</code> is
+  "Not started"), so everything here about our code is <strong>planned</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#ways">Four ways to reach the browser</a></li>
+    <li><a href="#stomp">STOMP over WebSocket in Spring</a></li>
+    <li><a href="#secure">Login on /ws and the browser client</a></li>
+    <li><a href="#replicas">Many replicas: simple broker or relay</a></li>
+    <li><a href="#push-email">Browser push and email</a></li>
+    <li><a href="#tables">Inbox, preferences, browser tokens</a></li>
+    <li><a href="#retry">Save first, then send: retries</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>The <code>notification</code> module is the "post office" of Smart Campus. Other modules do not
+send emails themselves. They publish events to Kafka, and the post office decides who gets a
+message and how. The stories it serves:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Story</th><th>What the user wants</th><th>Event that starts it (planned)</th></tr></thead>
+<tbody>
+<tr><td>NOTI-1</td><td>See all my notifications in an in-app inbox</td><td>every user-facing event</td></tr>
+<tr><td>NOTI-2</td><td>Choose channels per notification type (push, email, in-app)</td><td>none: a settings page</td></tr>
+<tr><td>NOTI-3</td><td>The system retries failed push and email deliveries</td><td>none: a retry job</td></tr>
+<tr><td>TT-2</td><td>Be told when a class is cancelled or moved</td><td><code>ScheduleChanged</code> on <code>course.events</code></td></tr>
+<tr><td>GR-4</td><td>Be told when a grade is published</td><td><code>GradePublished</code> on <code>grade.events</code></td></tr>
+<tr><td>ANN-4</td><td>Get urgent announcements as push messages</td><td><code>AnnouncementPublished</code> on <code>campus.events</code></td></tr>
+</tbody></table></div>
+
+<p>The capability map says <strong>notification is a sink</strong>: it depends only on
+<code>identity</code> and the event envelope. Each publisher's spec adds the notification handler
+for its own events. It runs in its own app, <code>notification-service</code> (port 8083), with its
+own schema <code>notification</code> and its own database user <code>notification_svc</code>.</p>
+
+<div class="flow">
+  <div class="box project"><b>Kafka</b><code>GradePublished</code>,<br><code>ScheduleChanged</code>, …</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>notification-service</b>dedupe, inbox row,<br>pick channels</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>Open tab</b>WebSocket <code>/ws</code></div>
+  <div class="box ok"><b>Closed tab</b>browser push</div>
+  <div class="box ok"><b>Mailbox</b>email (Mailpit in dev)</div>
+</div>
+
+<div class="callout project">
+  <span class="title">Resolution C8</span>
+  Registration (module 5) is built before notification (module 8). So registration first ships a
+  <strong>polling</strong> endpoint: <code>202 Accepted</code>, then <code>GET …/requests/{id}</code>.
+  The WebSocket push of the result (<code>/user/queue/registration</code>) is added when
+  notification lands. C8 also notes that STOMP across many replicas needs a
+  <strong>broker relay</strong> (section 5).
+</div>
+
+<h2 id="ways">2. Four ways to reach the browser</h2>
+<p>HTTP is "the browser asks, the server answers". The server cannot start a conversation. To send
+news <em>from</em> the server, we have four choices:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Way</th><th>How it works</th><th>Good</th><th>Bad</th></tr></thead>
+<tbody>
+<tr><td><strong>Polling</strong></td><td>The browser asks "anything new?" every few seconds</td><td>Very simple, works everywhere, easy to cache and rate-limit</td><td>Slow to notice news; many empty requests</td></tr>
+<tr><td><strong>Long polling</strong></td><td>The browser asks; the server waits until there is news (or a timeout), then answers; the browser asks again</td><td>Faster than polling, plain HTTP</td><td>Many waiting requests; tricky timeouts</td></tr>
+<tr><td><strong>Server-Sent Events (SSE)</strong></td><td>One long HTTP response; the server writes events into it. <code>EventSource</code> in the browser</td><td>Simple, one direction, auto-reconnect built in</td><td>Server → browser only; the standard <code>EventSource</code> cannot send an <code>Authorization</code> header</td></tr>
+<tr><td><strong>WebSocket</strong></td><td>An HTTP request is "upgraded" to a two-way connection that stays open</td><td>Fast, both directions, low overhead</td><td>Stateful connections; harder with many servers and proxies</td></tr>
+</tbody></table></div>
+<p>An analogy: polling is calling the shop every 5 minutes to ask "is my order ready?". WebSocket
+is keeping the phone line open so the shop can tell you the moment it is ready.</p>
+<p>The Architecture document chose <strong>WebSocket with STOMP at <code>/ws</code></strong>, with
+the user queues <code>/user/queue/notifications</code> and <code>/user/queue/registration</code>.
+Polling stays as a safe fallback: if the socket is closed, the page still loads the inbox with a
+normal <code>GET</code>.</p>
+
+<h2 id="stomp">3. STOMP over WebSocket in Spring</h2>
+<p>A WebSocket only moves raw text or bytes. It has no idea of "topics" or "who should get this".
+<strong>STOMP</strong> (Simple Text Oriented Messaging Protocol) is a small protocol on top. It adds
+<em>frames</em> such as <code>CONNECT</code>, <code>SUBSCRIBE</code>, <code>SEND</code> and
+<code>MESSAGE</code>, each with headers and a body, a bit like tiny HTTP messages.</p>
+<p>Words you need:</p>
+<ul>
+  <li><strong>Destination</strong>: an address like <code>/topic/news</code> or <code>/queue/notifications</code>.</li>
+  <li><strong>Broker</strong>: the part that remembers who subscribed to which destination and
+      delivers messages to them.</li>
+  <li><strong>User destination</strong>: a destination starting with <code>/user/</code>. The
+      client subscribes to <code>/user/queue/notifications</code>; Spring turns it into a private
+      queue for <em>that</em> logged-in user only.</li>
+</ul>
+
+<pre data-file="notification-service/.../notification/realtime/WebSocketConfig.java (planned)"><code>package edu.campus.notification.realtime;
+
+<span class="k">@Configuration</span>
+<span class="k">@EnableWebSocketMessageBroker</span>
+class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    private final JwtChannelInterceptor jwtInterceptor;
+
+    WebSocketConfig(JwtChannelInterceptor jwtInterceptor) {   <span class="c">// constructor injection</span>
+        this.jwtInterceptor = jwtInterceptor;
+    }
+
+    <span class="k">@Override</span>
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        registry.addEndpoint("/ws")                           <span class="c">// the URL the browser opens</span>
+                .setAllowedOriginPatterns("http://localhost:5173");  <span class="c">// the web app's origin</span>
+    }
+
+    <span class="k">@Override</span>
+    public void configureMessageBroker(MessageBrokerRegistry registry) {
+        registry.enableSimpleBroker("/queue", "/topic");      <span class="c">// in-memory broker (one app)</span>
+        registry.setApplicationDestinationPrefixes("/app");   <span class="c">// browser → @MessageMapping</span>
+        registry.setUserDestinationPrefix("/user");
+    }
+
+    <span class="k">@Override</span>
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(jwtInterceptor);            <span class="c">// check the token on CONNECT</span>
+    }
+}</code></pre>
+
+<p>Sending to one user from Java code is one call. The user name is the
+<code>Principal</code> name, which for a Keycloak JWT is the <code>sub</code> claim (the user id):</p>
+<pre data-file="notification-service/.../notification/realtime/LivePusher.java (planned)"><code><span class="k">@Component</span>
+class LivePusher {
+    private final SimpMessagingTemplate messaging;
+
+    LivePusher(SimpMessagingTemplate messaging) {
+        this.messaging = messaging;
+    }
+
+    void push(UUID userId, InboxItemView item) {
+        <span class="c">// The browser subscribed to "/user/queue/notifications".</span>
+        messaging.convertAndSendToUser(userId.toString(), "/queue/notifications", item);
+    }
+}</code></pre>
+
+<div class="callout tip">
+  <span class="title">The socket is a hint, not the truth</span>
+  If the user is offline, <code>convertAndSendToUser</code> just delivers to nobody. That is fine,
+  because the message is already saved in the inbox table. When the tab opens again, it loads the
+  inbox with a normal REST call. Never keep a message <em>only</em> in the WebSocket.
+</div>
+
+<h2 id="secure">4. Login on /ws and the browser client</h2>
+<h3>Why the token goes in the CONNECT frame</h3>
+<p>In the browser, the <code>WebSocket</code> API cannot add an <code>Authorization</code> header
+to the opening HTTP request. Putting the token in the URL (<code>/ws?token=…</code>) is risky,
+because URLs end up in logs. The usual answer: open the socket without a token, then send the JWT
+as a header <strong>inside the STOMP <code>CONNECT</code> frame</strong>. The server checks it
+before it accepts anything else.</p>
+
+<pre data-file="notification-service/.../notification/realtime/JwtChannelInterceptor.java (planned)"><code><span class="k">@Component</span>
+class JwtChannelInterceptor implements ChannelInterceptor {
+    private final JwtDecoder jwtDecoder;                         <span class="c">// checks signature + expiry (JWKS from Keycloak)</span>
+    private final JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+
+    JwtChannelInterceptor(JwtDecoder jwtDecoder) {
+        this.jwtDecoder = jwtDecoder;
+    }
+
+    <span class="k">@Override</span>
+    public Message&lt;?&gt; preSend(Message&lt;?&gt; message, MessageChannel channel) {
+        StompHeaderAccessor stomp = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+        if (stomp != null &amp;&amp; StompCommand.CONNECT.equals(stomp.getCommand())) {
+            String header = stomp.getFirstNativeHeader("Authorization");
+            if (header == null || !header.startsWith("Bearer ")) {
+                throw new MessageDeliveryException("Missing token");   <span class="c">// connection refused</span>
+            }
+            Jwt jwt = jwtDecoder.decode(header.substring(7));      <span class="c">// throws if bad or expired</span>
+            stomp.setUser(converter.convert(jwt));                 <span class="c">// Principal name = sub</span>
+        }
+        return message;
+    }
+}</code></pre>
+<p>Also check <code>SUBSCRIBE</code> frames: a user may subscribe to their own
+<code>/user/queue/…</code> but not to someone else's raw queue. Spring Security can add rules per
+destination for messages too (see "Learn more").</p>
+
+<h3>The gateway route</h3>
+<p>The browser talks only to the gateway on :8080. Platform task T13 already plans the route
+<code>/ws/**</code> → notification-service (:8083). Spring Cloud Gateway can forward WebSocket
+traffic: the backend URI uses the <code>ws://</code> scheme (or <code>wss://</code> with TLS).</p>
+<pre data-file="backend/gateway/src/main/resources/application.yml (planned in T13, shape only)"><code>- id: notification-ws
+  uri: ${NOTIFICATION_WS_URI:ws://localhost:8083}
+  predicates:
+    - Path=/ws/**</code></pre>
+<p>Watch out for idle timeouts in proxies: a quiet connection may be closed. STOMP
+<strong>heart-beats</strong> (small "I am alive" frames every few seconds) keep it open.</p>
+
+<h3>The browser client</h3>
+<p>In the web app we can use the <code>@stomp/stompjs</code> library. It reconnects by itself, and
+<code>beforeConnect</code> lets us put a fresh access token in every new CONNECT.</p>
+<pre data-file="frontend/web/src/modules/notification/live.ts (planned)"><code>import { Client } from "@stomp/stompjs";
+
+export function startLiveInbox(getToken: () =&gt; Promise&lt;string&gt;, onItem: (item: InboxItem) =&gt; void) {
+  const client = new Client({
+    brokerURL: `${location.origin.replace(/^http/, "ws")}/ws`,
+    reconnectDelay: 5000,
+    heartbeatIncoming: 10000,
+    heartbeatOutgoing: 10000,
+    beforeConnect: async () =&gt; {
+      client.connectHeaders = { Authorization: `Bearer ${await getToken()}` };
+    },
+    onConnect: () =&gt; {
+      client.subscribe("/user/queue/notifications", (msg) =&gt; onItem(JSON.parse(msg.body)));
+    },
+  });
+  client.activate();
+  return () =&gt; client.deactivate();
+}</code></pre>
+<p>When a message arrives, the page can also tell TanStack Query to refetch the inbox (see
+<a href="14-frontend-api-testing.html">lesson 14</a>), so the list and the unread badge stay correct.</p>
+
+<h2 id="replicas">5. Many replicas: simple broker or relay</h2>
+<p>The "simple broker" lives <strong>in the memory of one app</strong>. In production the
+Architecture plans 2 replicas of notification-service. Now there is a problem:</p>
+<pre class="diagram">  Lan's browser ──WebSocket──► replica A   (Lan's session lives here)
+                                replica B   ◄── Kafka gives GradePublished for Lan to B
+  B calls convertAndSendToUser("lan", …) → B has no session for Lan → message goes nowhere</pre>
+<p>Kafka splits partitions between the replicas in one consumer group, so the replica that handles
+the event is often not the one holding the socket. Two common fixes:</p>
+<div class="compare">
+  <div class="good"><h4>Broker relay</h4>
+    <p><code>enableStompBrokerRelay(...)</code> instead of <code>enableSimpleBroker(...)</code>. Each
+    replica forwards STOMP messages to an <strong>external STOMP broker</strong> (for example
+    RabbitMQ with its STOMP plugin). The external broker knows all subscriptions, so any replica can
+    send to any user. Cost: one more server to run. It is not in our Compose file today, so adding
+    it is a spec decision.</p></div>
+  <div class="good"><h4>Fan-out to every replica</h4>
+    <p>The replica that saved the inbox row publishes a small "push item X to user Y" message on a
+    channel that <em>every</em> replica hears (for example Redis pub/sub, which is already in
+    Compose). Each replica pushes only if it has a local session for that user. Cost: our own code.</p></div>
+</div>
+<p>With one replica in dev, the simple broker is enough. <code>SPEC-notification.md</code> must pick
+the multi-replica design before production (C8).</p>
+
+<h2 id="push-email">6. Browser push and email</h2>
+<h3>Browser push (Web Push)</h3>
+<p>Smart Campus is <strong>website only, no mobile app</strong>. So "push" means a
+<strong>browser push notification</strong>: the little pop-up that appears even when our tab is
+closed. The parts:</p>
+<ol>
+  <li><strong>Service worker</strong>: a small JavaScript file the browser keeps running in the
+      background for our site. It receives push messages and shows them.</li>
+  <li><strong>Permission</strong>: the user must click "Allow". Ask only after they turn on push in
+      the settings page, never on the first visit.</li>
+  <li><strong>Subscription</strong>: the browser's push service gives an address (endpoint URL and
+      keys) for this browser. With FCM for web, the Firebase SDK gives a
+      <strong>registration token</strong> instead. Either way, we store it as a "browser token".</li>
+  <li><strong>Sending</strong>: our server sends the message to the push service (or to FCM),
+      which wakes the service worker.</li>
+</ol>
+<pre data-file="frontend/web/public/sw.js (planned, simplified)"><code>self.addEventListener("push", (event) =&gt; {
+  const data = event.data ? event.data.json() : {};
+  event.waitUntil(self.registration.showNotification(data.title, {
+    body: data.body,
+    data: { link: data.link },            // e.g. "/grade/sections/…"
+  }));
+});
+self.addEventListener("notificationclick", (event) =&gt; {
+  event.notification.close();
+  event.waitUntil(clients.openWindow(event.notification.data.link));
+});</code></pre>
+<p>Assumption 4 says external systems are stubbed in dev: <strong>a fake push sender</strong>. So
+the Java code depends on an interface, and the dev profile uses a fake that only records the
+message:</p>
+<pre data-file="notification-service/.../notification/channel/PushSender.java (planned)"><code>public interface PushSender {
+    PushResult send(BrowserToken token, PushMessage message);
+}
+
+<span class="k">@Component</span>
+<span class="k">@Profile</span>("dev")
+class FakePushSender implements PushSender {
+    private static final Logger log = LoggerFactory.getLogger(FakePushSender.class);
+
+    <span class="k">@Override</span>
+    public PushResult send(BrowserToken token, PushMessage message) {
+        log.info("FAKE PUSH to token {}…: {}", token.shortId(), message.title());  <span class="c">// never log the full token</span>
+        return PushResult.delivered();
+    }
+}</code></pre>
+<p>The real sender (FCM or Web Push) comes later. Its result can say "this token is dead" (the push
+service answers that the subscription no longer exists). Then we delete the token.</p>
+
+<h3>Email with Spring Mail and Mailpit</h3>
+<p>Spring Boot's mail starter gives a <code>JavaMailSender</code>. In dev it talks to
+<strong>Mailpit</strong>, a fake mail server from our Compose file: SMTP on port 1025, and a web
+page at <a href="http://localhost:8025">http://localhost:8025</a> where you can read every email.
+No real email ever leaves your computer.</p>
+<pre data-file="notification-service application.yml, dev profile (planned)"><code>spring:
+  mail:
+    host: localhost
+    port: 1025          <span class="c"># Mailpit SMTP (see infra/docker-compose.yml)</span></code></pre>
+<pre data-file="notification-service/.../notification/channel/EmailSender.java (planned)"><code><span class="k">@Component</span>
+class EmailSender {
+    private final JavaMailSender mail;
+    private final EmailTemplates templates;
+
+    EmailSender(JavaMailSender mail, EmailTemplates templates) {
+        this.mail = mail;
+        this.templates = templates;
+    }
+
+    void send(String to, NotificationType type, Map&lt;String, Object&gt; data, Locale locale) throws MessagingException {
+        RenderedEmail email = templates.render(type, data, locale);   <span class="c">// vi or en</span>
+        MimeMessage message = mail.createMimeMessage();
+        MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
+        helper.setTo(to);
+        helper.setFrom("no-reply@campus.edu");
+        helper.setSubject(email.subject());
+        helper.setText(email.text(), email.html());                   <span class="c">// plain text + HTML</span>
+        mail.send(message);
+    }
+}</code></pre>
+<p><strong>Templates</strong> keep the words out of Java code. One template per notification type
+and language (for example <code>grade-published.vi.html</code>), filled with data from the event.
+Always escape user data (a title someone typed) when you put it into HTML.</p>
+
+<h2 id="tables">7. Inbox, preferences, browser tokens</h2>
+<p>Resolution <strong>C10</strong> says NOTI-2's tables (preferences and device tokens) are
+designed in the module spec. The Plan already has a <code>notifications</code> table. A likely
+shape (planned, in schema <code>notification</code>, no foreign keys to other schemas):</p>
+<pre data-file="notification/V…__inbox.sql (planned sketch)"><code>CREATE TABLE notification.notifications (            <span class="c">-- the inbox (NOTI-1)</span>
+    id          UUID PRIMARY KEY,
+    user_id     UUID NOT NULL,                         <span class="c">-- bare UUID, no FK to identity</span>
+    type        TEXT NOT NULL,                         <span class="c">-- GRADE_PUBLISHED, CLASS_CANCELLED, …</span>
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    link        TEXT,
+    source_event_id UUID NOT NULL UNIQUE,              <span class="c">-- one inbox row per event (extra safety)</span>
+    read_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX ON notification.notifications (user_id, created_at DESC);
+
+CREATE TABLE notification.channel_preferences (      <span class="c">-- NOTI-2</span>
+    user_id  UUID NOT NULL,
+    type     TEXT NOT NULL,
+    channel  TEXT NOT NULL,                            <span class="c">-- IN_APP, PUSH, EMAIL</span>
+    enabled  BOOLEAN NOT NULL,
+    PRIMARY KEY (user_id, type, channel)
+);
+
+CREATE TABLE notification.device_tokens (            <span class="c">-- browser tokens, not phones</span>
+    id           UUID PRIMARY KEY,
+    user_id      UUID NOT NULL,
+    token        TEXT NOT NULL UNIQUE,
+    user_agent   TEXT,
+    created_at   TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL
+);</code></pre>
+<p>Ideas inside this design:</p>
+<ul>
+  <li><strong>Defaults in code, rows only for changes.</strong> If a user has no row for
+      (GRADE_PUBLISHED, EMAIL), use the default for that type. This keeps the table small.</li>
+  <li><strong>Some types cannot be turned off.</strong> ANN-4 "urgent" should still arrive in the
+      inbox. The rule lives in code, next to the defaults.</li>
+  <li><strong>One user, many browsers.</strong> A student may allow push on a laptop and on a
+      phone's browser. Each gives its own token. Delete a token when the push service says it is
+      dead, or when the user logs out of that browser.</li>
+</ul>
+
+<h2 id="retry">8. Save first, then send: retries</h2>
+<p>An email cannot be rolled back. So the consumer must <strong>not</strong> send inside its
+Kafka transaction. Instead it saves "what must be sent" first, and a separate worker sends later.
+This is the outbox idea again (<a href="08-outbox-idempotency.html">lesson 08</a>), used for
+email and push.</p>
+<pre data-file="notification-service/.../notification/GradePublishedHandler.java (planned, simplified)"><code><span class="k">@KafkaListener</span>(topics = "grade.events", groupId = "notification")
+<span class="k">@Transactional</span>
+void on(DomainEvent&lt;GradePublished&gt; event) {
+    if (!processedEvents.tryInsert(event.eventId())) {
+        return;                                                    <span class="c">// D2: seen before</span>
+    }
+    UUID studentId = event.payload().studentId();
+    Notification n = inbox.add(studentId, NotificationType.GRADE_PUBLISHED, event);  <span class="c">// NOTI-1</span>
+    for (Channel channel : preferences.channelsFor(studentId, n.type())) {         <span class="c">// NOTI-2</span>
+        deliveries.schedule(n.id(), channel, clock.instant());     <span class="c">// status PENDING, attempts 0</span>
+    }
+}                                                                  <span class="c">// COMMIT, nothing sent yet</span></code></pre>
+<p>A delivery worker then picks <code>PENDING</code> rows whose <code>next_attempt_at</code> has
+come (with <code>FOR UPDATE SKIP LOCKED</code>, see <a href="25-scheduled-jobs-feeds.html">lesson 25</a>),
+sends them, and marks them <code>SENT</code>. After the inbox row commits, the live WebSocket push
+happens too.</p>
+
+<h3>Exponential backoff with jitter (NOTI-3)</h3>
+<p>If Mailpit or the push service is down, do not retry every second: you would hammer a sick
+server. Wait longer after each failure (<strong>exponential backoff</strong>: 30 s, 1 min, 2 min,
+4 min…), and add a little randomness (<strong>jitter</strong>) so thousands of failed messages do
+not all retry in the same second.</p>
+<pre data-file="notification-service/.../notification/delivery/Backoff.java (planned)"><code>record Backoff(Duration base, Duration max) {
+    Instant nextAttempt(Instant now, int attempts, RandomGenerator random) {
+        long cap = Math.min(max.toMillis(), base.toMillis() * (1L &lt;&lt; Math.min(attempts, 20)));
+        long wait = random.nextLong(cap / 2, cap + 1);     <span class="c">// "equal jitter": between half and all of it</span>
+        return now.plusMillis(wait);
+    }
+}</code></pre>
+
+<h3>Dead letters</h3>
+<p>After, say, 8 failed attempts, stop. Mark the delivery <code>DEAD</code> (a <strong>dead
+letter</strong>: a message that could not be delivered) and keep the error text. A dashboard or
+alert shows dead letters, and an admin can retry them by hand. The inbox row is still there, so the
+user does not lose the information.</p>
+<p>The same idea exists in Kafka: if a <em>consumer</em> keeps failing on one record (bad data),
+Spring Kafka's error handler can retry with a back-off and then publish the record to a
+dead-letter topic. Our topics are created on purpose (auto-create is off in Compose), so a
+dead-letter topic must be created too.</p>
+
+<h3>Duplicate sends and why these consumers are not replayable</h3>
+<ul>
+  <li><strong>Duplicate event</strong> → stopped by <code>processed_events</code> (D2) and the
+      unique <code>source_event_id</code>. One inbox row, one set of deliveries.</li>
+  <li><strong>Crash after the email left but before <code>SENT</code> was saved</strong> → the
+      worker sends again. This small window cannot be fully closed, because SMTP has no "undo" and
+      no shared transaction. Keep it small: mark <code>SENT</code> right after each send, one row
+      at a time. Where a provider accepts an idempotency key, pass the delivery id.</li>
+  <li><strong>Replay</strong> → spec D5: consumers with external side effects are registered as
+      <strong>non-replayable</strong>, and <code>replay.sh</code> refuses them. Replaying
+      <code>grade.events</code> into this consumer would email every student about every old grade.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>notification-service app, port 8083, schema <code>notification</code></td><td><code>backend/notification-service</code></td><td>Platform T11 (planned)</td></tr>
+<tr><td>Gateway route <code>/ws/**</code> → :8083</td><td><code>backend/gateway</code></td><td>Platform T13 (planned)</td></tr>
+<tr><td>Schema and DB user <code>notification_svc</code></td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>Exists</td></tr>
+<tr><td>Mailpit (SMTP 1025, UI 8025)</td><td><code>infra/docker-compose.yml</code>, service <code>mailpit</code></td><td>Exists</td></tr>
+<tr><td>Idempotent consumer (<code>processed_events</code>)</td><td>platform-starter + notification-service</td><td>Platform T11 (planned)</td></tr>
+<tr><td>Inbox, preferences, device tokens, deliveries</td><td><code>SPEC-notification.md</code></td><td>Planned (C10)</td></tr>
+<tr><td>STOMP <code>/ws</code>, fake push sender, email templates</td><td>notification module</td><td>Planned</td></tr>
+<tr><td>Registration result over <code>/user/queue/registration</code></td><td>registration + notification</td><td>Planned (C8: polling first)</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Sending email inside the Kafka consumer transaction.</strong> If the commit fails
+      after the send, the retry sends again. Save a delivery row first, send later.</li>
+  <li><strong>Keeping messages only in the socket.</strong> Offline users lose them. The inbox
+      table is the truth; the socket is a hint.</li>
+  <li><strong>Putting the JWT in the WebSocket URL.</strong> URLs are logged. Send it in the STOMP
+      <code>CONNECT</code> frame.</li>
+  <li><strong>Using the simple broker with several replicas</strong> and wondering why some users
+      get nothing. Use a relay or a fan-out.</li>
+  <li><strong>Retrying at a fixed fast rate forever.</strong> Use backoff, jitter and a maximum,
+      then a dead letter.</li>
+  <li><strong>Asking for push permission on the first page load.</strong> Most users click
+      "Block", and you cannot ask again easily.</li>
+  <li><strong>Marking the email consumer as replayable.</strong> A replay would spam everyone.</li>
+  <li><strong>Logging full tokens or email bodies with private data</strong> (grades!). Log ids.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infrastructure and open Mailpit's web page:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait
+start http://localhost:8025</code></pre>
+      <p>Send a test email to it with any small tool (for example a 10-line Spring Boot app with
+      <code>spring.mail.port=1025</code>). Find it in the Mailpit page.</p></li>
+  <li><p>In a scratch Spring Boot project (not in the repo), add the WebSocket starter, copy the
+      <code>WebSocketConfig</code> above without the interceptor, and a
+      <code>@Scheduled</code> method that sends the time to <code>/topic/time</code> every second.
+      Connect with a small HTML page using <code>@stomp/stompjs</code> from a CDN.</p></li>
+  <li><p>Open the browser developer tools, tab "Network", filter "WS". Click the
+      <code>/ws</code> connection and look at the frames: find <code>CONNECT</code>,
+      <code>CONNECTED</code>, <code>SUBSCRIBE</code> and <code>MESSAGE</code>.</p></li>
+  <li><p>On paper: write the <code>deliveries</code> table (columns, status values, indexes) and
+      the SQL the worker uses to pick 50 due rows without two replicas taking the same row.</p></li>
+  <li><p>On paper: a student has the channels IN_APP + EMAIL for GRADE_PUBLISHED.
+      <code>GradePublished</code> arrives twice, and Mailpit is down for 10 minutes. List every row
+      that is written and every email that leaves, in order.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>WebSocket</td><td>A connection that stays open so the server and browser can both send at any time.</td></tr>
+<tr><td>SSE</td><td>Server-Sent Events: a long HTTP response the server keeps writing into. One direction.</td></tr>
+<tr><td>STOMP</td><td>A small messaging protocol on top of WebSocket, with frames and destinations.</td></tr>
+<tr><td>Frame</td><td>One STOMP message: a command (CONNECT, SUBSCRIBE…), headers and a body.</td></tr>
+<tr><td>Destination</td><td>The address of a message, like <code>/user/queue/notifications</code>.</td></tr>
+<tr><td>Simple broker</td><td>Spring's in-memory message broker. Works inside one app only.</td></tr>
+<tr><td>Broker relay</td><td>Spring forwards STOMP to an external broker that all replicas share.</td></tr>
+<tr><td>Heart-beat</td><td>A tiny frame sent regularly to keep the connection alive.</td></tr>
+<tr><td>Service worker</td><td>A background script of a website. It receives push messages.</td></tr>
+<tr><td>Web Push / FCM</td><td>Ways to send push messages to a browser. FCM is Google's service.</td></tr>
+<tr><td>Browser token</td><td>The address of one browser for push messages (stored in <code>device_tokens</code>).</td></tr>
+<tr><td>Exponential backoff</td><td>Waiting twice as long after each failure.</td></tr>
+<tr><td>Jitter</td><td>Random extra wait so retries do not all happen at the same moment.</td></tr>
+<tr><td>Dead letter</td><td>A message we gave up on after many tries, kept for a human to look at.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why does registration first ship a polling endpoint instead of WebSocket (C8)?</summary>
+    <p>The WebSocket host is notification-service, and that module is built after registration.
+    Polling (202 + <code>GET …/requests/{id}</code>) works with no new infrastructure, so
+    registration can be finished and tested on its own. The push is added later.</p></details>
+  <details><summary>2. Why is the JWT sent in the STOMP CONNECT frame and not in the URL?</summary>
+    <p>The browser WebSocket API cannot set an <code>Authorization</code> header, and a token in
+    the URL can leak into server and proxy logs. The CONNECT frame travels inside the open
+    connection, and the server checks it before accepting anything else.</p></details>
+  <details><summary>3. With 2 replicas and a simple broker, why do some users miss live messages?</summary>
+    <p>Each simple broker knows only its own sessions. The replica that consumes the Kafka event may
+    not be the one holding the user's socket, so the message is sent to nobody. A broker relay or a
+    fan-out to every replica fixes it.</p></details>
+  <details><summary>4. Why does the consumer save delivery rows instead of sending the email directly?</summary>
+    <p>An email cannot be rolled back. If we sent inside the transaction and the commit then failed,
+    Kafka would give the event again and we would send again. Saving first makes the decision part
+    of the commit; sending later can be retried safely and tracked.</p></details>
+  <details><summary>5. Why add jitter to the backoff?</summary>
+    <p>When a mail server comes back, thousands of failed deliveries would all retry at the same
+    moment and knock it over again. Random waits spread the retries out.</p></details>
+  <details><summary>6. Why is the email/push consumer registered as non-replayable (D5)?</summary>
+    <p>Replay reads every old event again. For a read model that just rebuilds rows. For a sender
+    it would email and push every old notification to every student again.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-framework/reference/web/websocket/stomp.html">Spring Framework reference: STOMP over WebSocket</a>: endpoints, simple broker, broker relay, user destinations, authentication.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/integrations/websocket.html">Spring Security reference: WebSocket security</a>: rules per message destination.</li>
+  <li><a href="https://stomp.github.io/stomp-specification-1.2.html">STOMP 1.2 specification</a>: frames and heart-beats.</li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Push_API">MDN: Push API</a> and <a href="https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API">Service Worker API</a>.</li>
+  <li><a href="https://firebase.google.com/docs/cloud-messaging/js/client">Firebase docs: FCM JavaScript client</a>.</li>
+  <li><a href="https://docs.spring.io/spring-boot/reference/io/email.html">Spring Boot reference: Sending email</a>.</li>
+  <li><a href="https://mailpit.axllent.org/docs/">Mailpit documentation</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL and Flyway</title>
+<meta name="description" content="Smart Campus lesson 04: tables, constraints, transactions and locking in PostgreSQL, one schema and one DB user per module, and Flyway migrations.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="04">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 04 · Part 1: Foundations</div>
+<h1>PostgreSQL, schemas and Flyway</h1>
+<p class="lede">All Smart Campus data lives in one PostgreSQL database, split into one schema per
+module. This lesson teaches the SQL you need, how transactions and locks keep data correct, why no
+foreign key may cross a schema, and how Flyway changes the database safely.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every module with data</span>
+  <span class="badge task">T3 (done)</span>
+  <span class="badge task">T6 (done)</span>
+  <span class="badge task">T10</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="03-spring-boot.html">03 (Spring Boot, <code>@Transactional</code>)</a>. You only need
+  to know that <code>docker compose … up</code> starts the database;
+  <a href="05-docker-compose.html">lesson 05</a> explains Docker.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">One database, many schemas</a></li>
+    <li><a href="#tables">Tables, types, constraints, indexes</a></li>
+    <li><a href="#tx">Transactions, ACID, isolation</a></li>
+    <li><a href="#locks">Locks and optimistic locking</a></li>
+    <li><a href="#users">Schemas, users and GRANT</a></li>
+    <li><a href="#no-fk">No foreign keys across schemas</a></li>
+    <li><a href="#flyway">Flyway migrations</a></li>
+    <li><a href="#jdbc">JdbcTemplate (and JPA)</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. One database, many schemas</h2>
+<p><strong>PostgreSQL</strong> ("Postgres") is a relational database: data is stored in
+<strong>tables</strong> with rows and columns, and you ask for it with <strong>SQL</strong>. Smart
+Campus runs Postgres 19 in Docker (image <code>postgres:19.0-alpine3.24</code>), with one database
+called <code>campus</code>.</p>
+<p>Inside that database, each module gets its own <strong>schema</strong>. A schema is a named
+folder for tables. <code>course.sections</code> and <code>registration.section_seats</code> are in
+different folders. Think of one apartment building (the database) where each family (module) has a
+locked flat (schema).</p>
+<pre class="diagram">database "campus"
+├── platform      outbox (event_publication), flyway history    core_app
+├── identity      course      timetable     grade                core_app
+├── announcement  club        marketplace   lostfound   payment  core_app
+├── registration                                                 registration_svc only
+└── notification                                                 notification_svc only
+
+database "keycloak"   (Keycloak's own tables, user keycloak)</pre>
+<p>Why not one database per module? One Postgres is simpler to run on a laptop and in CI, and still
+lets us split later. The schemas, separate users and the "no cross-schema foreign key" rule keep the
+modules as separate as if they had their own databases.</p>
+
+<h2 id="tables">2. Tables, types, constraints, indexes</h2>
+<p>Here is a real table, the outbox table from T7:</p>
+<pre data-file="backend/core-app/src/main/resources/db/migration/platform/V202611220100__event_publication.sql"><code>CREATE TABLE event_publication
+(
+    id                     UUID                     NOT NULL,
+    listener_id            TEXT                     NOT NULL,
+    event_type             TEXT                     NOT NULL,
+    serialized_event       TEXT                     NOT NULL,
+    publication_date       TIMESTAMP WITH TIME ZONE NOT NULL,
+    completion_date        TIMESTAMP WITH TIME ZONE,          <span class="c">-- NULL = not delivered yet</span>
+    status                 TEXT,
+    completion_attempts    INT,
+    last_resubmission_date TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX event_publication_by_completion_date_idx ON event_publication (completion_date);</code></pre>
+
+<h3>Types we use</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>Holds</th><th>Java type</th><th>Project rule</th></tr></thead>
+<tbody>
+<tr><td><code>uuid</code></td><td>A 128-bit id</td><td><code>UUID</code> (inside a typed id)</td><td>Every table: <code>id UUID PRIMARY KEY</code></td></tr>
+<tr><td><code>timestamptz</code> (= <code>TIMESTAMP WITH TIME ZONE</code>)</td><td>A point in time</td><td><code>Instant</code></td><td><code>created_at timestamptz NOT NULL</code></td></tr>
+<tr><td><code>text</code></td><td>A string of any length</td><td><code>String</code></td><td>Prefer it to <code>varchar(n)</code>; use a <code>CHECK</code> for limits</td></tr>
+<tr><td><code>numeric(p, s)</code></td><td>Exact decimal number</td><td><code>BigDecimal</code> (inside <code>Money</code>)</td><td>Money, GPA. Never <code>real</code>/<code>double precision</code></td></tr>
+<tr><td><code>int</code>, <code>bigint</code></td><td>Whole numbers</td><td><code>int</code>, <code>long</code></td><td>Counts, capacity, version</td></tr>
+<tr><td><code>boolean</code></td><td>true / false</td><td><code>boolean</code></td><td></td></tr>
+</tbody></table></div>
+<p>A <code>timestamptz</code> does not store a zone. It stores an exact instant (in UTC inside) and
+shows it in the session's time zone. That fits our rule: store <code>Instant</code>, convert to
+<code>Asia/Ho_Chi_Minh</code> only for display (<a href="01-java-21.html#time">lesson 01</a>).</p>
+
+<h3>Constraints: rules the database enforces</h3>
+<ul>
+  <li><strong><code>PRIMARY KEY</code></strong>: unique and not null. Identifies a row.</li>
+  <li><strong><code>NOT NULL</code></strong>: the column must have a value.</li>
+  <li><strong><code>UNIQUE</code></strong>: no two rows may have the same value, e.g.
+      <code>UNIQUE (student_id, section_id)</code> so a student enrolls once per section.</li>
+  <li><strong><code>CHECK</code></strong>: a condition on each row, e.g.
+      <code>CHECK (enrolled &lt;= capacity)</code>.</li>
+  <li><strong><code>FOREIGN KEY … REFERENCES</code></strong>: the value must exist in another table.
+      Allowed <strong>only inside the same schema</strong> (section 6).</li>
+</ul>
+<p>Constraints are the last line of defence. Even if Java code has a bug, the database refuses bad
+data. The idempotent consumer (<a href="08-outbox-idempotency.html">lesson 08</a>) depends on a
+primary key to detect a repeated event.</p>
+
+<h3>Indexes</h3>
+<p>An <strong>index</strong> is like the index at the back of a book: it lets Postgres find rows
+without reading the whole table. Primary keys and <code>UNIQUE</code> columns get one
+automatically. <strong>Foreign key columns do not</strong>, so add one when you filter or join on
+them. Indexes make reads faster and writes a little slower, so add them for real queries, not "just
+in case". The outbox table indexes <code>completion_date</code>, because Modulith often asks for
+"rows not completed yet".</p>
+
+<h2 id="tx">3. Transactions, ACID, isolation</h2>
+<p>A <strong>transaction</strong> is a group of SQL statements that succeed or fail
+<strong>together</strong>. In Spring, a <code>@Transactional</code> method is one transaction
+(<a href="03-spring-boot.html#proxies">lesson 03</a>).</p>
+<pre><code>BEGIN;
+INSERT INTO platform.outbox_probe (id, note, created_at) VALUES (…);
+INSERT INTO platform.event_publication (…) VALUES (…);
+COMMIT;          <span class="c">-- both rows saved. On ROLLBACK, neither.</span></code></pre>
+<p>Transactions give four promises, called <strong>ACID</strong>:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Letter</th><th>Promise</th><th>In simple words</th></tr></thead>
+<tbody>
+<tr><td>A</td><td>Atomicity</td><td>All or nothing. No half-saved enrollment.</td></tr>
+<tr><td>C</td><td>Consistency</td><td>Constraints hold after every commit.</td></tr>
+<tr><td>I</td><td>Isolation</td><td>Transactions running at the same time do not see each other's unfinished work.</td></tr>
+<tr><td>D</td><td>Durability</td><td>After COMMIT, the data survives a crash.</td></tr>
+</tbody></table></div>
+<p>The whole outbox idea (spec D1) rests on <strong>A</strong>: the business row and the event row
+are one transaction, so an event can never exist without its data.</p>
+
+<h3>Isolation levels, simply</h3>
+<p>"Isolation" has levels. Stronger levels protect against more surprises, but more transactions
+must wait or be retried.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Level</th><th>What you see</th><th>Use</th></tr></thead>
+<tbody>
+<tr><td><strong>Read committed</strong> (Postgres default)</td><td>Each statement sees data committed before <em>that statement</em> started. Two reads in one transaction can differ.</td><td>Almost everything</td></tr>
+<tr><td><strong>Repeatable read</strong></td><td>The whole transaction sees one snapshot, taken at its first statement.</td><td>Reports that must add up</td></tr>
+<tr><td><strong>Serializable</strong></td><td>As if transactions ran one after another. Postgres may abort one with a "serialization failure"; you must retry it.</td><td>Rare, complex rules</td></tr>
+</tbody></table></div>
+<p>The trap with the default level: "read, check in Java, then write" is <strong>not safe</strong>
+when two requests run at the same time. Both read "1 seat left", both write. The next section shows
+how to avoid that.</p>
+
+<h2 id="locks">4. Locks and optimistic locking</h2>
+<p>Imagine 500 students clicking "Register" for the last seat at 08:00:00. Two ways to stay
+correct:</p>
+<div class="compare">
+  <div class="good"><h4>Pessimistic: lock first</h4>
+<pre><code>SELECT enrolled, capacity
+FROM registration.section_seats
+WHERE section_id = ?
+FOR UPDATE;          <span class="c">-- others wait here</span>
+<span class="c">-- check in Java, then UPDATE, COMMIT</span></code></pre>
+    <p>Simple and safe, but every other request waits in line on that row.</p></div>
+  <div class="good"><h4>Optimistic: check on write</h4>
+<pre><code>UPDATE registration.section_seats
+SET enrolled = enrolled + 1,
+    version  = version + 1
+WHERE section_id = ?
+  AND version = ?          <span class="c">-- the one I read</span>
+  AND enrolled &lt; capacity;</code></pre>
+    <p>No waiting. If the answer is "0 rows updated", someone changed the row first: read again and
+    retry, or answer 409 <code>CONFLICT</code>.</p></div>
+</div>
+<p>A <strong>version column</strong> is a counter that goes up on every change. It is like a
+document's revision number: "save only if nobody saved since I opened it". The capability map (C5)
+plans exactly this for the <code>registration</code> module: its own <code>section_seats</code>
+table with <code>capacity</code>, <code>enrolled</code> and <code>version</code>, fed by
+<code>SectionChanged</code> events. The real seat rush also uses Redis in front of the database
+(<a href="20-redis-concurrency.html">lesson 20</a>).</p>
+
+<h2 id="users">5. Schemas, users and GRANT</h2>
+<p>Postgres has <strong>roles</strong> (users). A role can own schemas, and can be given rights
+with <code>GRANT</code> or lose them with <code>REVOKE</code>. On the first start, our init script
+creates one role per app and decides who owns which schema:</p>
+<pre data-file="infra/postgres/init/01-schemas-and-users.sh (SQL part, shortened)"><code>REVOKE ALL ON DATABASE "$POSTGRES_DB" FROM PUBLIC;   <span class="c">-- PUBLIC = every user</span>
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+
+CREATE ROLE core_app         LOGIN PASSWORD '$CORE_APP_DB_PASSWORD';
+CREATE ROLE registration_svc LOGIN PASSWORD '$REGISTRATION_SVC_DB_PASSWORD';
+CREATE ROLE notification_svc LOGIN PASSWORD '$NOTIFICATION_SVC_DB_PASSWORD';
+GRANT CONNECT ON DATABASE "$POSTGRES_DB" TO core_app, registration_svc, notification_svc;
+
+CREATE SCHEMA course       AUTHORIZATION core_app;          <span class="c">-- … and the other core-app schemas</span>
+CREATE SCHEMA platform     AUTHORIZATION core_app;
+CREATE SCHEMA registration AUTHORIZATION registration_svc;  <span class="c">-- only this user</span>
+CREATE SCHEMA notification AUTHORIZATION notification_svc;
+
+ALTER ROLE registration_svc SET search_path = registration;</code></pre>
+<ul>
+  <li><strong>Owner</strong> (<code>AUTHORIZATION</code>): may do everything in the schema. We grant
+      nothing to anyone else, so nobody else can even look inside.</li>
+  <li><strong><code>search_path</code></strong>: where Postgres looks for a table name without a
+      schema. For <code>registration_svc</code>, <code>SELECT * FROM section_seats</code> means
+      <code>registration.section_seats</code>.</li>
+  <li>The script is a <code>.sh</code> file, not <code>.sql</code>, so the passwords come from
+      <code>infra/.env</code> instead of being typed twice.</li>
+</ul>
+<div class="callout project">
+  <span class="title">Smart Campus rule (spec D3: isolation enforced twice)</span>
+  <code>registration-service</code> and <code>notification-service</code> connect as users that can
+  touch <strong>only their own schema</strong>: a wrong query fails at runtime with
+  "permission denied for schema". Inside <code>core-app</code> (one user for many modules),
+  Spring Modulith <code>verify()</code> and ArchUnit rules stop one module from using another
+  module's tables. Task T10 proves the first part with <code>SchemaIsolationIT</code> (planned).
+</div>
+
+<h2 id="no-fk">6. No foreign keys across schemas</h2>
+<p>The original plan had foreign keys like <code>grades.enrollment_id → enrollments.id</code>. That
+crosses from <code>grade</code> to <code>registration</code>, which are even in different apps. The
+capability map (C4) and the spec forbid it: <strong>foreign keys only within a schema</strong>.</p>
+<p>Instead, a reference to another module's row is a <strong>bare UUID</strong>: just the id, with
+no database link. If a module needs more than the id, it keeps a <strong>local projection</strong>:
+its own small copy of the facts it needs, updated from Kafka events.</p>
+<div class="flow">
+  <div class="box project"><b>course</b>owns <code>course.sections</code>. Publishes <code>SectionChanged</code> (capacity, schedule)</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>Kafka</b><code>course.events</code>, key = sectionId</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>registration</b>keeps its own <code>section_seats</code> (section_id as a bare UUID + capacity) and updates it</div>
+</div>
+<p>Why this is worth the extra work:</p>
+<ul>
+  <li><strong>Modules stay independent.</strong> <code>course</code> can change its tables without
+      breaking <code>registration</code>'s queries. Only the event is the contract.</li>
+  <li><strong>A service can move.</strong> <code>registration</code> already runs in its own app. A
+      foreign key cannot point into another app's database anyway.</li>
+  <li><strong>Read models can be rebuilt.</strong> A projection can be thrown away and replayed from
+      Kafka (spec D5, <a href="08-outbox-idempotency.html#replay">lesson 08</a>).</li>
+</ul>
+<p>The price: the data is <strong>eventually consistent</strong>. For a short time after a change,
+the copy is a little behind. Each module spec decides where that is acceptable.</p>
+
+<h2 id="flyway">7. Flyway migrations</h2>
+<p>The database structure changes as the project grows. <strong>Flyway</strong> applies those changes
+as <strong>migrations</strong>: numbered SQL files, run once each, in order, at app startup. Like
+the minutes of a meeting: you never rewrite old minutes, you add new ones.</p>
+
+<h3>Naming and folders</h3>
+<pre class="diagram">src/main/resources/db/migration/&lt;schema&gt;/V&lt;yyyyMMddHHmm&gt;__&lt;what&gt;.sql
+
+backend/core-app/src/main/resources/db/migration/
+├── platform/
+│   ├── V202611220000__baseline.sql
+│   └── V202611220100__event_publication.sql
+└── platform-probe/                          dev and test profiles only (T7 spike)
+    └── V202611220200__outbox_probe.sql</pre>
+<ul>
+  <li><code>V</code> = versioned migration. Then the version, then <strong>two</strong> underscores,
+      then a description (underscores become spaces).</li>
+  <li>The version is a <strong>date and time</strong> (<code>yyyyMMddHHmm</code>), so two developers
+      on two branches do not pick the same number.</li>
+  <li>One folder per schema. A module's migrations only create or change objects in its own
+      schema.</li>
+</ul>
+
+<h3>The history table</h3>
+<p>Flyway records each migration it ran in a <strong>schema history table</strong>, with a
+<strong>checksum</strong> (a fingerprint of the file). core-app's is
+<code>platform.flyway_schema_history</code>:</p>
+<pre data-file="backend/core-app/src/main/resources/application.yml (part)"><code>spring:
+  flyway:
+    schemas: platform
+    default-schema: platform              <span class="c"># history table goes here</span>
+    locations: classpath:db/migration/platform</code></pre>
+<p>At startup Flyway compares files and history: new files run, old files must still match their
+checksum. Each app has its own Flyway and history: later, <code>registration-service</code> gets
+<code>registration.flyway_schema_history</code> (T10). How core-app will handle many module schemas
+is decided when the first feature module arrives.</p>
+
+<div class="callout bad">
+  <span class="title">Never edit a migration that has run</span>
+  If you change an applied file, its checksum changes, and Flyway refuses to start ("validate
+  failed"). On a shared or production database you would also lose track of what really ran.
+  To change something, write a <strong>new</strong> migration (<code>ALTER TABLE …</code>). On your
+  own laptop only, you may wipe the database with <code>docker compose … down -v</code>.
+</div>
+<p>One more T7 lesson: Spring Modulith can create its own tables, but we switched that off
+(<code>spring.modulith.events.jdbc.schema-initialization.enabled: false</code>). Flyway owns
+<strong>every</strong> table, so the history tells the full story.</p>
+
+<h2 id="jdbc">8. JdbcTemplate (and JPA)</h2>
+<p>core-app talks to Postgres with Spring's <strong>JdbcTemplate</strong>: you write the SQL, Spring
+handles connections, parameters and errors. A pool (HikariCP, from
+<code>spring-boot-starter-jdbc</code>) keeps a few connections open and lends them out.</p>
+<pre data-file="Write (from OutboxProbeService) and read (example)"><code>jdbc.update(
+        "INSERT INTO platform.outbox_probe (id, note, created_at) VALUES (?, ?, ?)",
+        probe.id(), probe.note(), Timestamp.from(probe.createdAt()));
+
+List&lt;OutboxProbe&gt; probes = jdbc.query("""
+        SELECT id, note, created_at
+        FROM platform.outbox_probe
+        ORDER BY created_at
+        """,
+        (rs, rowNum) -&gt; new OutboxProbe(
+                rs.getObject("id", UUID.class),
+                rs.getString("note"),
+                rs.getTimestamp("created_at").toInstant()));</code></pre>
+<p>The <code>?</code> marks are <strong>parameters</strong>. The driver sends the values separately
+from the SQL text, so a value can never change the query. This blocks <strong>SQL injection</strong>.
+Never build SQL with <code>+</code> or <code>formatted</code> from user input.</p>
+<div class="compare">
+  <div class="good"><h4>JdbcTemplate (used now)</h4>
+    <p>You see every query. Easy to reason about locks and transactions. Maps rows to records. More
+    typing for big object graphs. Spring also offers <code>JdbcClient</code>, a newer fluent API on
+    the same idea.</p></div>
+  <div class="good"><h4>JPA / Hibernate (not used now)</h4>
+    <p>Maps classes ("entities") to tables and writes SQL for you. Less typing, but hidden queries,
+    lazy loading surprises, and entities are mutable classes, not records. A module spec may choose
+    it later; the spec's rules (D3) already cover "JPA/JDBC access".</p></div>
+</div>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Schemas, users, owners, <code>search_path</code></td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>T3</td></tr>
+<tr><td>Postgres container + data volume</td><td><code>infra/docker-compose.yml</code> (service <code>postgres</code>)</td><td>T3</td></tr>
+<tr><td>Datasource user, Flyway schema and folder</td><td><code>backend/core-app/src/main/resources/application.yml</code></td><td>T6</td></tr>
+<tr><td>First migrations</td><td><code>backend/core-app/src/main/resources/db/migration/platform/</code></td><td>T6, T7</td></tr>
+<tr><td>Dev-only migration folder</td><td><code>…/db/migration/platform-probe/</code></td><td>T7</td></tr>
+<tr><td>JdbcTemplate + <code>@Transactional</code></td><td><code>backend/core-app/.../platform/internal/OutboxProbeService.java</code></td><td>T7</td></tr>
+<tr><td>Flyway history test</td><td><code>backend/core-app/src/test/java/edu/campus/CoreApplicationIT.java</code></td><td>T6</td></tr>
+<tr><td>Own schema + <code>SchemaIsolationIT</code></td><td><code>registration-service</code> (planned)</td><td>T10</td></tr>
+<tr><td><code>processed_events</code> table</td><td><code>notification-service</code> (planned)</td><td>T11</td></tr>
+<tr><td>Projections, version column</td><td><code>registration.section_seats</code> and others (planned)</td><td>modules 4–14</td></tr>
+</tbody></table></div>
+<p>Also read <a href="../learn/platform/task3.md">docs/learn/platform/task3.md</a> and
+<a href="../learn/platform/task6.md">task6.md</a>.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Editing an applied migration.</strong> Write a new one.</li>
+  <li><strong>A foreign key into another schema.</strong> Use a bare UUID and, if needed, a local
+      projection.</li>
+  <li><strong>Reading another module's tables "just for a test".</strong> The spec lists this under
+      "Never".</li>
+  <li><strong>"Read, check, write" without a lock or version.</strong> Two requests at the same
+      moment both pass the check.</li>
+  <li><strong>Gluing values into SQL text.</strong> Always use <code>?</code> parameters.</li>
+  <li><strong><code>timestamp</code> without time zone</strong> for real moments. Use
+      <code>timestamptz</code>.</li>
+  <li><strong>Forgetting an index on a column you filter on</strong>, or adding indexes nobody uses.</li>
+  <li><strong>Changing <code>infra/.env</code> passwords and expecting Postgres to notice.</strong>
+      The init script only runs on an empty volume: <code>down -v</code> and start again.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start Postgres and open <code>psql</code> (the Postgres command-line client) inside the
+      container. User and database come from your <code>infra/.env</code>:</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait postgres
+docker compose -f infra/docker-compose.yml exec postgres psql -U postgres -d campus</code></pre></li>
+  <li><p>Explore with these <code>psql</code> commands:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Command</th><th>Shows</th></tr></thead>
+<tbody>
+<tr><td><code>\dn+</code></td><td>Schemas, owners, rights</td></tr>
+<tr><td><code>\du</code></td><td>Roles (users)</td></tr>
+<tr><td><code>\dt platform.*</code></td><td>Tables in <code>platform</code></td></tr>
+<tr><td><code>\d platform.event_publication</code></td><td>Columns, types, indexes of one table</td></tr>
+<tr><td><code>SELECT version, description, success FROM platform.flyway_schema_history;</code></td><td>Which migrations ran (after core-app started once)</td></tr>
+<tr><td><code>\x</code></td><td>Switch to one-field-per-line output</td></tr>
+<tr><td><code>\q</code></td><td>Quit</td></tr>
+</tbody></table></div></li>
+  <li><p>See spec D3 with your own eyes. As the admin user you may become another role:</p>
+<pre><code>SET ROLE registration_svc;
+SELECT * FROM platform.event_publication;   -- permission denied for schema platform
+CREATE TABLE registration.demo (id uuid PRIMARY KEY);   -- works
+DROP TABLE registration.demo;
+RESET ROLE;</code></pre></li>
+  <li><p>Try optimistic locking by hand. Create a scratch table in <code>registration</code> with
+      <code>capacity</code>, <code>enrolled</code>, <code>version</code>. Open two <code>psql</code>
+      windows. Read the version in both, then run the <code>UPDATE … WHERE version = ?</code> from
+      section 4 in both. How many rows does the second one update? Drop the table afterwards.</p></li>
+  <li><p>On paper: the <code>grade</code> module needs the student's name next to each grade. Where
+      does it get it, without a foreign key into <code>identity</code>? Which event would keep it up
+      to date?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Schema</td><td>A named folder of tables inside one database.</td></tr>
+<tr><td>Role</td><td>A Postgres user (can log in) or group.</td></tr>
+<tr><td>Owner</td><td>The role that may do everything with a schema or table.</td></tr>
+<tr><td>GRANT / REVOKE</td><td>Give / take away a right.</td></tr>
+<tr><td>search_path</td><td>The schemas Postgres looks in for a name without a schema.</td></tr>
+<tr><td>Primary key</td><td>The unique, not-null id of a row.</td></tr>
+<tr><td>Foreign key</td><td>A column whose value must exist in another table.</td></tr>
+<tr><td>Constraint</td><td>A rule the database enforces (NOT NULL, UNIQUE, CHECK …).</td></tr>
+<tr><td>Index</td><td>A lookup structure that makes finding rows fast.</td></tr>
+<tr><td>Transaction</td><td>Statements that commit or roll back together.</td></tr>
+<tr><td>ACID</td><td>Atomicity, Consistency, Isolation, Durability.</td></tr>
+<tr><td>Isolation level</td><td>How much concurrent transactions can see of each other.</td></tr>
+<tr><td>Optimistic locking</td><td>Write only if the version has not changed since you read it.</td></tr>
+<tr><td>Projection</td><td>A module's own copy of facts from another module, built from events.</td></tr>
+<tr><td>Eventually consistent</td><td>Copies may be a little behind, but catch up.</td></tr>
+<tr><td>Migration</td><td>A numbered SQL file that changes the structure, run once.</td></tr>
+<tr><td>Checksum</td><td>A fingerprint of a file; it changes if the file changes.</td></tr>
+<tr><td>SQL injection</td><td>An attack where input text changes your SQL. Parameters prevent it.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do <code>registration-service</code> and <code>notification-service</code> have their own database users?</summary>
+    <p>So a mistake fails loudly. Each user owns only its schema, so a query into another module's
+    schema fails at runtime with "permission denied" instead of quietly coupling the services
+    (spec D3).</p></details>
+  <details><summary>2. Why can <code>grade</code> not have a foreign key to <code>registration.enrollments</code>?</summary>
+    <p>It would tie two modules (even two apps) together at the database level: neither could
+    change or move its tables freely, and read models could not be rebuilt. The reference is a bare
+    UUID, and needed facts come from events into a local projection (C4).</p></details>
+  <details><summary>3. Two requests both read "1 seat left" and both write. Which tool stops the double booking, and how?</summary>
+    <p>A lock (<code>SELECT … FOR UPDATE</code>, the second waits) or optimistic locking: the
+    <code>UPDATE … WHERE version = ?</code> of the second request matches 0 rows because the version
+    changed, so it must retry or answer 409.</p></details>
+  <details><summary>4. Why does Flyway refuse to start after you edit an old migration?</summary>
+    <p>The file's checksum no longer matches the one stored in the history table. Flyway cannot know
+    if the database has the old or the new structure, so it stops instead of guessing.</p></details>
+  <details><summary>5. Why are migration versions dates like <code>202611220100</code>?</summary>
+    <p>Two developers on different branches could both pick "V3". A date and time is almost always
+    unique and also shows the order in which changes were written.</p></details>
+  <details><summary>6. Why is the outbox safe only because of transactions?</summary>
+    <p>Atomicity: the business row and the event row are written in one transaction, so either both
+    exist or neither. An event can never describe a change that was rolled back, and a saved change
+    always has its event.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://www.postgresql.org/docs/current/tutorial.html">PostgreSQL tutorial</a>: SQL basics.</li>
+  <li><a href="https://www.postgresql.org/docs/current/datatype.html">PostgreSQL: Data types</a> and <a href="https://www.postgresql.org/docs/current/ddl-constraints.html">Constraints</a>.</li>
+  <li><a href="https://www.postgresql.org/docs/current/ddl-schemas.html">PostgreSQL: Schemas</a> and <a href="https://www.postgresql.org/docs/current/ddl-priv.html">Privileges</a>.</li>
+  <li><a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL: Transaction isolation</a> and <a href="https://www.postgresql.org/docs/current/explicit-locking.html">Explicit locking</a>.</li>
+  <li><a href="https://www.postgresql.org/docs/current/app-psql.html">psql reference</a>.</li>
+  <li><a href="https://documentation.red-gate.com/flyway">Flyway documentation</a>: migrations, naming, schema history.</li>
+  <li><a href="https://docs.spring.io/spring-boot/how-to/data-initialization.html">Spring Boot: Database initialization</a>: how Boot runs Flyway.</li>
+  <li><a href="https://docs.spring.io/spring-framework/reference/data-access/jdbc.html">Spring Framework: Data access with JDBC</a>: <code>JdbcTemplate</code> and <code>JdbcClient</code>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Git, CI and ADRs</title>
+<meta name="description" content="Smart Campus lesson 15: Git and Conventional Commits, GitHub Actions CI with Trivy and OWASP Dependency-Check, and Architecture Decision Records.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="15">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 15 · Part 1: Foundations</div>
+<h1>Git, GitHub Actions CI and ADRs</h1>
+<p class="lede">Code is only half of a project. The other half is how changes are recorded (Git),
+how every change is checked automatically (CI), and why big choices were made (ADRs). This
+lesson covers all three, using the real Smart Campus history.</p>
+
+<div class="meta">
+  <span class="badge module">platform</span>
+  <span class="badge module">every commit</span>
+  <span class="badge task">T20</span>
+  <span class="badge task">T21</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Core skill</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="02-maven.html">02 (Maven: <code>./mvnw verify</code>)</a>,
+  <a href="05-docker-compose.html">05 (Docker images)</a> and
+  <a href="14-frontend-api-testing.html">14 (the "generated types are up to date" check)</a>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#git">Git basics and line endings</a></li>
+    <li><a href="#branches">Branches, merge, rebase, pull requests</a></li>
+    <li><a href="#commits">Conventional Commits</a></li>
+    <li><a href="#actions">GitHub Actions in one picture</a></li>
+    <li><a href="#ci">The Smart Campus CI workflow</a></li>
+    <li><a href="#security">Security scans: Trivy and Dependency-Check</a></li>
+    <li><a href="#adr">ADRs and the README</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Smart Campus has 14 modules and will take many months. Three questions come up again and again:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Question</th><th>Tool</th><th>Where</th></tr></thead>
+<tbody>
+<tr><td>"What changed, when, and can I undo it?"</td><td>Git + Conventional Commits</td><td>every commit</td></tr>
+<tr><td>"Does the whole project still build, pass tests, and have no known security holes?"</td><td>GitHub Actions CI</td><td>T20, spec <strong>C1</strong></td></tr>
+<tr><td>"Why did we choose Kafka / Modulith's outbox / Boot 4?"</td><td>ADRs</td><td>T21, spec <strong>H2</strong></td></tr>
+<tr><td>"How do I start the project on a new laptop?"</td><td>README</td><td>T21, spec <strong>H1</strong></td></tr>
+</tbody></table></div>
+<p>The spec's success criterion <strong>C1</strong>: CI runs the full build, the frontend checks, a
+check that generated API types are up to date, Trivy and OWASP Dependency-Check on every push and
+PR, and any HIGH/CRITICAL finding fails the job unless it is in a reviewed suppression file.</p>
+
+<h2 id="git">2. Git basics and line endings</h2>
+<p><strong>Git</strong> records snapshots of your project. Each snapshot is a
+<strong>commit</strong>: the full state of every file, plus a message, an author and a pointer to
+the commit before it. Think of a save point in a video game that you can always go back to.</p>
+<pre class="diagram">  working folder        staging area ("index")        repository (.git)
+  your edited files ──► git add ──► chosen changes ──► git commit ──► a new snapshot
+         ▲                                                          │
+         └──────────────── git restore / git switch ◄───────────────┘</pre>
+<pre data-file="Everyday commands"><code>git status                         <span class="c"># what changed? what is staged?</span>
+git diff                           <span class="c"># exact line changes not yet staged</span>
+git add backend/core-app/src/…     <span class="c"># stage chosen files (avoid "git add ." without looking)</span>
+git commit -m "feat(platform): …"  <span class="c"># save the snapshot</span>
+git log --oneline                  <span class="c"># short history</span>
+git push                           <span class="c"># send your commits to GitHub (origin)</span>
+git pull                           <span class="c"># get other people's commits</span></code></pre>
+<p>The staging area lets you commit only part of your changes. That keeps each commit about
+<strong>one</strong> thing, which makes history readable and undo safe.</p>
+
+<h3>Line endings on Windows</h3>
+<p>A text file ends each line with invisible characters. Windows traditionally uses
+<strong>CRLF</strong> (<code>\r\n</code>), Linux and macOS use <strong>LF</strong> (<code>\n</code>).
+If a shell script like <code>mvnw</code> gets CRLF, Linux (and Git Bash, and the CI runner) reads the
+command as <code>sh\r</code> and fails with a strange "not found" error. This machine has
+<code>core.autocrlf=true</code>, which would convert files to CRLF on checkout. The repo overrides it:</p>
+<pre data-file=".gitattributes (real)"><code><span class="c"># Keep LF in the repo and in the working copy, so `mvnw` runs in Git Bash</span>
+<span class="c"># even when git's core.autocrlf is true on Windows. Windows scripts keep CRLF.</span>
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.jar binary
+*.pdf binary
+*.png binary</code></pre>
+<ul>
+  <li><code>* text=auto eol=lf</code>: every text file is LF, in Git <em>and</em> on disk.</li>
+  <li><code>*.cmd</code> / <code>*.bat</code> get CRLF in your working folder, because
+      <code>cmd.exe</code> expects it (<code>mvnw.cmd</code>). Inside the repository Git still stores
+      them with LF and converts on checkout.</li>
+  <li><code>binary</code>: never convert or diff these; a converted jar or PDF would be broken.</li>
+</ul>
+<p><code>.editorconfig</code> says the same to your editor (<code>end_of_line = lf</code>), so new files
+start correct. <code>.gitattributes</code> is stronger than anyone's personal Git settings, which is
+why it lives in the repo.</p>
+
+<h2 id="branches">3. Branches, merge, rebase, pull requests</h2>
+<p>A <strong>branch</strong> is a movable name that points at a commit. You work on a branch so that
+<code>main</code> stays stable. This repo does all platform work on the feature branch
+<strong><code>feat/platform</code></strong>, which is pushed to GitHub (<code>origin</code>).
+<code>main</code> still holds only the first commits.</p>
+<pre class="diagram">main            A───B
+                     \
+feat/platform         C───D───E───F … (T1 … T9 so far)
+                                     ▲ HEAD (you are here)</pre>
+
+<h3>Merge or rebase?</h3>
+<p>When <code>main</code> moves on while you work, you have two ways to bring the two lines
+together:</p>
+<div class="compare">
+  <div class="good"><h4>Merge</h4>
+<pre class="diagram">main     A───B───G───────M
+              \         /
+feature        C───D───E</pre>
+    <p>Adds one <strong>merge commit</strong> <code>M</code> with two parents. History is kept
+    exactly as it happened. Safe on shared branches.</p></div>
+  <div class="good"><h4>Rebase</h4>
+<pre class="diagram">main     A───B───G
+                  \
+feature            C'──D'──E'</pre>
+    <p><strong>Replays</strong> your commits on top of the new <code>main</code>. A straight line,
+    but <code>C'</code>, <code>D'</code>, <code>E'</code> are <em>new</em> commits with new ids.</p></div>
+</div>
+<div class="callout warn">
+  <span class="title">The golden rule of rebase</span>
+  Only rebase commits that nobody else has. Rebasing a branch that is already pushed and used by
+  others (like <code>feat/platform</code>) rewrites shared history and needs a force-push. If you
+  must, use <code>git push --force-with-lease</code>, which refuses to overwrite commits you have not
+  seen.
+</div>
+
+<h3>Pull requests (PRs)</h3>
+<p>A <strong>pull request</strong> is a GitHub page that says "please merge branch X into
+<code>main</code>". It shows the diff, lets people comment line by line, and, most important for
+us, <strong>runs CI</strong> on the change. A red CI means "do not merge". When you merge a PR,
+GitHub offers three styles: a merge commit, <em>squash</em> (all commits become one), or
+<em>rebase</em>. For <code>feat/platform</code>, where every commit is already a clean task step,
+keeping the commits (merge or rebase) preserves the task-by-task history.</p>
+
+<h2 id="commits">4. Conventional Commits</h2>
+<p>The spec rule: commit messages follow <strong>Conventional Commits</strong>:
+<code>type(scope): summary</code>. Here is the real history of this repo:</p>
+<pre data-file="git log --oneline (real, newest first, shortened)"><code>a63ce31 docs(learn): Task 9 learning note
+4963de5 feat(platform): T9 OpenAPI docs with one group per module and deterministic export
+bfa7dea feat(platform): T8 platform-starter with problem JSON, traceId and shared outbox setup
+a90e346 feat(platform): T7 outbox spike with Modulith registry and Kafka (O1-O3)
+8ca830e docs(platform): Checkpoint A passed
+35d433b infra(platform): T3 Compose core infra, schemas and per-service DB users
+aebfd07 build(platform): T2 redo in Maven - build rules in the parent pom</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>Use it for</th><th>Example in this repo</th></tr></thead>
+<tbody>
+<tr><td><code>feat</code></td><td>New behaviour</td><td><code>feat(platform): T8 platform-starter …</code></td></tr>
+<tr><td><code>fix</code></td><td>A bug fix</td><td>(none yet)</td></tr>
+<tr><td><code>docs</code></td><td>Only documentation</td><td><code>docs(learn): Task 9 learning note</code></td></tr>
+<tr><td><code>test</code></td><td>Only tests</td><td>spec example: <code>test(registration): …</code></td></tr>
+<tr><td><code>build</code></td><td>Build system, dependencies</td><td><code>build(platform): T2 redo in Maven …</code></td></tr>
+<tr><td><code>ci</code></td><td>CI config</td><td>T20 will use it</td></tr>
+<tr><td><code>refactor</code></td><td>Code change with the same behaviour</td><td></td></tr>
+<tr><td><code>infra</code></td><td>Compose, Docker, Grafana files (a project choice; not in the common default list)</td><td><code>infra(platform): T3 …</code></td></tr>
+</tbody></table></div>
+<p>The <strong>scope</strong> is the module id (<code>platform</code>, <code>registration</code>, …)
+or an area like <code>learn</code>. The summary is in the imperative mood and short. Why bother?
+You can scan history by module, tools can build a changelog, and a reviewer knows what to expect
+before opening the diff. A breaking change gets a <code>!</code> (<code>feat(course)!: …</code>) or a
+<code>BREAKING CHANGE:</code> line in the body.</p>
+
+<h2 id="actions">5. GitHub Actions in one picture</h2>
+<p><strong>CI</strong> ("continuous integration") means: every push is built and tested
+automatically on a clean machine. "Works on my machine" is no longer enough; it must work on the
+<em>CI</em> machine. <strong>GitHub Actions</strong> is GitHub's built-in CI.</p>
+<pre class="diagram">workflow  (.github/workflows/ci.yml)        ← one YAML file
+ ├─ on: push, pull_request                  ← the events that start it
+ ├─ job: backend    runs-on: ubuntu-24.04   ← each job = a fresh virtual machine ("runner")
+ │    ├─ step: checkout the code              (jobs run in parallel by default)
+ │    ├─ step: set up JDK 21
+ │    └─ step: run ./mvnw verify            ← a step runs a command (run:) or an action (uses:)
+ ├─ job: frontend   runs-on: ubuntu-24.04
+ └─ job: security   runs-on: ubuntu-24.04</pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>Workflow</td><td>One automated process, defined in a YAML file under <code>.github/workflows/</code>.</td></tr>
+<tr><td>Job</td><td>A group of steps that run on one runner. Jobs share nothing unless you pass artifacts.</td></tr>
+<tr><td>Step</td><td>One command (<code>run:</code>) or one reusable action (<code>uses:</code>).</td></tr>
+<tr><td>Action</td><td>A reusable step published by someone, like <code>actions/checkout</code>.</td></tr>
+<tr><td>Runner</td><td>The machine that runs a job. GitHub-hosted Ubuntu runners have Docker installed, so Testcontainers ITs work there.</td></tr>
+<tr><td>Cache</td><td>Files kept between runs (Maven <code>~/.m2</code>, npm cache) so downloads are not repeated.</td></tr>
+<tr><td>Artifact</td><td>Files a job uploads (test reports, coverage) so you can download them from the run page.</td></tr>
+<tr><td>Secret</td><td>An encrypted value (like <code>NVD_API_KEY</code>) set in the repo settings, hidden in logs.</td></tr>
+</tbody></table></div>
+
+<h2 id="ci">6. The Smart Campus CI workflow (T20)</h2>
+<div class="callout warn">
+  <span class="title">Status</span>
+  <code>.github/</code> does <strong>not exist yet</strong>. The workflow is planned in T20. The YAML
+  below is a sketch of what the task describes; <code>vX.Y.Z</code> stands for the exact version T20
+  will pin.
+</div>
+<pre data-file=".github/workflows/ci.yml (planned in T20, sketch: top and backend job)"><code>name: ci
+on:
+  push:
+  pull_request:
+
+concurrency:                               <span class="c"># T20.1: a new push cancels the older run</span>
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read                           <span class="c"># least privilege for the token</span>
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04                  <span class="c"># a fixed image, not "latest"</span>
+    steps:
+      - uses: actions/checkout@vX.Y.Z      <span class="c"># T20.1: every action pinned to an exact version</span>
+      - uses: actions/setup-java@vX.Y.Z
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven                     <span class="c"># caches ~/.m2/repository, keyed on pom.xml files</span>
+      - run: ./mvnw verify                 <span class="c"># unit + Modulith verify + Testcontainers ITs + spotless:check</span>
+      - run: ./mvnw verify -Pexport-openapi
+      - run: git diff --exit-code docs/api <span class="c"># committed OpenAPI JSON must be up to date</span>
+      - if: always()                       <span class="c"># upload reports even when tests failed</span>
+        uses: actions/upload-artifact@vX.Y.Z
+        with:
+          name: backend-reports
+          path: |
+            backend/*/target/surefire-reports
+            backend/*/target/failsafe-reports
+            backend/*/target/site/jacoco</code></pre>
+<p>Notes on the choices:</p>
+<ul>
+  <li><strong>Why Ubuntu?</strong> Testcontainers needs a Docker daemon that runs Linux containers.
+      GitHub's Ubuntu runners have one ready. (Your own Windows machine uses Docker Desktop for the
+      same thing.)</li>
+  <li><strong>Why pin actions?</strong> <code>@v5</code> is a tag the action's owner can move to new
+      code at any time. An exact version (or, even safer, a full commit SHA) means CI runs the same
+      code every time, the same "no floating versions" rule as the rest of the spec.</li>
+  <li><strong>Why <code>./mvnw</code>?</strong> The Maven Wrapper downloads the exact Maven version
+      from <code>.mvn/wrapper/</code>. CI does not depend on whatever Maven the runner has.</li>
+</ul>
+<pre data-file=".github/workflows/ci.yml (planned, sketch: frontend job)"><code>  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@vX.Y.Z
+      - uses: actions/setup-node@vX.Y.Z
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/web/package-lock.json
+      - run: npm --prefix frontend/web ci
+      - run: npm --prefix frontend/web run gen:api
+      - run: git diff --exit-code          <span class="c"># generated types must be committed and current</span>
+      - run: npm --prefix frontend/web run lint
+      - run: npm --prefix frontend/web run test
+      - run: npm --prefix frontend/web run build</code></pre>
+<p>Before pushing, T20.6 checks the YAML locally with <strong>actionlint</strong>, run through its
+Docker image, so typos in <code>${{ }}</code> expressions or unknown keys are found before GitHub
+sees them.</p>
+
+<h2 id="security">7. Security scans: Trivy and Dependency-Check</h2>
+<p>Most of the code we ship is not ours: Spring, Kafka clients, the JRE in the image, npm packages.
+A <strong>CVE</strong> ("Common Vulnerabilities and Exposures") is a public, numbered report of a
+security hole in one of them, with a <strong>CVSS</strong> score from 0 to 10. CVSS 7.0–8.9 is
+<strong>HIGH</strong>, 9.0–10.0 is <strong>CRITICAL</strong>. The Architecture requires dependency
+and image scanning in CI; T20.4 adds a <strong>security</strong> job with two tools.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Tool</th><th>What it scans</th><th>In Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><strong>Trivy</strong> filesystem scan</td><td>Lock files and build files in the repo (Maven, npm), and secrets committed by mistake</td><td><code>trivy fs</code> on the checkout</td></tr>
+<tr><td><strong>Trivy</strong> image scan</td><td>Everything inside a Docker image: OS packages of the base image, the JRE, the jars</td><td>The 4 app images built from <code>infra/docker/spring-app.Dockerfile</code></td></tr>
+<tr><td><strong>OWASP Dependency-Check</strong></td><td>Java (and other) dependencies against the US National Vulnerability Database (NVD)</td><td>The Maven dependencies of all modules</td></tr>
+</tbody></table></div>
+<pre data-file="security job, the idea in commands (planned in T20.4, sketch)"><code>./mvnw package -DskipTests                       <span class="c"># boot jars in backend/*/target/</span>
+docker build -f infra/docker/spring-app.Dockerfile --build-arg … -t campus/core-app:ci .
+<span class="c">#   … the same for gateway, registration-service, notification-service</span>
+
+trivy fs    --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore .
+trivy image --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore campus/core-app:ci
+
+<span class="c"># Dependency-Check, e.g. as a Maven plugin (T20 chooses plugin or CLI; check the docs for exact flags)</span>
+./mvnw org.owasp:dependency-check-maven:check \
+    -DfailBuildOnCVSS=7 \
+    -DsuppressionFile=config/dependency-check-suppressions.xml \
+    -DnvdApiKey="$NVD_API_KEY"</code></pre>
+<p><code>--exit-code 1</code> and <code>failBuildOnCVSS=7</code> are what make a finding
+<strong>fail</strong> the job. Without them, the scan only prints a report that nobody reads.</p>
+
+<h3>The NVD API key (T20.5 🙋)</h3>
+<p>Dependency-Check downloads the whole NVD database. Without an API key, the NVD limits the
+download speed so much that the first run can take a very long time. The human must create a key
+and add it as a repository <strong>secret</strong> named <code>NVD_API_KEY</code>. The workflow
+reads it as <code>${{ secrets.NVD_API_KEY }}</code>; it is never written in the repo. (Caching the
+downloaded database between runs also helps; see the tool's docs.)</p>
+
+<h3>Suppression files: "reviewed" means reviewed</h3>
+<p>Sometimes a finding does not apply to us: the vulnerable function is never called, or it is a
+false match. Then you <strong>suppress</strong> it, in a file that is reviewed in a PR like code.
+The spec puts "adding a Trivy/Dependency-Check suppression" on the <strong>Ask first</strong> list.</p>
+<pre data-file="config/dependency-check-suppressions.xml (planned, example entry)"><code>&lt;suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd"&gt;
+  &lt;suppress until="2027-03-01Z"&gt;
+    &lt;notes&gt;CVE-2026-00000 is in the XML parser's DTD feature. We never parse
+           untrusted XML. Reviewed in PR #12. Re-check before the date.&lt;/notes&gt;
+    &lt;packageUrl regex="true"&gt;^pkg:maven/org\.example/xml-lib@.*$&lt;/packageUrl&gt;
+    &lt;cve&gt;CVE-2026-00000&lt;/cve&gt;
+  &lt;/suppress&gt;
+&lt;/suppressions&gt;</code></pre>
+<pre data-file=".trivyignore (planned, example)"><code><span class="c"># CVE-2026-00000: same reason as above, reviewed in PR #12, re-check by 2027-03-01</span>
+CVE-2026-00000</code></pre>
+<div class="callout bad">
+  <span class="title">Never suppress to "get green"</span>
+  A good suppression names one CVE and one package, explains <em>why</em> it does not affect us,
+  and has an end date. The right first answer to a finding is to <strong>upgrade</strong> the
+  dependency or the base image.
+</div>
+
+<h2 id="adr">8. ADRs and the README</h2>
+<p>An <strong>ADR</strong> ("Architecture Decision Record") is a short text file that records one
+important decision. The format by Michael Nygard has a few parts:</p>
+<div class="flow">
+  <div class="box"><b>Title + Status</b>Proposed, Accepted, Deprecated, or Superseded by ADR-N</div>
+  <div class="box accent"><b>Context</b>The situation and the forces: what problem, what limits</div>
+  <div class="box project"><b>Decision</b>What we will do, in full sentences ("We will …")</div>
+  <div class="box ok"><b>Consequences</b>What becomes easier, what becomes harder, what we accept</div>
+</div>
+<p>Why write them? Six months from now, someone (maybe you) asks "why not just call
+<code>kafkaTemplate.send</code>?". The spec and the code show <em>what</em> we did; the ADR shows
+<em>why</em> and what else was considered. ADRs are never edited to change a decision; a new ADR
+<strong>supersedes</strong> the old one, so the history stays.</p>
+<pre data-file="docs/adr/0009-… (planned in T21.5, example based on spec D1)"><code># ADR 0009: Outbox = Spring Modulith Event Publication Registry
+
+Status: Accepted (2026-11-22, Checkpoint B)
+
+## Context
+Every module must save its data and publish an event without losing it or sending a
+phantom one (Arch ADR-5). Writing to PostgreSQL and Kafka separately is a dual write.
+
+## Decision
+We use Spring Modulith's Event Publication Registry (JDBC) with Kafka externalization.
+Events are stored in event_publication in the business transaction and sent after commit.
+
+## Consequences
++ No hand-written outbox table or relay; the same setup in all three backend apps.
+- Delivery is at least once: consumers must deduplicate by eventId (ADR 0010).
+Rejected: hand-written outbox + @Scheduled relay; Debezium.</code></pre>
+
+<h3>The 15 planned ADRs (T21)</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Number</th><th>Decision</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>0001</td><td>Modular monolith + 2 extracted services</td><td rowspan="8">Architecture PDF, ADR-1 … ADR-8 (T21.4)</td></tr>
+<tr><td>0002</td><td>Keycloak for SSO (OIDC)</td></tr>
+<tr><td>0003</td><td>Redis as the first seat gate, PostgreSQL as the final truth</td></tr>
+<tr><td>0004</td><td>Kafka for events and the registration queue</td></tr>
+<tr><td>0005</td><td>Transactional outbox for every event</td></tr>
+<tr><td>0006</td><td>Schema per module in one PostgreSQL cluster</td></tr>
+<tr><td>0007</td><td>Asynchronous registration result (202 + WebSocket)</td></tr>
+<tr><td>0008</td><td>Plugin manifest + lazy-loaded frontend modules</td></tr>
+<tr><td>0009–0014</td><td>Spec D1–D6: Modulith outbox, dedupe by <code>eventId</code>, schema isolation enforced twice, <code>schemaVersion</code> + <code>traceparent</code> in headers, Kafka-only cross-module consumption and replay, message key per topic</td><td><code>SPEC-platform.md</code> (T21.5)</td></tr>
+<tr><td>0015</td><td>Spring Boot 4 instead of Boot 3</td><td>Spec Q1 (T21.5)</td></tr>
+</tbody></table></div>
+<p>T21.3 first writes <code>docs/adr/template.md</code> (context, decision, consequences, status), so
+all 15 look the same. The <code>docs/adr/</code> folder does not exist yet.</p>
+
+<h3>The README is the front door (H1)</h3>
+<p>Today <code>README.md</code> only says "init". T21 turns it into the onboarding guide. The test
+for it is strict: <strong>clone the repo into a temp folder, follow only the README, and
+<code>smoke.sh</code> must pass</strong> (T21.6). It will contain:</p>
+<ul>
+  <li>Prerequisites: JDK 21, Node 24, Docker Desktop, and how much memory each Compose profile needs.</li>
+  <li>The commands and ports (from the spec's Commands section), and the two run modes
+      (<code>spring-boot:run</code> and the <code>apps</code> profile).</li>
+  <li>The replay procedure, and troubleshooting notes collected during T1–T20 (for example the
+      line-ending issue above).</li>
+  <li>Links to <code>CAPABILITY-MAP.md</code>, the specs and <code>docs/adr/</code>.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Task</th></tr></thead>
+<tbody>
+<tr><td>Line endings</td><td><code>.gitattributes</code>, <code>.editorconfig</code> (exist)</td><td>T1</td></tr>
+<tr><td>Feature branch</td><td><code>feat/platform</code>, pushed to <code>origin</code></td><td>all platform tasks</td></tr>
+<tr><td>Commit format</td><td><code>SPEC-platform.md</code>, Code Style ("Commits: Conventional Commits")</td><td>every commit</td></tr>
+<tr><td>CI workflow (3 jobs)</td><td><code>.github/workflows/ci.yml</code> (planned)</td><td>T20.1–20.4</td></tr>
+<tr><td>Suppression files</td><td><code>config/dependency-check-suppressions.xml</code>, <code>.trivyignore</code> (planned)</td><td>T20.4</td></tr>
+<tr><td><code>NVD_API_KEY</code> secret</td><td>GitHub repo settings (human action)</td><td>T20.5 🙋</td></tr>
+<tr><td>First green run linked in the spec</td><td><code>SPEC-platform.md</code>, criterion C1</td><td>T20.7 🙋</td></tr>
+<tr><td>Image recipe that CI builds and scans</td><td><code>infra/docker/spring-app.Dockerfile</code> (planned)</td><td>T15</td></tr>
+<tr><td>Template + 15 ADRs</td><td><code>docs/adr/</code> (planned)</td><td>T21.3–21.5</td></tr>
+<tr><td>Onboarding guide</td><td><code>README.md</code> (exists, nearly empty)</td><td>T21.1–21.2</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>One giant commit</strong> ("lots of changes"). Make small commits, each about one
+      thing, with a Conventional Commits message.</li>
+  <li><strong>Committing secrets</strong> (<code>infra/.env</code>, API keys). <code>.gitignore</code>
+      already excludes <code>infra/.env</code>; Trivy's filesystem scan also looks for secrets. A
+      secret that was pushed must be <em>rotated</em> (replaced), not just deleted, because history
+      keeps it.</li>
+  <li><strong>Rebasing or force-pushing a shared branch</strong> without
+      <code>--force-with-lease</code>.</li>
+  <li><strong>Floating versions in CI</strong>: <code>ubuntu-latest</code>, <code>@main</code> or
+      <code>@v4</code> on actions. A run can break overnight with no change from you.</li>
+  <li><strong>Ignoring a red CI</strong> "because it works locally". CI is the clean machine; it is
+      usually right.</li>
+  <li><strong>Suppressing a finding without a reason and an end date</strong>, or without asking
+      first.</li>
+  <li><strong>Editing an accepted ADR to change the decision.</strong> Write a new ADR that
+      supersedes it.</li>
+  <li><strong>A README that only works on the author's laptop.</strong> Test it from a fresh clone
+      (T21.6).</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Look at the branch and its history:</p>
+<pre><code>git status
+git branch -a
+git log --oneline --graph --all -n 20</code></pre>
+      <p>How many commits is <code>feat/platform</code> ahead of <code>main</code>? (Try
+      <code>git rev-list --count main..feat/platform</code>.)</p></li>
+  <li><p>Check how Git sees line endings for two files:</p>
+<pre><code>git ls-files --eol mvnw mvnw.cmd</code></pre>
+      <p>Explain the difference using <code>.gitattributes</code>.</p></li>
+  <li><p>Classify each change with a Conventional Commits type and scope: (a) a new Grafana dashboard
+      JSON, (b) a fix for a wrong Kafka key in <code>Topics</code>, (c) adding <code>ci.yml</code>,
+      (d) a new learning note.</p></li>
+  <li><p>In a practice repo (not this one), create a branch, make two commits, add a commit on
+      <code>main</code>, then try both <code>git merge main</code> and (on a copy)
+      <code>git rebase main</code>. Compare <code>git log --graph</code>.</p></li>
+  <li><p>(After T20) Run actionlint on the workflow through Docker, from the repo root:</p>
+<pre><code>docker run --rm -v "${PWD}:/repo" --workdir /repo rhysd/actionlint:&lt;pinned version&gt; -color</code></pre></li>
+  <li><p>Write a practice ADR for a decision you already understand, for example "Tempo instead of
+      Jaeger" (spec Q5): context, decision, consequences, status.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Commit</td><td>A saved snapshot of the project, with a message.</td></tr>
+<tr><td>Staging area</td><td>The list of changes that will go into the next commit.</td></tr>
+<tr><td>Branch</td><td>A movable name pointing at a commit; a separate line of work.</td></tr>
+<tr><td>Merge</td><td>Join two lines of work with a merge commit.</td></tr>
+<tr><td>Rebase</td><td>Replay your commits on top of another branch, creating new commits.</td></tr>
+<tr><td>Pull request (PR)</td><td>A request on GitHub to merge one branch into another, with review and CI.</td></tr>
+<tr><td>LF / CRLF</td><td>Line-ending characters: Linux/macOS / Windows.</td></tr>
+<tr><td>CI</td><td>Building and testing every change automatically on a clean machine.</td></tr>
+<tr><td>Workflow / job / step</td><td>The CI file / a group of steps on one machine / one command.</td></tr>
+<tr><td>Runner</td><td>The machine that runs a CI job.</td></tr>
+<tr><td>Artifact</td><td>A file saved from a CI run (reports) for download.</td></tr>
+<tr><td>CVE / CVSS</td><td>A numbered public security hole / its severity score (0–10).</td></tr>
+<tr><td>Suppression</td><td>A reviewed, documented exception for one finding.</td></tr>
+<tr><td>ADR</td><td>A short record of one architecture decision: context, decision, consequences.</td></tr>
+<tr><td>Supersede</td><td>Replace an old decision with a new ADR, keeping the old one for history.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why does the repo force LF line endings with <code>.gitattributes</code> instead of trusting each developer's Git settings?</summary>
+    <p>Personal settings differ (this machine has <code>core.autocrlf=true</code>). A shell script
+    like <code>mvnw</code> with CRLF fails in Git Bash and on the Linux CI runner.
+    <code>.gitattributes</code> lives in the repo and wins over personal settings, so every clone
+    gets the same files.</p></details>
+  <details><summary>2. Why should you not rebase <code>feat/platform</code> after it has been pushed?</summary>
+    <p>Rebase creates new commits with new ids. Anyone (or any clone) with the old commits now has
+    a history that no longer matches, and you need a force-push that can throw away others' work.
+    Rebase only private, unpushed commits.</p></details>
+  <details><summary>3. Why pin every action to an exact version or commit SHA?</summary>
+    <p>A tag like <code>@v4</code> can be moved by the action's owner, so the same workflow could run
+    different code tomorrow, break, or even run malicious code. An exact pin makes CI repeatable
+    and is the same "no floating versions" rule the spec uses everywhere.</p></details>
+  <details><summary>4. Why do the backend ITs run on an Ubuntu runner and not on Windows?</summary>
+    <p>Testcontainers needs a Docker daemon that runs Linux containers (Postgres, Kafka, Redis).
+    GitHub's Ubuntu runners have Docker ready to use, so <code>./mvnw verify</code> with ITs works
+    there with no extra setup.</p></details>
+  <details><summary>5. Why must every suppression be in a reviewed file with a reason?</summary>
+    <p>Without review, suppressions become an easy way to hide real holes just to get a green
+    build. A file in Git, with one CVE, one package, a reason and an end date, shows who accepted
+    the risk and why, and forces a re-check later.</p></details>
+  <details><summary>6. The spec already explains D1. Why also write ADR 0009?</summary>
+    <p>The spec describes the current plan and changes over time. An ADR is a permanent, dated
+    record of one decision, its context, the rejected options and the accepted trade-offs. When the
+    decision changes, a new ADR supersedes it, so you can always see why the system looks the way
+    it does.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://git-scm.com/book/en/v2">Pro Git book</a>: especially "Git Branching" and "Rebasing".</li>
+  <li><a href="https://git-scm.com/docs/gitattributes">Git docs: gitattributes</a> (the <code>eol</code> and <code>text</code> attributes).</li>
+  <li><a href="https://www.conventionalcommits.org/en/v1.0.0/">Conventional Commits 1.0.0</a>.</li>
+  <li><a href="https://docs.github.com/en/actions">GitHub Actions documentation</a>: workflow syntax, caching, artifacts, secrets, security hardening.</li>
+  <li><a href="https://github.com/actions/setup-java">actions/setup-java</a> and <a href="https://github.com/actions/setup-node">actions/setup-node</a> (the <code>cache</code> option).</li>
+  <li><a href="https://trivy.dev/latest/docs/">Trivy documentation</a>: filesystem and image scanning, <code>.trivyignore</code>.</li>
+  <li><a href="https://jeremylong.github.io/DependencyCheck/">OWASP Dependency-Check</a>: Maven plugin, NVD API key, suppression files.</li>
+  <li><a href="https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions">Michael Nygard: Documenting Architecture Decisions</a> (the original ADR post).</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

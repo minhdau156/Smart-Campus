@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spring Security JWT</title>
+<meta name="description" content="Smart Campus lesson 17: Spring Security filter chain, JWT resource server, Keycloak roles, @PreAuthorize, ownership checks, the reactive gateway, 401 vs 403, tests, and tokens in the browser.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="17">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 17 · Part 2: Feature modules</div>
+<h1>Spring Security with JWT and roles</h1>
+<p class="lede">Lesson 16 gave the web app a token. Now every Smart Campus service must check that
+token, turn Keycloak roles into Spring rules, and still answer the harder question: "is this
+<em>your</em> grade?". You will use this in the <code>identity</code> module and then in every
+module after it.</p>
+
+<div class="meta">
+  <span class="badge module">identity</span>
+  <span class="badge module">every module with an API</span>
+  <span class="badge task">AUTH-1</span>
+  <span class="badge task">AUTH-4</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="16-oauth-oidc-keycloak.html">16 (OAuth, JWT, Keycloak)</a>,
+  <a href="03-spring-boot.html">03 (Spring Boot beans and config)</a>,
+  <a href="09-rest-problem-openapi.html">09 (problem JSON)</a> and
+  <a href="11-gateway-rate-limit.html">11 (the gateway)</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  No Spring Security code exists in the repo yet. The class names below
+  (<code>KeycloakRealmRoles</code>, <code>SecurityConfig</code>…) and the package
+  <code>edu.campus.starter.security</code> are suggestions. The <code>identity</code> spec decides
+  where the shared code lives (likely in <code>platform-starter</code>, so all apps get the same rules).
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Defence in depth</a></li>
+    <li><a href="#chain">The filter chain</a></li>
+    <li><a href="#jwt">JWT resource server and Keycloak roles</a></li>
+    <li><a href="#method">@PreAuthorize and ownership checks</a></li>
+    <li><a href="#gateway">The gateway, CORS and CSRF</a></li>
+    <li><a href="#errors">401 vs 403 as problem JSON</a></li>
+    <li><a href="#tests">Testing with jwt()</a></li>
+    <li><a href="#browser">Tokens in the browser</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Defence in depth</h2>
+<p>The Arch (§8, Security) gives three layers. Each one catches what the one before cannot:</p>
+<div class="flow">
+  <div class="box accent"><b>1. Gateway</b>Checks the JWT signature and expiry. Bad token → 401 at the door.</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>2. Each service</b>Checks the JWT again and the role with <code>@PreAuthorize</code></div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>3. Row-level check</b>"A student reads only their own grades; a lecturer grades only their sections"</div>
+</div>
+<p>Why check the token twice? Because the gateway is not the only way in. A misconfigured route,
+a test tool inside the cluster, or a future service-to-service call can reach
+<code>core-app</code> directly. Like a hospital: the main door has a guard, but the medicine room
+still has its own lock. This idea is called <strong>defence in depth</strong>.</p>
+<p>Spring Security is the library that does layers 1 and 2 for us. Layer 3 is our own code,
+because only our module knows who owns a grade.</p>
+
+<h2 id="chain">2. The filter chain</h2>
+<p>A <strong>servlet filter</strong> is code that runs <em>before</em> your controller, for every
+request. It can look at the request, change it, or stop it. Spring Security is a
+<strong>chain of filters</strong>: each one does one job, then passes the request on.</p>
+<pre class="diagram">HTTP request
+   │
+   ▼
+┌───────────────────────── SecurityFilterChain ─────────────────────────┐
+│ CorsFilter                  → answers or checks browser CORS rules     │
+│ BearerTokenAuthenticationFilter → reads "Authorization: Bearer …",      │
+│                                  checks the JWT, sets the user         │
+│ ExceptionTranslationFilter  → turns "no user" into 401, "no right" 403 │
+│ AuthorizationFilter         → URL rules (permitAll, authenticated …)   │
+└────────────────────────────────────────────────────────────────────────┘
+   │
+   ▼
+DispatcherServlet → @RestController (+ @PreAuthorize on methods)</pre>
+<p>When a filter accepts the token, it puts an <code>Authentication</code> object in the
+<strong>SecurityContext</strong>: a place, tied to the current request, that says "this request is
+user X with these authorities". Later code reads it from there.</p>
+<p>You do not write the filters. You <strong>configure</strong> them with a
+<code>SecurityFilterChain</code> bean:</p>
+<pre data-file="edu.campus.starter.security.SecurityConfig (planned)"><code><span class="k">@Configuration</span>
+<span class="k">@EnableMethodSecurity</span>                                <span class="c">// turns on @PreAuthorize</span>
+class SecurityConfig {
+
+    <span class="k">@Bean</span>
+    SecurityFilterChain api(HttpSecurity http, JwtAuthenticationConverter jwtConverter) throws Exception {
+        http
+            .authorizeHttpRequests(auth -&gt; auth
+                .requestMatchers("/actuator/health/**", "/actuator/info").permitAll()
+                .requestMatchers("/api/v1/*/ping").permitAll()       <span class="c">// smoke checks (platform T13)</span>
+                .anyRequest().authenticated())                       <span class="c">// everything else needs a token</span>
+            .oauth2ResourceServer(rs -&gt; rs.jwt(jwt -&gt; jwt.jwtAuthenticationConverter(jwtConverter)))
+            .sessionManagement(s -&gt; s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .csrf(csrf -&gt; csrf.disable());                           <span class="c">// see section 5</span>
+        return http.build();
+    }
+}</code></pre>
+<p><strong>STATELESS</strong> means the server keeps no login session. Every request brings its
+own token. This is what lets us run 20 copies of <code>registration-service</code> during the rush:
+any copy can serve any request.</p>
+<div class="callout tip">
+  <span class="title">Deny by default</span>
+  Write the few public paths first, and end with <code>anyRequest().authenticated()</code>. A new
+  endpoint is then protected even if you forget it. The opposite style ("protect these paths")
+  fails open.
+</div>
+
+<h2 id="jwt">3. JWT resource server and Keycloak roles</h2>
+<p>A <strong>resource server</strong> is an API that accepts access tokens (lesson 16, section 2).
+Spring Boot sets one up from a few properties:</p>
+<pre data-file="application.yml of each app (planned values)"><code>spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8180/realms/campus      <span class="c"># the "iss" every token must have</span>
+          jwk-set-uri: http://localhost:8180/realms/campus/protocol/openid-connect/certs
+          audiences: campus-api                               <span class="c"># the "aud" every token must contain</span></code></pre>
+<p>With this, Spring downloads and caches the public keys, checks the signature, <code>exp</code>,
+<code>iss</code> and <code>aud</code>, and rejects anything else with 401.</p>
+
+<h3>From <code>realm_access.roles</code> to authorities</h3>
+<p>Spring Security calls each permission an <strong>authority</strong> (a string). By default it
+reads the <code>scope</code> claim and makes <code>SCOPE_openid</code> and so on. Keycloak puts
+roles somewhere else: in <code>realm_access.roles</code> (Arch §7). So we write a small
+<strong>converter</strong>: a class that turns a JWT into authorities.</p>
+<pre data-file="edu.campus.starter.security.KeycloakRealmRoles (planned)"><code>public final class KeycloakRealmRoles implements Converter&lt;Jwt, Collection&lt;GrantedAuthority&gt;&gt; {
+
+    <span class="c">// Map C3: the only realm roles Smart Campus knows. Keycloak's own roles are ignored.</span>
+    static final Set&lt;String&gt; CAMPUS_ROLES = Set.of(
+            "STUDENT", "LECTURER", "FACULTY_STAFF", "ACADEMIC_ADMIN",
+            "SECURITY_STAFF", "SYSTEM_ADMIN", "CLUB_MANAGER");
+
+    <span class="k">@Override</span>
+    public Collection&lt;GrantedAuthority&gt; convert(Jwt jwt) {
+        Map&lt;String, Object&gt; realmAccess = jwt.getClaimAsMap("realm_access");
+        if (realmAccess == null || !(realmAccess.get("roles") instanceof Collection&lt;?&gt; roles)) {
+            return List.of();                                   <span class="c">// no roles: still a valid user</span>
+        }
+        return roles.stream()
+                .map(String::valueOf)
+                .filter(CAMPUS_ROLES::contains)                 <span class="c">// drops "default-roles-campus" etc.</span>
+                .&lt;GrantedAuthority&gt;map(role -&gt; new SimpleGrantedAuthority("ROLE_" + role))
+                .toList();
+    }
+}</code></pre>
+<pre data-file="SecurityConfig (continued)"><code><span class="k">@Bean</span>
+JwtAuthenticationConverter jwtAuthenticationConverter() {
+    var converter = new JwtAuthenticationConverter();
+    converter.setJwtGrantedAuthoritiesConverter(new KeycloakRealmRoles());
+    return converter;                       <span class="c">// principal name stays "sub" (the Keycloak user id)</span>
+}</code></pre>
+<p>Why the <code>ROLE_</code> prefix? Spring's <code>hasRole('STUDENT')</code> looks for the
+authority <code>ROLE_STUDENT</code>. <code>hasAuthority('ROLE_STUDENT')</code> means the same.</p>
+
+<h2 id="method">4. @PreAuthorize and ownership checks</h2>
+<p><strong>Method security</strong> puts the rule on the method itself. Spring checks it before the
+method runs. If the rule is false, the method never runs.</p>
+<pre data-file="edu.campus.course (planned example)"><code><span class="k">@PostMapping</span>("/api/v1/course/sections")
+<span class="k">@PreAuthorize</span>("hasRole('ACADEMIC_ADMIN')")                  <span class="c">// REG-7: only the academic office</span>
+SectionView create(<span class="k">@Valid</span> <span class="k">@RequestBody</span> NewSection body) { … }
+
+<span class="k">@GetMapping</span>("/api/v1/announcement/posts")
+<span class="k">@PreAuthorize</span>("isAuthenticated()")                          <span class="c">// every logged-in user</span>
+Page&lt;PostView&gt; feed(Pageable page) { … }
+
+<span class="k">@PostMapping</span>("/api/v1/announcement/posts")
+<span class="k">@PreAuthorize</span>("hasAnyRole('FACULTY_STAFF', 'LECTURER', 'ACADEMIC_ADMIN')")
+PostView publish(<span class="k">@Valid</span> <span class="k">@RequestBody</span> NewPost body) { … }</code></pre>
+
+<h3>Roles alone are not enough</h3>
+<p>A role says <em>what kind</em> of person you are. It does not say <em>which rows</em> are
+yours. Every student has the role STUDENT. If the only rule is
+<code>hasRole('STUDENT')</code>, any student can read any other student's grades by changing an
+id in the URL. This bug has a name: <strong>IDOR</strong> (insecure direct object reference;
+see <a href="30-security-hardening.html">lesson 30</a>).</p>
+<div class="compare">
+  <div class="poor"><h4>Role check only</h4>
+<pre><code><span class="k">@GetMapping</span>("/api/v1/grade/students/{studentId}/grades")
+<span class="k">@PreAuthorize</span>("hasRole('STUDENT')")
+List&lt;GradeView&gt; grades(<span class="k">@PathVariable</span> UUID studentId) {
+    return grades.forStudent(studentId);   <span class="c">// anyone's!</span>
+}</code></pre></div>
+  <div class="good"><h4>Role + ownership</h4>
+<pre><code><span class="k">@GetMapping</span>("/api/v1/grade/grades/me")
+<span class="k">@PreAuthorize</span>("hasRole('STUDENT')")
+List&lt;GradeView&gt; myGrades(<span class="k">@AuthenticationPrincipal</span> Jwt jwt) {
+    UUID me = UUID.fromString(jwt.getSubject());
+    return grades.forStudent(me);          <span class="c">// only mine</span>
+}</code></pre></div>
+</div>
+<p>Two good habits:</p>
+<ul>
+  <li><strong>Take the user id from the token, not from the request.</strong> A
+      <code>/me</code> endpoint cannot be pointed at someone else.</li>
+  <li><strong>Put the owner in the query.</strong> <code>WHERE id = ? AND student_id = ?</code>
+      returns nothing for other people's rows. Return 404, not 403, so you do not even say "this
+      grade exists".</li>
+</ul>
+<p>For a lecturer, the rule is "only the sections I teach". You can call a bean from the
+expression:</p>
+<pre data-file="edu.campus.grade (planned example)"><code><span class="k">@PutMapping</span>("/api/v1/grade/sections/{sectionId}/grades")
+<span class="k">@PreAuthorize</span>("hasRole('LECTURER') and @sectionAccess.teaches(authentication, #sectionId)")
+void enterGrades(<span class="k">@PathVariable</span> UUID sectionId, <span class="k">@Valid</span> <span class="k">@RequestBody</span> GradeSheet sheet) { … }
+
+<span class="k">@Component</span>("sectionAccess")
+class SectionAccess {
+    private final LecturerSections lecturerSections;       <span class="c">// grade's local projection of course data (C4)</span>
+
+    boolean teaches(Authentication auth, UUID sectionId) {
+        UUID lecturerId = UUID.fromString(auth.getName()); <span class="c">// getName() = sub</span>
+        return lecturerSections.isAssigned(lecturerId, sectionId);
+    }
+}</code></pre>
+<p>Note that <code>grade</code> cannot read the <code>course</code> schema (C4, no cross-schema
+access). It keeps its own small copy of "who teaches which section", built from
+<code>course.events</code> (<a href="08-outbox-idempotency.html">lesson 08</a>).</p>
+
+<h2 id="gateway">5. The gateway, CORS and CSRF</h2>
+<h3>The reactive side</h3>
+<p>Our gateway uses Spring Cloud Gateway on <strong>WebFlux</strong> (reactive, non-blocking; see
+<a href="11-gateway-rate-limit.html">lesson 11</a>). WebFlux has no servlet filters, so Spring
+Security has a reactive twin: <code>SecurityWebFilterChain</code> with
+<code>ServerHttpSecurity</code>. The ideas are the same; the names change.</p>
+<pre data-file="edu.campus.gateway.GatewaySecurityConfig (planned)"><code><span class="k">@Configuration</span>
+<span class="k">@EnableWebFluxSecurity</span>
+class GatewaySecurityConfig {
+
+    <span class="k">@Bean</span>
+    SecurityWebFilterChain gateway(ServerHttpSecurity http) {
+        return http
+            .authorizeExchange(ex -&gt; ex
+                .pathMatchers("/actuator/health/**", "/api/v1/*/ping").permitAll()
+                .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()   <span class="c">// CORS pre-flight has no token</span>
+                .anyExchange().authenticated())
+            .oauth2ResourceServer(rs -&gt; rs.jwt(Customizer.withDefaults()))
+            .csrf(ServerHttpSecurity.CsrfSpec::disable)
+            .build();
+    }
+}</code></pre>
+<p>The gateway only checks "is this a real, unexpired token for us". It does not check roles per
+endpoint: it does not know the business rules. It passes the <code>Authorization</code> header on
+to the service, which checks again (layer 2).</p>
+
+<h3>CORS</h3>
+<p>Browsers block JavaScript from one <strong>origin</strong> (scheme + host + port) from reading
+answers from another origin, unless the server says it is allowed. This rule is
+<strong>CORS</strong> (Cross-Origin Resource Sharing). In Smart Campus:</p>
+<ul>
+  <li><strong>Dev:</strong> Vite at <code>localhost:5173</code> proxies <code>/api</code> to the
+      gateway (platform T19). The browser sees one origin, so no CORS is needed.</li>
+  <li><strong>Prod (planned):</strong> the SPA and <code>/api</code> are served under one domain
+      by the Ingress (<a href="31-kubernetes-shipping.html">lesson 31</a>). Again one origin.</li>
+  <li>If they ever differ, configure CORS <strong>once, at the gateway</strong>, with an exact
+      list of origins. Never <code>*</code> together with credentials.</li>
+</ul>
+<p>Keycloak is a different origin, but that is fine: the login is a full-page redirect, and the
+token call is allowed by the client's <code>webOrigins</code> setting (lesson 16).</p>
+
+<h3>Why CSRF matters less here</h3>
+<p><strong>CSRF</strong> (cross-site request forgery) is when an evil site makes your browser send
+a request to our site, and the browser <em>automatically</em> adds our cookie. With bearer tokens,
+the browser adds nothing automatically: our JavaScript must put the token in the header, and the
+evil site cannot read our memory. So for a pure bearer-token API, CSRF protection can be turned
+off. <strong>Be careful:</strong> as soon as you use cookies for login (the BFF pattern, section 8),
+CSRF protection is needed again.</p>
+
+<h2 id="errors">6. 401 vs 403 as problem JSON</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Status</th><th>Meaning</th><th>Example</th><th>What the web app does</th></tr></thead>
+<tbody>
+<tr><td><strong>401 Unauthorized</strong> (really "unauthenticated")</td><td>"I do not know who you are"</td><td>No token, expired token, bad signature</td><td>Refresh the token or send the user to login</td></tr>
+<tr><td><strong>403 Forbidden</strong></td><td>"I know you, but you may not do this"</td><td>A STUDENT calls a LECTURER endpoint</td><td>Show "You do not have access". Logging in again will not help.</td></tr>
+</tbody></table></div>
+<p>Platform rule E1: <em>every</em> error is <code>application/problem+json</code> with
+<code>code</code> and <code>traceId</code> (lesson 09). Spring Security's default 401 and 403 are
+empty bodies, so we plug in two small handlers:</p>
+<pre data-file="SecurityConfig (continued, planned)"><code>http.exceptionHandling(ex -&gt; ex
+        .authenticationEntryPoint(problemWriter.forStatus(401, "UNAUTHENTICATED"))   <span class="c">// + WWW-Authenticate: Bearer</span>
+        .accessDeniedHandler(problemWriter.forStatus(403, "FORBIDDEN")));
+
+<span class="c">// 401 body:</span>
+{"type":"https://campus.edu/problems/unauthenticated","title":"Unauthenticated","status":401,
+ "detail":"Token expired","code":"UNAUTHENTICATED","traceId":"4bf92f…"}</code></pre>
+<p><code>UNAUTHENTICATED</code> and <code>FORBIDDEN</code> are not in <code>ProblemCode</code> yet.
+Today it has <code>INTERNAL_ERROR</code>, <code>VALIDATION_FAILED</code>, <code>NOT_FOUND</code>,
+<code>CONFLICT</code> and <code>RATE_LIMITED</code>. Identity would add them.</p>
+<div class="callout bad">
+  <span class="title">Real trap in this repo</span>
+  <code>CampusProblemHandler</code> (platform T8) has a catch-all
+  <code>@ExceptionHandler(Exception.class)</code> that returns 500. A failed
+  <code>@PreAuthorize</code> throws <code>AccessDeniedException</code> <em>inside</em> the
+  controller call, so this catch-all would grab it and answer <strong>500 instead of 403</strong>.
+  The fix: add a specific handler for <code>AccessDeniedException</code> (→ 403) and
+  <code>AuthenticationException</code> (→ 401), and write a test that proves it.
+</div>
+
+<h2 id="tests">7. Testing with jwt()</h2>
+<p>You do not need a running Keycloak to test security. The <code>spring-security-test</code>
+library has a <code>jwt()</code> helper that puts a fake, already-checked JWT on a MockMvc request.</p>
+<pre data-file="GradeControllerTest (planned example)"><code><span class="k">@Test</span>
+void lecturerOfTheSectionCanEnterGrades() throws Exception {
+    mvc.perform(put("/api/v1/grade/sections/{id}/grades", SECTION)
+                    .with(jwt()
+                            .jwt(j -&gt; j.subject(LECTURER_ID.toString())
+                                       .claim("realm_access", Map.of("roles", List.of("LECTURER"))))
+                            .authorities(new KeycloakRealmRoles()))      <span class="c">// use OUR converter</span>
+                    .contentType(APPLICATION_JSON)
+                    .content(sheetJson))
+       .andExpect(status().isNoContent());
+}
+
+<span class="k">@Test</span>
+void studentGetsProblem403() throws Exception {
+    mvc.perform(put("/api/v1/grade/sections/{id}/grades", SECTION)
+                    .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_STUDENT")))
+                    .contentType(APPLICATION_JSON).content(sheetJson))
+       .andExpect(status().isForbidden())
+       .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+}
+
+<span class="k">@Test</span>
+void noTokenGets401() throws Exception {
+    mvc.perform(get("/api/v1/grade/grades/me")).andExpect(status().isUnauthorized());
+}</code></pre>
+<ul>
+  <li><code>.authorities(...)</code> with fixed values <strong>skips your converter</strong>. Pass
+      the converter itself (first test), or unit-test <code>KeycloakRealmRoles</code> on its own.</li>
+  <li>Test the three cases for every protected endpoint: no token (401), wrong role (403), right
+      role but someone else's row (404).</li>
+  <li>One integration test (a <code>*IT</code>, <a href="10-testing.html">lesson 10</a>) can run a
+      real Keycloak with Testcontainers, import the realm JSON, get a real token, and call the API.
+      That proves the issuer, audience and keys are wired correctly.</li>
+</ul>
+<p>For the reactive gateway, <code>WebTestClient</code> has a matching
+<code>mockJwt()</code> helper.</p>
+
+<h2 id="browser">8. Tokens in the browser</h2>
+<p>The Arch says: "tokens never stored in localStorage (memory + refresh via secure cookie or
+BFF)". Why? Any JavaScript on the page can read <code>localStorage</code>. One XSS bug (lesson 30)
+or one bad npm package would let an attacker copy every token and use it from their own computer.</p>
+<h3>Plan A: an OIDC library, tokens in memory</h3>
+<ul>
+  <li><strong>Do not write PKCE yourself.</strong> Use a proven, standards-following OIDC client
+      library (for example <code>oidc-client-ts</code>, or Keycloak's own <code>keycloak-js</code>;
+      the OpenID Foundation keeps a list of certified libraries). It handles state, PKCE, the
+      callback, expiry and logout.</li>
+  <li><strong>Keep tokens in memory</strong> (a JavaScript variable). They are lost on page reload,
+      so the library does a <strong>silent login</strong>: it asks Keycloak again with
+      <code>prompt=none</code>. If the Keycloak session is still alive, a new token comes back
+      without a login page.</li>
+  <li><strong>Renew silently before expiry</strong>: about a minute before the 5-minute token ends,
+      the library gets a new one (Arch §5, step 6).</li>
+</ul>
+<pre data-file="frontend/web/src/shell/auth/oidc.ts (planned sketch with oidc-client-ts)"><code>import { UserManager, WebStorageStateStore, InMemoryWebStorage } from "oidc-client-ts";
+
+export const userManager = new UserManager({
+  authority: "http://localhost:8180/realms/campus",     <span class="c">// discovery finds the other URLs</span>
+  client_id: "campus-web",
+  redirect_uri: `${window.location.origin}/auth/callback`,
+  post_logout_redirect_uri: window.location.origin,
+  scope: "openid profile email",
+  userStore: new WebStorageStateStore({ store: new InMemoryWebStorage() }),   <span class="c">// memory, not localStorage</span>
+  automaticSilentRenew: true,
+});</code></pre>
+<p>The API client from platform T19 then adds <code>Authorization: Bearer</code> to each call,
+and on a 401 it tries one silent renew before sending the user to login.</p>
+
+<h3>Plan B: the BFF pattern</h3>
+<div class="compare">
+  <div class="good"><h4>BFF (Backend for Frontend)</h4>
+    <p>A small server (the gateway can play this role) does the OIDC login as a
+    <em>confidential</em> client and keeps the tokens on the server. The browser only gets an
+    <code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code> session cookie that
+    JavaScript cannot read. Stolen-token risk is much lower.</p></div>
+  <div class="poor"><h4>The trade-off</h4>
+    <p>The gateway becomes <strong>stateful</strong>: it needs a shared session store (for
+    example Redis) for its replicas. <strong>CSRF protection comes back</strong> because cookies
+    are sent automatically. One more moving part to build and run.</p></div>
+</div>
+<p>The identity spec must choose. Plan A is simpler and fits a stateless gateway. Plan B is the
+safer choice recommended by the IETF's current draft on OAuth for browser-based apps. Either way,
+the rest of this lesson (services checking JWTs) stays the same.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where (planned)</th><th>Module</th></tr></thead>
+<tbody>
+<tr><td>Shared <code>SecurityFilterChain</code> + <code>KeycloakRealmRoles</code></td><td>probably <code>backend/platform-starter</code>, package <code>edu.campus.starter.security</code></td><td>identity</td></tr>
+<tr><td>Reactive JWT check</td><td><code>backend/gateway</code> (<code>edu.campus.gateway</code>)</td><td>identity</td></tr>
+<tr><td>401/403 problem JSON, <code>AccessDeniedException</code> handler</td><td>next to <code>CampusProblemHandler</code> in <code>platform-starter/.../starter/problem/</code></td><td>identity</td></tr>
+<tr><td>New codes <code>UNAUTHENTICATED</code>, <code>FORBIDDEN</code></td><td><code>shared-kernel/.../kernel/error/ProblemCode.java</code></td><td>identity</td></tr>
+<tr><td><code>@PreAuthorize</code> + ownership checks</td><td>every module's controllers or services</td><td>course … search</td></tr>
+<tr><td>OIDC client in the browser</td><td><code>frontend/web/src/shell/auth/</code></td><td>identity, shell</td></tr>
+<tr><td>Per-user rate limit for registration</td><td>uses the JWT <code>sub</code> as the key (map C14)</td><td>registration</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Trusting the gateway alone.</strong> Each service must check the token too.</li>
+  <li><strong>Only role checks on endpoints with ids.</strong> Add ownership: <code>/me</code>
+      endpoints and owner-filtered queries.</li>
+  <li><strong>Forgetting <code>@EnableMethodSecurity</code>.</strong> Then every
+      <code>@PreAuthorize</code> is silently ignored. Have one test that expects a 403.</li>
+  <li><strong><code>hasRole('ROLE_STUDENT')</code>.</strong> <code>hasRole</code> adds the prefix
+      itself. Write <code>hasRole('STUDENT')</code>.</li>
+  <li><strong>500 instead of 403</strong> because a catch-all exception handler swallows
+      <code>AccessDeniedException</code> (section 6).</li>
+  <li><strong>Turning CSRF off while using login cookies.</strong> Off is only safe for
+      bearer-token APIs.</li>
+  <li><strong>Tokens in <code>localStorage</code></strong> (Arch §8 forbids it).</li>
+  <li><strong>Reading the user id from the request body</strong> instead of the token.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Read <code>CampusProblemHandler</code> in
+      <code>backend/platform-starter/src/main/java/edu/campus/starter/problem/</code>. Find the
+      catch-all handler, and explain in one sentence why an <code>AccessDeniedException</code>
+      would become a 500 there.</p></li>
+  <li><p>On paper, write the <code>@PreAuthorize</code> rule for: "a club manager may create events,
+      but only for a club where they are a manager in <code>club_members.role</code>". Which part is
+      a role check and which is an ownership check?</p></li>
+  <li><p>Write a plain JUnit test for <code>KeycloakRealmRoles</code> (no Spring): build a
+      <code>Jwt</code> with <code>Jwt.withTokenValue("t").header("alg","none")</code>, add
+      <code>realm_access</code> with <code>STUDENT</code> and <code>default-roles-campus</code>, and
+      assert that only <code>ROLE_STUDENT</code> comes out.</p></li>
+  <li><p>Using the practice realm from lesson 16, get a token for <code>sv1</code> from the
+      "Evaluate" tab, then decode it. Which claim would <code>getName()</code> return in Spring?</p></li>
+  <li><p>List every endpoint you can imagine for the <code>grade</code> module (GR-1…GR-7). For each,
+      write the role rule and the ownership rule in a two-column table.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Filter</td><td>Code that runs before the controller for each request.</td></tr>
+<tr><td>SecurityFilterChain</td><td>The list of security filters, set up by one bean.</td></tr>
+<tr><td>SecurityContext</td><td>Where Spring keeps "who is this request" for the current request.</td></tr>
+<tr><td>Resource server</td><td>An API that accepts access tokens.</td></tr>
+<tr><td>Authority</td><td>A permission string in Spring, like <code>ROLE_LECTURER</code>.</td></tr>
+<tr><td>Method security</td><td>Rules on methods with <code>@PreAuthorize</code>.</td></tr>
+<tr><td>Ownership check</td><td>Checking that the row belongs to the caller.</td></tr>
+<tr><td>IDOR</td><td>Reading someone else's data by changing an id.</td></tr>
+<tr><td>Defence in depth</td><td>Several independent layers of checks.</td></tr>
+<tr><td>CORS</td><td>Browser rule about which other origins may read our answers.</td></tr>
+<tr><td>CSRF</td><td>A forged request that rides on a cookie the browser sends by itself.</td></tr>
+<tr><td>BFF</td><td>Backend for Frontend: a server that keeps tokens so the browser does not.</td></tr>
+<tr><td>Silent renew</td><td>Getting a new token in the background, without a login page.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. The gateway already checks every token. Why must <code>core-app</code> check it again?</summary>
+    <p>The gateway may not be the only way in (misconfiguration, internal calls, tests in the
+    cluster). Defence in depth: each service protects itself. Also, only the service knows the
+    role rules for its endpoints.</p></details>
+  <details><summary>2. Why is <code>hasRole('STUDENT')</code> not enough for reading grades?</summary>
+    <p>Every student has that role, so it does not say which grades are theirs. Without an
+    ownership check, any student could read others' grades by changing an id (IDOR).</p></details>
+  <details><summary>3. Why do we write our own converter for Keycloak roles?</summary>
+    <p>Spring reads the <code>scope</code> claim by default. Keycloak puts roles in the nested
+    <code>realm_access.roles</code> claim. The converter reads that claim and maps each known role to
+    a <code>ROLE_…</code> authority.</p></details>
+  <details><summary>4. Why can we disable CSRF for the API, and when must it come back?</summary>
+    <p>CSRF abuses credentials the browser sends by itself (cookies). Bearer tokens are added by our
+    code, so a foreign site cannot make the browser send them. If we switch to cookie sessions (BFF),
+    the browser sends credentials automatically again, so CSRF protection is needed.</p></details>
+  <details><summary>5. Why answer 404 instead of 403 when a student asks for someone else's grade?</summary>
+    <p>403 says "this exists, but not for you", which leaks information. 404 from an owner-filtered
+    query treats other people's rows as if they did not exist.</p></details>
+  <details><summary>6. Why keep tokens in memory instead of <code>localStorage</code>?</summary>
+    <p>Any script on the page can read <code>localStorage</code>, so one XSS bug could steal
+    tokens that keep working elsewhere. Memory is harder to reach and disappears with the tab; the
+    Keycloak session gives a new token silently when needed.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html">Spring Security reference: Servlet architecture</a>: filters and the chain.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html">Spring Security: OAuth 2.0 Resource Server JWT</a>: issuer, audience, converters.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html">Spring Security: Method security</a>: <code>@PreAuthorize</code> and bean expressions.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/reactive/oauth2/resource-server/jwt.html">Spring Security: Reactive resource server JWT</a>: the gateway side.</li>
+  <li><a href="https://docs.spring.io/spring-security/reference/servlet/test/mockmvc/oauth2.html">Spring Security: Testing OAuth 2.0 with MockMvc</a>: <code>jwt()</code>.</li>
+  <li><a href="https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/">IETF draft: OAuth 2.0 for Browser-Based Applications</a>: in-memory tokens vs BFF.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457: Problem Details for HTTP APIs</a> (the update of RFC 7807).</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

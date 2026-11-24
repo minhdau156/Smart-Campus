@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Campus Lessons</title>
+<meta name="description" content="The knowledge you need to build Smart Campus, in 31 lessons tied to the project's tasks and modules.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <a href="index.html">Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main class="wide">
+<div class="eyebrow">Learn along with the project</div>
+<h1>What you need to know to build Smart Campus</h1>
+<p class="lede">31 lessons in basic English. Each one teaches one topic and shows exactly where
+Smart Campus uses it. Read a lesson <strong>before</strong> the task that needs it, then build the
+task, then read the task's learning note in <a href="../learn/platform/task1.md">docs/learn/</a>.</p>
+
+<div class="callout project" id="progress-box">
+  <span class="title">Your progress</span>
+  <div class="progress"><div id="progress-bar"></div></div>
+  <span id="progress-text">0 of 31 lessons done</span>
+  <span style="color:var(--muted)"> · saved in this browser only</span>
+</div>
+
+<h2 id="how">How to study with these lessons</h2>
+<ol class="steps">
+  <li><strong>Find the next task</strong> in <a href="../../tasks/todo.md">tasks/todo.md</a>. Look it
+      up in the "Read before each task" table below.</li>
+  <li><strong>Read the lesson(s)</strong> for that task. Do the <em>Practice</em> part. Answer the
+      quiz without opening the answers first.</li>
+  <li><strong>Build the task</strong> (<code>/agent-skills:build</code>). While it runs, keep the
+      lesson open and match each file to an idea from the lesson.</li>
+  <li><strong>Read the learning note</strong> for the task in <code>docs/learn/&lt;module&gt;/task&lt;N&gt;.md</code>.
+      Then tick "I finished this lesson" at the bottom of the lesson.</li>
+</ol>
+<div class="callout tip">
+  <span class="title">You are here: platform, Task 10</span>
+  Tasks 1–9 are done, so lessons 01–06, 08 and 09 are <strong>review</strong>: they explain what
+  is already built. For the next tasks, read <a href="04-postgres-flyway.html">04</a> (DB users) for T10,
+  then <a href="07-kafka.html">07</a> and <a href="08-outbox-idempotency.html">08</a> for T11–T12.
+</div>
+
+<h2 id="by-task">Read before each task</h2>
+<h3>Module 1: <code>platform</code> (now)</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>Task</th><th>What it builds</th><th>Read first</th></tr></thead>
+<tbody>
+<tr><td>T1–T2 ✓</td><td>Maven parent pom, wrapper, build rules</td><td><a href="02-maven.html">02</a></td></tr>
+<tr><td>T3 ✓</td><td>Compose infra, schemas, DB users</td><td><a href="05-docker-compose.html">05</a>, <a href="04-postgres-flyway.html">04</a></td></tr>
+<tr><td>T4–T5 ✓</td><td>shared-kernel: ids, money, time, events, topics</td><td><a href="01-java-21.html">01</a>, <a href="07-kafka.html">07</a></td></tr>
+<tr><td>T6 ✓</td><td>core-app skeleton, Flyway, Modulith verify</td><td><a href="03-spring-boot.html">03</a>, <a href="06-spring-modulith.html">06</a>, <a href="10-testing.html">10</a></td></tr>
+<tr><td>T7 ✓</td><td>Outbox spike</td><td><a href="08-outbox-idempotency.html">08</a>, <a href="10-testing.html">10</a></td></tr>
+<tr><td>T8–T9 ✓</td><td>Problem JSON, OpenAPI docs</td><td><a href="09-rest-problem-openapi.html">09</a></td></tr>
+<tr><td><strong>T10</strong></td><td>registration-service + schema-limited DB user</td><td><a href="04-postgres-flyway.html">04</a>, <a href="03-spring-boot.html">03</a></td></tr>
+<tr><td>T11</td><td>notification-service + idempotent consumer</td><td><a href="07-kafka.html">07</a>, <a href="08-outbox-idempotency.html">08</a></td></tr>
+<tr><td>T12</td><td>Topics, keys, retention, replay</td><td><a href="07-kafka.html">07</a>, <a href="08-outbox-idempotency.html">08</a></td></tr>
+<tr><td>T13–T14</td><td>Gateway routes, per-IP rate limit</td><td><a href="11-gateway-rate-limit.html">11</a></td></tr>
+<tr><td>T15</td><td>App container images, <code>apps</code> profile</td><td><a href="05-docker-compose.html">05</a></td></tr>
+<tr><td>T16–T18</td><td>Traces, JSON logs, metrics, dashboard, alerts</td><td><a href="12-observability.html">12</a></td></tr>
+<tr><td>T19</td><td>Web scaffold + generated API types</td><td><a href="13-typescript-react.html">13</a>, <a href="14-frontend-api-testing.html">14</a></td></tr>
+<tr><td>T20–T21</td><td>GitHub Actions CI, README, ADRs</td><td><a href="15-git-ci-adr.html">15</a></td></tr>
+</tbody></table></div>
+
+<h3>Modules 2–14 and shipping (later)</h3>
+<div class="table-wrap"><table>
+<thead><tr><th>#</th><th>Module</th><th>What it adds</th><th>Read first</th></tr></thead>
+<tbody>
+<tr><td>2</td><td><code>identity</code></td><td>Keycloak login, roles, JWT checks</td><td><a href="16-oauth-oidc-keycloak.html">16</a>, <a href="17-spring-security.html">17</a></td></tr>
+<tr><td>3</td><td><code>shell</code></td><td>Module registry, menu, lazy routes, vi/en</td><td><a href="18-shell-frontend.html">18</a></td></tr>
+<tr><td>4</td><td><code>course</code></td><td>Courses, sections, rooms, schedules</td><td><a href="19-domain-modeling.html">19</a></td></tr>
+<tr><td>5</td><td><code>registration</code></td><td>The seat rush, waitlists, load test</td><td><a href="20-redis-concurrency.html">20</a>, <a href="21-load-testing-k6.html">21</a></td></tr>
+<tr><td>6</td><td><code>timetable</code></td><td>Week view read model, iCal</td><td><a href="22-read-models-cqrs.html">22</a></td></tr>
+<tr><td>7</td><td><code>grade</code></td><td>Grade entry, GPA, audit trail</td><td><a href="23-grades-audit.html">23</a></td></tr>
+<tr><td>8</td><td><code>notification</code></td><td>Inbox, WebSocket, push, email</td><td><a href="24-realtime-notifications.html">24</a></td></tr>
+<tr><td>9</td><td><code>announcement</code></td><td>Targeted posts, scheduled publish</td><td><a href="25-scheduled-jobs-feeds.html">25</a></td></tr>
+<tr><td>10</td><td><code>payment</code></td><td>Checkout, webhooks, refunds</td><td><a href="26-payments-webhooks.html">26</a></td></tr>
+<tr><td>11</td><td><code>club</code></td><td>Clubs, events, QR tickets</td><td><a href="27-qr-tickets.html">27</a></td></tr>
+<tr><td>12</td><td><code>marketplace</code></td><td>Book listings with photos</td><td><a href="28-file-storage-s3.html">28</a></td></tr>
+<tr><td>13</td><td><code>lostfound</code></td><td>Reports, photos, matching, archive job</td><td><a href="28-file-storage-s3.html">28</a>, <a href="25-scheduled-jobs-feeds.html">25</a></td></tr>
+<tr><td>14</td><td><code>search</code></td><td>Search across modules</td><td><a href="29-opensearch.html">29</a></td></tr>
+<tr><td>all</td><td>every module</td><td>Safe code against common attacks</td><td><a href="30-security-hardening.html">30</a></td></tr>
+<tr><td>—</td><td>shipping phase</td><td>Kubernetes, Helm, zero-downtime deploy</td><td><a href="31-kubernetes-shipping.html">31</a></td></tr>
+</tbody></table></div>
+
+<section class="part">
+<h2 id="part1">Part 1: Foundations</h2>
+<p>Everything the <code>platform</code> module uses. Every later module builds on these.</p>
+<div class="cards">
+  <a class="card" data-id="01" href="01-java-21.html"><span class="num">01</span><h3>Modern Java 21 for this project</h3>
+    <p>Records, typed ids, enums, pattern matching, java.time and Clock, BigDecimal.</p>
+    <div class="meta"><span class="badge task">T4–T5</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="02" href="02-maven.html"><span class="num">02</span><h3>Maven multi-module builds</h3>
+    <p>Parent pom, BOMs, lifecycle, surefire vs failsafe, profiles, Spotless, JaCoCo.</p>
+    <div class="meta"><span class="badge task">T1–T2</span><span class="badge time">~45 min</span></div></a>
+  <a class="card" data-id="03" href="03-spring-boot.html"><span class="num">03</span><h3>Spring Boot 4 basics</h3>
+    <p>Beans and injection, config and profiles, auto-configuration, Actuator, transactions.</p>
+    <div class="meta"><span class="badge task">T6, T8, T10</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="04" href="04-postgres-flyway.html"><span class="num">04</span><h3>PostgreSQL, schemas and Flyway</h3>
+    <p>Tables, transactions, locks, one schema per module, DB users, migrations.</p>
+    <div class="meta"><span class="badge task">T3, T6, T10</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="05" href="05-docker-compose.html"><span class="num">05</span><h3>Docker, Compose and Dockerfiles</h3>
+    <p>Images, containers, healthchecks, profiles, the shared app Dockerfile.</p>
+    <div class="meta"><span class="badge task">T3, T15</span><span class="badge time">~45 min</span></div></a>
+  <a class="card" data-id="06" href="06-spring-modulith.html"><span class="num">06</span><h3>Modular monolith with Spring Modulith</h3>
+    <p>Modules as packages, internal code, verify(), module events, API groups.</p>
+    <div class="meta"><span class="badge task">T6</span><span class="badge time">~45 min</span></div></a>
+  <a class="card" data-id="07" href="07-kafka.html"><span class="num">07</span><h3>Apache Kafka fundamentals</h3>
+    <p>Topics, partitions, keys, consumer groups, offsets, retention, Spring Kafka.</p>
+    <div class="meta"><span class="badge task">T5, T11, T12</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="08" href="08-outbox-idempotency.html"><span class="num">08</span><h3>Reliable events: outbox, dedupe, replay</h3>
+    <p>The dual-write problem, the transactional outbox, idempotent consumers, replay.</p>
+    <div class="meta"><span class="badge task">T7, T11, T12</span><span class="badge time">~60 min</span><span class="badge level">Core idea</span></div></a>
+  <a class="card" data-id="09" href="09-rest-problem-openapi.html"><span class="num">09</span><h3>REST APIs, problem JSON and OpenAPI</h3>
+    <p>HTTP, status codes, validation, RFC 9457 errors, springdoc and the export.</p>
+    <div class="meta"><span class="badge task">T8, T9</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="10" href="10-testing.html"><span class="num">10</span><h3>Testing: JUnit, Testcontainers, ArchUnit</h3>
+    <p>Unit vs integration tests, real databases in Docker, architecture rules, TDD.</p>
+    <div class="meta"><span class="badge task">every task</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="11" href="11-gateway-rate-limit.html"><span class="num">11</span><h3>API gateway and rate limiting</h3>
+    <p>Spring Cloud Gateway, routes and filters, reactive basics, token bucket in Redis.</p>
+    <div class="meta"><span class="badge task">T13, T14</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="12" href="12-observability.html"><span class="num">12</span><h3>Observability: traces, logs, metrics</h3>
+    <p>OpenTelemetry, Tempo, JSON logs to Loki, Prometheus, Grafana, alerts.</p>
+    <div class="meta"><span class="badge task">T16–T18</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="13" href="13-typescript-react.html"><span class="num">13</span><h3>TypeScript, React and Vite</h3>
+    <p>Types, components, state, effects, forms, the Vite dev server and proxy.</p>
+    <div class="meta"><span class="badge task">T19</span><span class="badge time">~70 min</span></div></a>
+  <a class="card" data-id="14" href="14-frontend-api-testing.html"><span class="num">14</span><h3>Frontend data, generated types and tests</h3>
+    <p>TanStack Query, openapi-typescript, problem JSON in the UI, Vitest.</p>
+    <div class="meta"><span class="badge task">T19</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="15" href="15-git-ci-adr.html"><span class="num">15</span><h3>Git, GitHub Actions CI and ADRs</h3>
+    <p>Branches and commits, CI pipeline, Trivy and Dependency-Check, decision records.</p>
+    <div class="meta"><span class="badge task">T20, T21</span><span class="badge time">~45 min</span></div></a>
+</div>
+</section>
+
+<section class="part">
+<h2 id="part2">Part 2: Feature modules</h2>
+<p>Read each lesson when its module's spec is being written. They help you review the spec as well.</p>
+<div class="cards">
+  <a class="card" data-id="16" href="16-oauth-oidc-keycloak.html"><span class="num">16</span><h3>OAuth 2, OpenID Connect and Keycloak</h3>
+    <p>Login with Code + PKCE, tokens and JWTs, realms, clients and roles.</p>
+    <div class="meta"><span class="badge module">identity</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="17" href="17-spring-security.html"><span class="num">17</span><h3>Spring Security with JWT and roles</h3>
+    <p>Resource server, role mapping, @PreAuthorize, ownership checks, tests.</p>
+    <div class="meta"><span class="badge module">identity</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="18" href="18-shell-frontend.html"><span class="num">18</span><h3>App shell: routing, lazy modules, i18n</h3>
+    <p>Module manifest, React Router, React.lazy, vi/en, responsive layout.</p>
+    <div class="meta"><span class="badge module">shell</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="19" href="19-domain-modeling.html"><span class="num">19</span><h3>Domain modeling: aggregates and rules</h3>
+    <p>Entities, value objects, invariants, room clashes, domain events.</p>
+    <div class="meta"><span class="badge module">course</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="20" href="20-redis-concurrency.html"><span class="num">20</span><h3>Redis, Lua and the registration rush</h3>
+    <p>Race conditions, atomic seat gate, waiting room, queue worker, waitlist.</p>
+    <div class="meta"><span class="badge module">registration</span><span class="badge time">~75 min</span><span class="badge level">Hardest</span></div></a>
+  <a class="card" data-id="21" href="21-load-testing-k6.html"><span class="num">21</span><h3>Load testing with k6</h3>
+    <p>Spike tests, arrival-rate scenarios, thresholds, checking nothing was oversold.</p>
+    <div class="meta"><span class="badge module">registration</span><span class="badge time">~45 min</span></div></a>
+  <a class="card" data-id="22" href="22-read-models-cqrs.html"><span class="num">22</span><h3>Read models, CQRS and iCal</h3>
+    <p>Projections from events, eventual consistency, upserts, calendar export.</p>
+    <div class="meta"><span class="badge module">timetable</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="23" href="23-grades-audit.html"><span class="num">23</span><h3>Grades: audit trails, locking, imports</h3>
+    <p>State machines, spreadsheet import, GPA with BigDecimal, audit log.</p>
+    <div class="meta"><span class="badge module">grade</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="24" href="24-realtime-notifications.html"><span class="num">24</span><h3>Real-time: WebSocket, push and email</h3>
+    <p>STOMP over WebSocket, browser push, email with retries, preferences.</p>
+    <div class="meta"><span class="badge module">notification</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="25" href="25-scheduled-jobs-feeds.html"><span class="num">25</span><h3>Scheduled jobs and targeted feeds</h3>
+    <p>Jobs on many replicas, scheduled publish, audiences, pagination, read counts.</p>
+    <div class="meta"><span class="badge module">announcement</span><span class="badge module">lostfound</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="26" href="26-payments-webhooks.html"><span class="num">26</span><h3>Payments, webhooks and idempotency</h3>
+    <p>Redirect + IPN flow, HMAC signatures, payment states, refunds.</p>
+    <div class="meta"><span class="badge module">payment</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="27" href="27-qr-tickets.html"><span class="num">27</span><h3>QR tickets and signed tokens</h3>
+    <p>Signed QR content, one-time check-in, quotas, scanning in the browser.</p>
+    <div class="meta"><span class="badge module">club</span><span class="badge time">~45 min</span></div></a>
+  <a class="card" data-id="28" href="28-file-storage-s3.html"><span class="num">28</span><h3>File uploads and S3 storage</h3>
+    <p>Buckets and keys, presigned URLs, image checks, privacy, cleanup.</p>
+    <div class="meta"><span class="badge module">marketplace</span><span class="badge module">lostfound</span><span class="badge time">~50 min</span></div></a>
+  <a class="card" data-id="29" href="29-opensearch.html"><span class="num">29</span><h3>Search with OpenSearch</h3>
+    <p>Inverted index, Vietnamese analyzers, query DSL, index from Kafka.</p>
+    <div class="meta"><span class="badge module">search</span><span class="badge time">~55 min</span></div></a>
+  <a class="card" data-id="30" href="30-security-hardening.html"><span class="num">30</span><h3>Security hardening (OWASP)</h3>
+    <p>Common attacks mapped to Smart Campus code and how to stop them.</p>
+    <div class="meta"><span class="badge module">all modules</span><span class="badge time">~60 min</span></div></a>
+  <a class="card" data-id="31" href="31-kubernetes-shipping.html"><span class="num">31</span><h3>Shipping: Kubernetes and Helm</h3>
+    <p>Pods, probes, rolling updates, autoscaling, Helm charts, deploy-time migrations.</p>
+    <div class="meta"><span class="badge module">shipping</span><span class="badge time">~60 min</span></div></a>
+</div>
+</section>
+
+<h2 id="also">Also in this repo</h2>
+<ul>
+  <li><a href="../../CAPABILITY-MAP.md">CAPABILITY-MAP.md</a>: the 14 modules, their order, and decisions C1–C18.</li>
+  <li><a href="../../SPEC-platform.md">SPEC-platform.md</a>: what <code>platform</code> must do, and why (D1–D6).</li>
+  <li><a href="../learn/platform/task1.md">docs/learn/platform/</a>: one learning note per finished task.</li>
+</ul>
+</main>
+
+<script>
+(function () {
+  var done = window.CAMPUS_DONE ? window.CAMPUS_DONE.read() : {};
+  var cards = document.querySelectorAll(".card[data-id]");
+  var count = 0, firstOpen = null;
+  Array.prototype.forEach.call(cards, function (c) {
+    if (done[c.getAttribute("data-id")]) { c.classList.add("done"); count++; }
+    else if (!firstOpen) { firstOpen = c; }
+  });
+  if (firstOpen) firstOpen.classList.add("now");
+  var total = cards.length;
+  document.getElementById("progress-bar").style.width = (total ? Math.round(count * 100 / total) : 0) + "%";
+  document.getElementById("progress-text").textContent = count + " of " + total + " lessons done";
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Modeling Lesson</title>
+<meta name="description" content="Smart Campus lesson 19: entities, value objects, aggregates, invariants, room clashes and domain events, shown on the course module.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="19">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 19 · Part 2: Feature modules</div>
+<h1>Domain modeling: aggregates and rules</h1>
+<p class="lede">How do we turn "a section has 60 seats" and "two classes can never share a room at
+the same time" into Java classes and SQL tables that make breaking these rules impossible? This
+lesson uses the <code>course</code> module as the example, but every module uses the same ideas.</p>
+
+<div class="meta">
+  <span class="badge module">course</span>
+  <span class="badge module">every feature module</span>
+  <span class="badge task">REG-7</span>
+  <span class="badge task">REG-9</span>
+  <span class="badge task">TT-4</span>
+  <span class="badge task">TT-5</span>
+  <span class="badge time">~60 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="01-java-21.html">01 (records)</a>, <a href="04-postgres-flyway.html">04 (schemas,
+  constraints, transactions)</a>, <a href="06-spring-modulith.html">06 (modules and
+  <code>internal</code> packages)</a> and <a href="08-outbox-idempotency.html">08 (events and the
+  outbox)</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  The <code>course</code> module has no spec yet (<code>SPEC-course.md</code> is "not started" in
+  <code>CAPABILITY-MAP.md</code>). Class names, table names and columns in this lesson are a
+  <strong>proposal</strong> to help you think. The real ones are decided in the spec. Only the
+  <code>shared-kernel</code> classes (<code>TypedId</code>, <code>TimeRange</code>,
+  <code>DomainEvent</code>, <code>Topics</code>, <code>CampusProblem</code>) exist today.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#language">One language for the team</a></li>
+    <li><a href="#blocks">Entity, value object, aggregate</a></li>
+    <li><a href="#invariants">Invariants and rich models</a></li>
+    <li><a href="#course">The course aggregates</a></li>
+    <li><a href="#clashes">Room clashes: two guards</a></li>
+    <li><a href="#locking">Optimistic locking</a></li>
+    <li><a href="#events">Domain events and the public API</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>The <strong>domain</strong> is the real-world area the software is about. For us that is a
+university: courses, sections, rooms, students, grades. <strong>Domain modeling</strong> means
+choosing the classes, fields and methods that describe this world, and putting the
+<strong>business rules</strong> in the right place.</p>
+<p>The <code>course</code> module (module 4) has rules like these, from the Plan's user stories:</p>
+<ul>
+  <li><strong>REG-7</strong>: an academic admin creates courses and sections with a capacity, a
+      lecturer and a schedule.</li>
+  <li><strong>REG-9</strong>: during registration, the admin can raise a capacity or open a new
+      section.</li>
+  <li><strong>TT-4</strong>: a lecturer reports a cancelled or rescheduled class, and students are
+      told automatically.</li>
+  <li><strong>TT-5</strong>: rooms and time slots are assigned "without clashes", so no two classes
+      share a room at once.</li>
+</ul>
+<p>If these rules live in random places (a controller here, a SQL query there, a React form
+there), one day someone adds a new endpoint and forgets one rule. Then a section gets capacity
+<code>-5</code>, or two lectures are booked into room B4-201 at 07:30 on Monday. Domain modeling
+puts each rule in <strong>one</strong> place that every path must go through.</p>
+
+<h2 id="language">2. One language for the team (ubiquitous language)</h2>
+<p><strong>Ubiquitous language</strong> means "the same words everywhere": in the user stories,
+in conversations, in class names, in table names and in event names. If the admin says
+"section" and the code says <code>ClassGroup</code>, every discussion needs a translation, and
+translations create bugs.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Word in Smart Campus</th><th>Meaning</th><th>Not the same as</th></tr></thead>
+<tbody>
+<tr><td><strong>Course</strong></td><td>A subject in the catalog, e.g. CS101 "Introduction to Programming", 3 credits. It has no time and no room.</td><td>A section</td></tr>
+<tr><td><strong>Section</strong></td><td>One teaching group of a course in one semester, with a lecturer, a capacity and a schedule. Students register for sections.</td><td>A course</td></tr>
+<tr><td><strong>Semester</strong></td><td>A period with a start and end date, e.g. "2027-1".</td><td>A registration window (that belongs to <code>registration</code>)</td></tr>
+<tr><td><strong>Weekly slot</strong></td><td>"Every Monday 07:30–09:30 in room B4-201." A repeating rule.</td><td>A meeting</td></tr>
+<tr><td><strong>Meeting</strong></td><td>One real class on one date, e.g. Monday 4 Jan 2027, 07:30–09:30. It can be cancelled or moved (TT-4).</td><td>A weekly slot</td></tr>
+<tr><td><strong>Capacity</strong></td><td>The maximum number of seats in a section.</td><td>The number of enrolled students (that belongs to <code>registration</code>, see C17)</td></tr>
+</tbody></table></div>
+<div class="callout tip">
+  <span class="title">Tip</span>
+  When you write <code>SPEC-course.md</code>, add a short glossary like this table. Then use exactly
+  these words in Java, SQL, events, API paths and the UI (in both Vietnamese and English).
+</div>
+
+<h2 id="blocks">3. Entity, value object, aggregate</h2>
+<p>Domain-driven design (DDD) gives us three building blocks. Think of a library:</p>
+<div class="compare">
+  <div class="good"><h4>Entity</h4>
+    <p>Has an <strong>identity</strong> that stays the same while its data changes. A library
+    member is still the same person after changing their phone number. In Smart Campus:
+    <code>Section</code>, <code>Course</code>, <code>Room</code>. Two sections with the same
+    capacity are still two different sections.</p></div>
+  <div class="good"><h4>Value object</h4>
+    <p>Has <strong>no identity</strong>. It is equal to another one when all its values are
+    equal, like two 50,000 VND notes. It never changes; you replace it. In Smart Campus:
+    <code>Money</code>, <code>TimeRange</code>, <code>WeeklySlot</code>, typed ids. Java
+    <strong>records</strong> are perfect for this.</p></div>
+</div>
+<p>An <strong>aggregate</strong> is a small group of entities and value objects that are
+<strong>saved together and checked together</strong>. One entity is the <strong>root</strong>,
+the only door into the group. Outside code may hold a reference to the root (by its id), never
+to the inner parts. Think of an order and its order lines: you never change one line without
+going through the order, because the order must check its total.</p>
+<pre class="diagram">Aggregate "Section"  (one transaction = one aggregate)
+
+  ┌───────────── Section (root, entity) ─────────────┐
+  │ id: SectionId        capacity: 60                │
+  │ courseId: CourseId   semesterId: SemesterId      │   other aggregates are
+  │ lecturerId: UUID     status: OPEN                │   referenced by ID only:
+  │ version: 7                                       │     CourseId → Course
+  │                                                  │     RoomId   → Room
+  │  weeklySlots: [ WeeklySlot(MON 07:30-09:30, R1), │
+  │                 WeeklySlot(THU 13:00-15:00, R2) ]│   (value objects inside)
+  │  meetings:    [ Meeting(2027-01-04 …, SCHEDULED),│
+  │                 Meeting(2027-01-07 …, CANCELLED)]│   (entities inside)
+  └──────────────────────────────────────────────────┘</pre>
+<p>Rules of thumb for aggregates:</p>
+<ul>
+  <li><strong>Small.</strong> A <code>Course</code> does not contain all its sections. They are
+      separate aggregates that point to the course by <code>CourseId</code>.</li>
+  <li><strong>Reference others by id.</strong> This is the same rule as "no cross-schema foreign
+      keys" (C4), one level smaller.</li>
+  <li><strong>One aggregate per transaction</strong> (as a default). If a change must touch two
+      aggregates, often one changes now and the other reacts to an event.</li>
+</ul>
+
+<h3>Typed ids</h3>
+<p>Every id is a UUID. If all ids are plain <code>UUID</code>, nothing stops you from passing a
+student id where a section id is expected. <code>shared-kernel</code> gives us
+<code>TypedId</code>, so each module writes tiny id records:</p>
+<pre data-file="Pattern from backend/shared-kernel/.../kernel/id/TypedId.java (course ids are planned)"><code>package edu.campus.course;
+
+import edu.campus.kernel.id.Ids;
+import edu.campus.kernel.id.TypedId;
+import java.util.UUID;
+
+public record SectionId(UUID value) implements TypedId {
+    public SectionId {
+        Ids.requireId(value, "SectionId");   <span class="c">// null is rejected at once</span>
+    }
+
+    public static SectionId newId() {
+        return new SectionId(Ids.newId());
+    }
+}</code></pre>
+<p>Now <code>enroll(SectionId, StudentId)</code> cannot be called with the arguments swapped:
+the compiler stops you. In the database and on the wire, it is still a plain UUID
+(<code>value()</code>).</p>
+
+<h2 id="invariants">4. Invariants and rich models</h2>
+<p>An <strong>invariant</strong> is a rule that must be true <strong>always</strong>, not only
+"after validation". Examples for a section:</p>
+<ul>
+  <li>capacity is at least 1;</li>
+  <li>a weekly slot starts before it ends (already true for every <code>TimeRange</code>);</li>
+  <li>a cancelled section cannot get new meetings;</li>
+  <li>a meeting can only be moved if it is not in the past.</li>
+</ul>
+<p>The trick: make it <strong>impossible to create or change the object in a bad state</strong>.
+The constructor checks the first state. Every method that changes state checks the rule before
+it changes anything. There are no public setters.</p>
+
+<pre data-file="Planned: backend/core-app/.../course/internal/WeeklySlot.java (a value object)"><code>package edu.campus.course.internal;
+
+record WeeklySlot(DayOfWeek day, LocalTime start, LocalTime end, RoomId room) {
+    WeeklySlot {
+        Objects.requireNonNull(day, "day");
+        Objects.requireNonNull(room, "room");
+        if (!start.isBefore(end)) {
+            throw new IllegalArgumentException("A slot must start before it ends: %s-%s".formatted(start, end));
+        }
+    }
+}</code></pre>
+
+<pre data-file="Planned: backend/core-app/.../course/internal/Section.java (aggregate root, shortened)"><code>package edu.campus.course.internal;
+
+final class Section {
+    private final SectionId id;
+    private final CourseId courseId;
+    private final SemesterId semesterId;
+    private UUID lecturerId;             <span class="c">// a user from identity: bare UUID, no FK (C4)</span>
+    private int capacity;
+    private SectionStatus status;
+    private final List&lt;Meeting&gt; meetings;
+    private long version;                <span class="c">// optimistic lock, see section 7</span>
+
+    Section(SectionId id, CourseId courseId, SemesterId semesterId, UUID lecturerId, int capacity) {
+        this.id = Objects.requireNonNull(id, "id");
+        this.courseId = Objects.requireNonNull(courseId, "courseId");
+        this.semesterId = Objects.requireNonNull(semesterId, "semesterId");
+        this.lecturerId = Objects.requireNonNull(lecturerId, "lecturerId");
+        this.capacity = requireValidCapacity(capacity);
+        this.status = SectionStatus.OPEN;
+        this.meetings = new ArrayList&lt;&gt;();
+    }
+
+    <span class="c">/** REG-9: raise (or lower) the capacity. Returns the fact that happened. */</span>
+    SectionChanged changeCapacity(int newCapacity, Instant now) {
+        requireNotCancelled();
+        this.capacity = requireValidCapacity(newCapacity);
+        return SectionChanged.from(this, now);
+    }
+
+    <span class="c">/** TT-4: the lecturer cancels one class. */</span>
+    ScheduleChanged cancelMeeting(MeetingId meetingId, String reason, Instant now) {
+        Meeting meeting = findMeeting(meetingId);
+        if (meeting.endsBefore(now)) {
+            throw new CampusProblem(ProblemCode.CONFLICT, "This class is already over");
+        }
+        meeting.cancel(reason);
+        return ScheduleChanged.from(this, now);
+    }
+
+    private static int requireValidCapacity(int capacity) {
+        if (capacity &lt; 1) {
+            throw new CampusProblem(ProblemCode.VALIDATION_FAILED, "Capacity must be at least 1");
+        }
+        return capacity;
+    }
+    <span class="c">// requireNotCancelled(), findMeeting(…), getters …</span>
+}</code></pre>
+<p>Note three things. <code>now</code> comes in as a parameter (the service takes it from an
+injected <code>Clock</code>, never <code>Instant.now()</code>), so tests can control time. The
+methods return an event: the change and the fact "this happened" are created together. And the
+errors use <code>CampusProblem</code>, so the web layer turns them into problem JSON
+(<a href="09-rest-problem-openapi.html">lesson 09</a>). Today <code>ProblemCode</code> has only
+<code>VALIDATION_FAILED</code>, <code>CONFLICT</code> and a few others; the Arch also names
+<code>SCHEDULE_CONFLICT</code>, which the course spec would add.</p>
+
+<h3>Rich model vs anemic model</h3>
+<div class="compare">
+  <div class="poor"><h4>Anemic model</h4>
+    <p>The class is only fields with getters and setters. All rules live in "service" classes.
+    Any code can call <code>section.setCapacity(-5)</code>. To know the rules, you must read
+    every service.</p></div>
+  <div class="good"><h4>Rich model</h4>
+    <p>The class has behaviour: <code>changeCapacity</code>, <code>cancelMeeting</code>,
+    <code>reschedule</code>. The rules live next to the data. The application service only
+    loads, calls one method, saves and publishes.</p></div>
+</div>
+<pre data-file="Planned: the application service stays thin"><code><span class="k">@Service</span>
+class SectionService {
+    private final SectionRepository sections;
+    private final ApplicationEventPublisher events;
+    private final Clock clock;
+
+    SectionService(SectionRepository sections, ApplicationEventPublisher events, Clock clock) {
+        this.sections = sections;
+        this.events = events;
+        this.clock = clock;
+    }
+
+    <span class="k">@Transactional</span>
+    void changeCapacity(SectionId id, int newCapacity) {
+        Section section = sections.get(id);                              <span class="c">// 1. load</span>
+        Instant now = clock.instant();
+        SectionChanged fact = section.changeCapacity(newCapacity, now);  <span class="c">// 2. rules</span>
+        sections.save(section);                                          <span class="c">// 3. save (version check)</span>
+        events.publishEvent(new DomainEvent&lt;&gt;(UUID.randomUUID(),           <span class="c">// 4. outbox (lesson 08)</span>
+                "SectionChanged", 1, now, id.value().toString(), fact));
+    }
+}</code></pre>
+
+<h2 id="course">5. The course aggregates</h2>
+<p>Here is a proposed split for the <code>course</code> schema. The Plan's table list (§4) has
+<code>courses</code>, <code>course_prerequisites</code>, <code>semesters</code>,
+<code>sections</code> and <code>section_schedules</code>. Rooms have no table in the Plan, which
+the capability map lists as gap <strong>C10</strong> ("rooms (TT-5)").</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Aggregate (root)</th><th>Inside it</th><th>Invariants it protects</th><th>Story</th></tr></thead>
+<tbody>
+<tr><td><code>Course</code></td><td>code, name, credits, list of prerequisite <code>CourseId</code>s</td>
+    <td>code is unique; credits &gt; 0; a course is not its own prerequisite; no prerequisite cycles (CS201 needs CS101 needs CS201)</td><td>REG-7</td></tr>
+<tr><td><code>Semester</code></td><td>code, start date, end date</td><td>start before end; codes unique</td><td>REG-7</td></tr>
+<tr><td><code>Section</code></td><td>capacity, lecturer id, status, weekly slots, meetings</td>
+    <td>capacity ≥ 1; slots valid; no changes when cancelled; past meetings cannot move</td><td>REG-7, REG-9, TT-4</td></tr>
+<tr><td><code>Room</code></td><td>code (e.g. "B4-201"), building, seats</td><td>code unique</td><td>TT-5</td></tr>
+</tbody></table></div>
+<p>Some rules need data from <strong>more than one aggregate</strong>. "No two meetings in one
+room at the same time" looks at many sections. "No prerequisite cycles" looks at many courses.
+One aggregate cannot protect these alone, because it does not hold the other data. For these
+<strong>set rules</strong>, we use a check in the service <em>plus</em> a database constraint
+(next section).</p>
+
+<div class="callout project">
+  <span class="title">Smart Campus rule C17: no <code>enrolled_count</code> in course</span>
+  The Plan's <code>sections</code> table has <code>enrolled_count</code>, and Arch §4 says
+  <code>course</code> consumes <code>EnrollmentConfirmed</code> to update it. But
+  <code>registration</code> also consumes <code>SectionChanged</code> from course. Both together
+  make a dependency cycle. So the capability map decided: <strong><code>course.sections</code> has
+  no <code>enrolled_count</code></strong>. Live seat counts come from <code>registration</code>,
+  which keeps its own <code>section_seats</code> table (C5, <a href="20-redis-concurrency.html">lesson 20</a>).
+</div>
+<p>This has a real effect on the model. When an admin <em>lowers</em> a capacity from 60 to 40,
+<code>Section</code> cannot check "but 52 students are already enrolled", because it does not
+know that number. The course spec must decide what happens: either <code>registration</code>
+simply stops giving seats until enrolled &lt; capacity, or the UI asks <code>registration</code>
+first. Knowing which module owns which data tells you where a rule <em>can</em> live.</p>
+
+<h2 id="clashes">6. Room clashes: two guards</h2>
+<p>TT-5 says no two classes share a room at once. Two meetings clash when their time ranges
+overlap and they use the same room. <code>shared-kernel</code> already has the overlap check:</p>
+<pre data-file="backend/shared-kernel/.../kernel/time/TimeRange.java (exists, part)"><code>public record TimeRange(Instant start, Instant end) {
+    <span class="c">/** True if the two ranges share at least one instant. */</span>
+    public boolean overlaps(TimeRange other) {
+        return start.isBefore(other.end) &amp;&amp; other.start.isBefore(end);
+    }
+}</code></pre>
+<p>The end is <strong>not included</strong> (a "half-open" range). So 07:30–09:30 and
+09:30–11:30 touch but do not overlap. That is what we want: one class can end at 09:30 and the
+next one start at 09:30 in the same room.</p>
+
+<h3>Guard 1: the check in Java</h3>
+<p>Weekly slots are in local wall-clock time ("Monday 07:30"). To compare real times, the
+service turns each slot into dated meetings for the semester, using the university's time zone
+(<code>ZoneId.of("Asia/Ho_Chi_Minh")</code>, never the server's default). Then it asks the
+repository for meetings in the same room in that period and checks each one:</p>
+<pre data-file="Planned: part of a room-booking check in the service"><code>List&lt;Meeting&gt; wanted = slot.meetingsBetween(semester.startDate(), semester.endDate(), CAMPUS_ZONE);
+for (Meeting m : wanted) {
+    meetings.findActiveInRoom(m.room(), m.time())          <span class="c">// SQL uses the index below</span>
+            .stream()
+            .filter(other -&gt; other.time().overlaps(m.time()))
+            .findFirst()
+            .ifPresent(other -&gt; {
+                throw new CampusProblem(ProblemCode.CONFLICT,
+                        "Room %s is already used by section %s at %s".formatted(m.room(), other.sectionId(), other.time()));
+            });
+}</code></pre>
+<p>This gives a <strong>clear error message</strong> ("Room B4-201 is already used by CS101-02
+on Monday 07:30"). But it has a gap: two admins can check at the same moment, both see "free",
+and both save. This is a <strong>check-then-act race</strong> (more in
+<a href="20-redis-concurrency.html">lesson 20</a>).</p>
+
+<h3>Guard 2: a PostgreSQL exclusion constraint</h3>
+<p>A <code>UNIQUE</code> constraint says "no two rows have <em>equal</em> values". An
+<strong>exclusion constraint</strong> is more general: "no two rows where <em>this</em> operator
+is true". With <code>&amp;&amp;</code> (the "overlaps" operator for ranges), the database itself
+refuses the second booking, even when two transactions run at the same time.</p>
+<pre data-file="Planned migration: backend/core-app/.../db/migration/course/V…__section_meetings.sql"><code><span class="c">-- One row per real class on a date. tstzrange = range of "timestamp with time zone".</span>
+CREATE TABLE course.section_meetings (
+    id          UUID PRIMARY KEY,
+    section_id  UUID NOT NULL REFERENCES course.sections (id),   <span class="c">-- same schema: FK allowed</span>
+    room_id     UUID NOT NULL REFERENCES course.rooms (id),
+    during      TSTZRANGE NOT NULL,                              <span class="c">-- '[start, end)', end not included</span>
+    status      TEXT NOT NULL DEFAULT 'SCHEDULED',               <span class="c">-- SCHEDULED / CANCELLED</span>
+    created_at  TIMESTAMPTZ NOT NULL,
+    CONSTRAINT meeting_not_empty CHECK (NOT isempty(during)),
+    CONSTRAINT no_room_double_booking
+        EXCLUDE USING gist (room_id WITH =, during WITH &amp;&amp;)
+        WHERE (status &lt;&gt; 'CANCELLED')                            <span class="c">-- cancelled classes free the room</span>
+);</code></pre>
+<p>How to read the constraint: "for two rows that are not cancelled, it must never be true that
+the <code>room_id</code>s are <code>=</code> <strong>and</strong> the <code>during</code> ranges
+<code>&amp;&amp;</code> (overlap)." PostgreSQL builds a GiST index to check this fast. When it
+fails, the error has SQLSTATE <code>23P01</code> (<code>exclusion_violation</code>), which the
+service maps to a 409 problem.</p>
+<div class="callout warn">
+  <span class="title">Two details to know</span>
+  <p>1. Mixing <code>=</code> on a UUID column with <code>&amp;&amp;</code> on a range in one GiST
+  index needs the <code>btree_gist</code> extension. Our app user <code>core_app</code> has no
+  right to create extensions, so the Postgres init script (run as the admin user) would have to
+  run <code>CREATE EXTENSION btree_gist</code>. That is an infra change to agree on first.</p>
+  <p>2. <code>tstzrange(a, b)</code> uses the bounds <code>[)</code> by default: start included,
+  end not included. This matches <code>TimeRange</code>, so Java and SQL agree on "touching is
+  not overlapping".</p>
+</div>
+<div class="flow">
+  <div class="box project"><b>Guard 1: Java check</b>Friendly message, names the other section. Can miss a race.</div>
+  <div class="arrow">+</div>
+  <div class="box ok"><b>Guard 2: DB constraint</b>Never misses, even with two admins at once. Error is less friendly.</div>
+  <div class="arrow">=</div>
+  <div class="box accent"><b>Result</b>Good errors in normal use, and correctness always.</div>
+</div>
+<p>Why store dated <em>meetings</em> and not only weekly slots? Because TT-4 changes single
+dates: "the class on 1 Feb is cancelled", "the class on 8 Feb moves to Wednesday". A weekly slot
+cannot express that. Generating the meetings of one semester (about 15 weeks × 1–3 slots) is
+small. The course spec will confirm this design.</p>
+
+<h2 id="locking">7. Optimistic locking</h2>
+<p>During the rush, two admins may open the same section page. Admin A raises the capacity to 80.
+Admin B, who still sees the old page, changes the lecturer and saves the old capacity 60 with it.
+A's change is silently lost: a <strong>lost update</strong>.</p>
+<p><strong>Optimistic locking</strong> stops this without holding database locks while people
+think. Each row has a <code>version</code> number. Every update says "only if the version is
+still the one I read", and adds 1:</p>
+<pre data-file="Planned: the save of a Section (plain SQL view of what happens)"><code>UPDATE course.sections
+   SET capacity = :capacity, lecturer_id = :lecturerId, status = :status,
+       version = version + 1
+ WHERE id = :id
+   AND version = :versionIReadEarlier;     <span class="c">-- 0 rows updated = someone else was faster</span></code></pre>
+<p>If 0 rows change, the service throws <code>CampusProblem(ProblemCode.CONFLICT, "This section
+was changed by someone else. Reload and try again.")</code> → HTTP 409. (With JPA, a
+<code>@Version</code> field does the same thing for you.) The client can send the version it
+loaded, for example in an <code>If-Match</code> header or in the request body.</p>
+<p>It is called "optimistic" because it hopes conflicts are rare and only checks at the end. A
+"pessimistic" lock (<code>SELECT … FOR UPDATE</code>) would block the second admin until the
+first one finishes. For admin screens, optimistic is the right choice. The same
+<code>version</code> also travels in events, so consumers can ignore old news
+(<a href="22-read-models-cqrs.html">lesson 22</a>).</p>
+
+<h2 id="events">8. Domain events and the public API</h2>
+<h3>Domain events</h3>
+<p>A <strong>domain event</strong> is a fact that already happened, so its name is in the
+<strong>past tense</strong>: <code>SectionChanged</code>, <code>ScheduleChanged</code>, never
+<code>ChangeSection</code> (that would be a command). <code>course</code> publishes them to
+<code>course.events</code>, keyed by <code>sectionId</code>, so all changes to one section stay
+in order (<code>Topics.COURSE_EVENTS</code>, spec D6).</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Event (planned)</th><th>When</th><th>Who listens (planned)</th></tr></thead>
+<tbody>
+<tr><td><code>SectionChanged</code></td><td>Section created, capacity changed (REG-9), lecturer changed, section opened/closed/cancelled</td>
+    <td><code>registration</code> (updates <code>section_seats</code>, C5), <code>timetable</code>, <code>grade</code> (who is the lecturer)</td></tr>
+<tr><td><code>ScheduleChanged</code></td><td>Slots assigned (TT-5), one class cancelled or moved (TT-4)</td>
+    <td><code>timetable</code> (TT-1, TT-3), <code>notification</code> (TT-2: "your class moved")</td></tr>
+</tbody></table></div>
+<pre data-file="Planned payload record (the envelope is DomainEvent from shared-kernel)"><code>public record SectionChanged(
+        SectionId sectionId,      <span class="c">// the Kafka key for course.events (Topics reads this field)</span>
+        CourseId courseId,
+        String courseCode,        <span class="c">// a few facts consumers need, so they don't call back</span>
+        SemesterId semesterId,
+        UUID lecturerId,
+        int capacity,
+        String status,
+        long version) { }         <span class="c">// consumers keep only the newest version</span></code></pre>
+<p>Notice the payload carries the section's <strong>whole public state</strong>, not only "the
+capacity went from 60 to 80". Consumers can then simply "save the latest version". This is
+easier to make idempotent than a delta like "+20". It still carries ids and facts only, never
+the full entity with its internal parts (platform rule).</p>
+
+<h3>Public API vs internal</h3>
+<p>In <code>core-app</code>, the module's package root <code>edu.campus.course</code> is its
+<strong>public API</strong>. Anything in <code>edu.campus.course.internal</code> is private, and
+Spring Modulith's <code>verify()</code> fails the build if another module imports it
+(<a href="06-spring-modulith.html">lesson 06</a>).</p>
+<pre class="diagram">edu.campus.course                     ← public: other core-app modules may use these
+├── SectionId, CourseId, SemesterId, RoomId    (typed ids)
+├── SectionChanged, ScheduleChanged            (event payloads)
+├── CourseCatalog                              (a small read interface, if needed)
+└── internal/                         ← private: only course uses these
+    ├── Section, Meeting, WeeklySlot, Course, Room
+    ├── SectionService, SectionRepository
+    └── web/SectionController</pre>
+<p>Keep the public API <strong>small</strong>. Every public type is a promise you must keep.
+And remember: <code>registration-service</code> is a <strong>separate app</strong>. It cannot
+call any Java method in <code>core-app</code>. It only sees <code>course.events</code> on Kafka.
+How the event classes are shared with it (a small contract library, or each consumer keeping its
+own copy of the JSON shape) is a question for the course spec.</p>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Typed id base</td><td><code>backend/shared-kernel/.../kernel/id/TypedId.java</code>, <code>Ids.java</code></td><td>exists (T5)</td></tr>
+<tr><td>Half-open time range + overlap</td><td><code>backend/shared-kernel/.../kernel/time/TimeRange.java</code></td><td>exists (T5)</td></tr>
+<tr><td>Value object example</td><td><code>backend/shared-kernel/.../kernel/money/Money.java</code></td><td>exists (T5)</td></tr>
+<tr><td>Event envelope, topic keys</td><td><code>.../kernel/event/DomainEvent.java</code>, <code>Topics.java</code></td><td>exists (T5)</td></tr>
+<tr><td>Error codes</td><td><code>.../kernel/error/ProblemCode.java</code>, <code>CampusProblem.java</code></td><td>exists (T5, T8)</td></tr>
+<tr><td><code>course</code> schema</td><td>created by <code>infra/postgres/init/01-schemas-and-users.sh</code>, owned by <code>core_app</code></td><td>exists, empty</td></tr>
+<tr><td>Course aggregates, services, controllers</td><td><code>backend/core-app/src/main/java/edu/campus/course/</code></td><td>planned (module 4)</td></tr>
+<tr><td>Migrations with the exclusion constraint</td><td><code>backend/core-app/src/main/resources/db/migration/course/</code></td><td>planned</td></tr>
+<tr><td>Decisions C4, C10, C17</td><td><code>CAPABILITY-MAP.md</code></td><td>approved</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Public setters on aggregates.</strong> <code>setCapacity(int)</code> lets anyone skip
+      the rules. Use intention-revealing methods like <code>changeCapacity</code>.</li>
+  <li><strong>Validating only in the controller.</strong> Bean Validation on a request DTO is
+      good for "field is missing", but the invariants must live in the model, or a Kafka
+      consumer or batch job will bypass them.</li>
+  <li><strong>Huge aggregates.</strong> Putting all sections inside <code>Course</code> means
+      every capacity change locks and loads the whole course.</li>
+  <li><strong>Trusting the Java clash check alone.</strong> Without the exclusion constraint,
+      two admins can still double-book a room.</li>
+  <li><strong>Using the server's time zone.</strong> Use <code>Asia/Ho_Chi_Minh</code> explicitly
+      when turning "Monday 07:30" into an <code>Instant</code>.</li>
+  <li><strong>Adding <code>enrolled_count</code> back to course "just for display".</strong> That
+      breaks C17. Ask <code>registration</code> for seat counts.</li>
+  <li><strong>Event names in the present or imperative tense</strong>
+      (<code>UpdateSection</code>). Events are facts: past tense.</li>
+  <li><strong>Calling <code>Instant.now()</code> inside the model.</strong> Pass <code>now</code>
+      in from an injected <code>Clock</code>.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Read <code>TimeRange.java</code> and its test
+      <code>backend/shared-kernel/src/test/java/edu/campus/kernel/time/TimeRangeTest.java</code>.
+      Write down three pairs of ranges: one that overlaps, one that touches, one far apart. Check
+      your answers by running the tests:</p>
+<pre><code>.\mvnw.cmd -pl backend/shared-kernel test</code></pre></li>
+  <li><p>On paper, write a <code>Course</code> aggregate with a method
+      <code>addPrerequisite(CourseId other)</code>. Which rule can it check alone (not itself)?
+      Which rule needs other courses (no cycles), and where would that check live?</p></li>
+  <li><p>In a scratch database (not a migration), try the exclusion constraint:</p>
+<pre><code>docker compose -f infra/docker-compose.yml exec postgres psql -U postgres -d postgres
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE TABLE demo (room UUID, during TSTZRANGE,
+  EXCLUDE USING gist (room WITH =, during WITH &amp;&amp;));
+INSERT INTO demo VALUES ('00000000-0000-0000-0000-000000000001', '[2027-01-04 07:30+07, 2027-01-04 09:30+07)');
+INSERT INTO demo VALUES ('00000000-0000-0000-0000-000000000001', '[2027-01-04 09:30+07, 2027-01-04 11:30+07)');  -- works: touching
+INSERT INTO demo VALUES ('00000000-0000-0000-0000-000000000001', '[2027-01-04 08:00+07, 2027-01-04 10:00+07)');  -- fails: 23P01
+DROP TABLE demo;</code></pre>
+      <p>(The admin user name comes from <code>infra/.env</code>.)</p></li>
+  <li><p>Design the same rule for lecturers: "a lecturer cannot teach two meetings at the same
+      time". What column and constraint would you add? What should happen to cancelled meetings?</p></li>
+  <li><p>Write the fields of a <code>ScheduleChanged</code> payload that lets
+      <code>notification</code> send "Your class CS101 on Mon 1 Feb is cancelled" without
+      calling <code>course</code>.</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Domain</td><td>The real-world area the software is about (here: a university).</td></tr>
+<tr><td>Ubiquitous language</td><td>One set of words used by everyone, in talk and in code.</td></tr>
+<tr><td>Entity</td><td>An object with a lasting identity (a section stays the same section).</td></tr>
+<tr><td>Value object</td><td>An object defined only by its values, never changed, often a record.</td></tr>
+<tr><td>Aggregate</td><td>A group of objects saved and checked together, entered only through its root.</td></tr>
+<tr><td>Invariant</td><td>A rule that must always be true.</td></tr>
+<tr><td>Anemic model</td><td>Classes with data only; the rules are somewhere else.</td></tr>
+<tr><td>Rich model</td><td>Classes whose methods protect their own rules.</td></tr>
+<tr><td>Exclusion constraint</td><td>A PostgreSQL rule: no two rows where an operator (like overlap) is true.</td></tr>
+<tr><td>Half-open range</td><td>A range that includes its start but not its end: <code>[start, end)</code>.</td></tr>
+<tr><td>Optimistic locking</td><td>Update only if the <code>version</code> did not change since you read it.</td></tr>
+<tr><td>Domain event</td><td>A past-tense fact, like <code>SectionChanged</code>, sent to other modules.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why is <code>WeeklySlot</code> a value object but <code>Section</code> an entity?</summary>
+    <p>A section keeps its identity while its capacity or lecturer changes; other modules refer
+    to it by id. A slot is just "Monday 07:30–09:30 in B4-201": two slots with the same values
+    are the same thing, and to change one you replace it.</p></details>
+  <details><summary>2. Why check invariants in the constructor and methods instead of in the controller?</summary>
+    <p>Because the controller is only one way in. Kafka consumers, jobs, imports and future
+    endpoints also change sections. If the class itself refuses bad states, no path can create
+    one.</p></details>
+  <details><summary>3. Why do we need the exclusion constraint if the Java code already checks for clashes?</summary>
+    <p>The Java check reads, then writes. Two transactions can both read "free" before either
+    writes (check-then-act race). The database constraint is checked at write time, with
+    proper locking inside PostgreSQL, so the second booking always fails.</p></details>
+  <details><summary>4. Why can't the <code>Section</code> aggregate stop an admin from lowering capacity below the number of enrolled students?</summary>
+    <p>Because, by decision C17, <code>course</code> does not store how many students are
+    enrolled. That number belongs to <code>registration</code>. A rule can only live where its
+    data lives, so this rule must be handled by <code>registration</code> or by asking it.</p></details>
+  <details><summary>5. Why does <code>SectionChanged</code> carry the full public state and a <code>version</code>, not only the changed field?</summary>
+    <p>Consumers can then just keep the newest version. Repeats and old events are easy to
+    ignore (compare versions), and a replay rebuilds the same result. A delta like "+20 seats"
+    applied twice would be wrong.</p></details>
+  <details><summary>6. Why must the time zone be explicit when making meetings from weekly slots?</summary>
+    <p>"Monday 07:30" means 07:30 in Vietnam. A server running in UTC would otherwise create
+    meetings seven hours off, and the clash checks and timetables would all be wrong.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://martinfowler.com/bliki/DDD_Aggregate.html">Martin Fowler: DDD Aggregate</a>: a short, clear definition.</li>
+  <li><a href="https://martinfowler.com/bliki/AnemicDomainModel.html">Martin Fowler: Anemic Domain Model</a>: why data-only classes cause trouble.</li>
+  <li><a href="https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-EXCLUSION">PostgreSQL docs: Exclusion constraints</a> and <a href="https://www.postgresql.org/docs/current/rangetypes.html">Range types</a>.</li>
+  <li><a href="https://www.postgresql.org/docs/current/btree-gist.html">PostgreSQL docs: btree_gist</a>: why <code>=</code> on a UUID can join a GiST index.</li>
+  <li><a href="https://docs.spring.io/spring-modulith/reference/fundamentals.html">Spring Modulith reference: Fundamentals</a>: module API and internal packages.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/language/records.html">Java 21 docs: Record classes</a>: compact constructors for value objects.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduled Jobs and Feeds</title>
+<meta name="description" content="Smart Campus lesson 25: @Scheduled jobs with many replicas, scheduled publish, audience targeting, feed ordering, keyset pagination and read counts.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="25">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 25 · Part 2: Feature modules</div>
+<h1>Scheduled jobs and targeted feeds</h1>
+<p class="lede">Some work must happen "at 8:00 tomorrow" or "every night", even with three copies
+of the app running. And every student should see only the announcements meant for them, in a
+sensible order, fast. This lesson covers both.</p>
+
+<div class="meta">
+  <span class="badge module">announcement</span>
+  <span class="badge module">lostfound (archive job)</span>
+  <span class="badge task">ANN-1, 2, 3, 5, 6</span>
+  <span class="badge task">LF-6</span>
+  <span class="badge time">~70 min</span>
+  <span class="badge level">Planned module</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="04-postgres-flyway.html">04 (PostgreSQL, transactions)</a>,
+  <a href="08-outbox-idempotency.html">08 (outbox)</a> and
+  <a href="22-read-models-cqrs.html">22 (read models)</a>. <code>SPEC-announcement.md</code> and
+  <code>SPEC-lostfound.md</code> are not written yet, so table and class names here are
+  <strong>planned</strong>.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#scheduled">@Scheduled: delay, rate, cron, zone</a></li>
+    <li><a href="#replicas">Many replicas: who runs the job?</a></li>
+    <li><a href="#safe-jobs">Idempotent jobs in chunks</a></li>
+    <li><a href="#publish">Scheduled publish</a></li>
+    <li><a href="#audience">Audience targeting</a></li>
+    <li><a href="#feed">Feed order and keyset pagination</a></li>
+    <li><a href="#reads">Read counts</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Story</th><th>Need</th><th>Tool in this lesson</th></tr></thead>
+<tbody>
+<tr><td>ANN-1</td><td>Faculty staff post to a faculty, a cohort or everyone</td><td>Audience targeting</td></tr>
+<tr><td>ANN-2</td><td>A lecturer posts to their own section</td><td>Targeting + ownership check</td></tr>
+<tr><td>ANN-3</td><td>A student sees a feed filtered to what is relevant</td><td>Feed query, ordering, pagination</td></tr>
+<tr><td>ANN-5</td><td>Schedule an announcement for later</td><td>A scheduled job + the outbox</td></tr>
+<tr><td>ANN-6</td><td>See how many students read an announcement</td><td>A reads table</td></tr>
+<tr><td>LF-6</td><td>Archive unclaimed lost-and-found items after 60 days</td><td>A nightly job in chunks</td></tr>
+</tbody></table></div>
+<p>The <code>announcement</code> module runs in <code>core-app</code>, owns schema
+<code>announcement</code>, and publishes <code>AnnouncementPublished</code> on
+<code>campus.events</code> (Architecture §4 and §6). Notification uses that event for urgent push
+messages (ANN-4, <a href="24-realtime-notifications.html">lesson 24</a>).</p>
+
+<h2 id="scheduled">2. @Scheduled: delay, rate, cron, zone</h2>
+<p>Spring can call a method on a timer. You switch it on with <code>@EnableScheduling</code>
+(our <code>platform-starter</code> already does this for the outbox retry job), then mark a method
+with <code>@Scheduled</code>. There are three kinds of timer:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Setting</th><th>Meaning</th><th>Use it for</th></tr></thead>
+<tbody>
+<tr><td><code>fixedDelay = "PT30S"</code></td><td>Wait 30 s <em>after the last run ended</em>, then run again</td><td>"Keep checking" jobs. Runs never overlap.</td></tr>
+<tr><td><code>fixedRate = "PT30S"</code></td><td>Start every 30 s, counted from the last <em>start</em></td><td>Measurements at a steady beat. A slow run can make runs pile up.</td></tr>
+<tr><td><code>cron = "0 0 2 * * *"</code></td><td>Run at clock times. Spring's cron has <strong>6 fields</strong>: second, minute, hour, day, month, weekday</td><td>"Every night at 02:00"</td></tr>
+</tbody></table></div>
+<p>A real example from our code, already built in platform task T8:</p>
+<pre data-file="backend/platform-starter/.../starter/outbox/OutboxRetryJob.java"><code><span class="k">@Scheduled</span>(
+        initialDelayString = "${campus.outbox.retry-interval}",
+        fixedDelayString = "${campus.outbox.retry-interval}")
+public void resubmitFailed() {
+    failed.resubmit(ResubmissionOptions.defaults());
+}</code></pre>
+
+<h3>Time zones</h3>
+<p>A cron like "02:00" needs a time zone. Without one, Spring uses the server's zone, and servers
+in containers are often on UTC. 02:00 UTC is 09:00 in Vietnam, in the middle of the school day.
+Always say the zone:</p>
+<pre data-file="lostfound archive job (planned)"><code><span class="k">@Scheduled</span>(cron = "0 0 2 * * *", zone = "Asia/Ho_Chi_Minh")   <span class="c">// 02:00 Vietnam time</span>
+void archiveOldItems() { … }</code></pre>
+<p>Inside the job, never call <code>Instant.now()</code>. Inject the app's <code>Clock</code>
+(<code>core-app/.../platform/ClockConfiguration.java</code>, which is UTC) and call
+<code>clock.instant()</code>. Tests can then use a fixed clock and say "it is now 61 days later".
+Store times as <code>TIMESTAMPTZ</code> (an exact moment). Turn "8:00 on Monday, Vietnam time"
+into an <code>Instant</code> when the user saves the form:</p>
+<pre><code>Instant publishAt = LocalDateTime.parse("2026-12-07T08:00")
+        .atZone(ZoneId.of("Asia/Ho_Chi_Minh"))
+        .toInstant();                                <span class="c">// 2026-12-07T01:00:00Z</span></code></pre>
+
+<h2 id="replicas">3. Many replicas: who runs the job?</h2>
+<p>In production, <code>core-app</code> runs with 2 to 4 replicas (Architecture §8). Each replica
+has its own timer. So at 02:00, <strong>every replica starts the same job</strong>. For the archive
+job that means three copies all updating the same rows; for a "send reminder" job it means three
+emails. Two standard fixes:</p>
+
+<div class="compare">
+  <div class="good"><h4>A lock: only one replica runs</h4>
+    <p><strong>ShedLock</strong> is a small library. Before the job starts, it tries to take a named
+    lock (a row in a <code>shedlock</code> table). Only the replica that gets it runs the job; the
+    others skip this round.</p>
+<pre><code><span class="k">@Scheduled</span>(cron = "0 0 2 * * *", zone = "Asia/Ho_Chi_Minh")
+<span class="k">@SchedulerLock</span>(name = "lostfound-archive",
+               lockAtMostFor = "PT30M")
+void archiveOldItems() { … }</code></pre>
+    <p><code>lockAtMostFor</code> frees the lock if the replica dies mid-job. It is a third-party
+    library, so check that its version supports our Spring Boot line before adding it (an "Ask
+    first" change).</p></div>
+  <div class="good"><h4>Row locks: all replicas share the work</h4>
+    <p>Each replica takes a batch of rows with
+    <code>SELECT … FOR UPDATE SKIP LOCKED</code>. <code>FOR UPDATE</code> locks the rows it picked;
+    <code>SKIP LOCKED</code> means "if another replica already locked a row, skip it, do not wait".
+    So two replicas never take the same row.</p>
+<pre><code>SELECT id FROM announcement.announcements
+WHERE status = 'SCHEDULED' AND publish_at &lt;= :now
+ORDER BY publish_at
+LIMIT 100
+FOR UPDATE SKIP LOCKED;</code></pre>
+    <p>No extra library, and the work spreads over replicas. Needs one transaction per batch.</p></div>
+</div>
+<p>Rule of thumb: for "work through a queue of rows", use <code>SKIP LOCKED</code>. For "one global
+task" (build a nightly report), use a lock like ShedLock.</p>
+
+<h2 id="safe-jobs">4. Idempotent jobs in chunks</h2>
+<p>Even with a lock, a job can crash half-way, or run twice (a lock can expire while a very slow job
+is still running). So write every job so that <strong>running it again is harmless</strong>
+(idempotent, like the consumers in <a href="08-outbox-idempotency.html">lesson 08</a>):</p>
+<ul>
+  <li>Ask "which rows still need work?" every time (<code>WHERE status = 'OPEN' AND …</code>), never
+      "continue from row 5 000".</li>
+  <li>Change state with a condition: <code>UPDATE … SET status = 'ARCHIVED' WHERE id = ? AND status = 'OPEN'</code>.
+      Doing it twice changes nothing the second time.</li>
+  <li>Work in <strong>chunks</strong> (for example 500 rows per transaction). One huge transaction
+      holds locks for a long time, and a failure at the end throws away all the work.</li>
+</ul>
+<p>PostgreSQL's <code>UPDATE</code> has no <code>LIMIT</code>, so pick the chunk in a subquery:</p>
+<pre data-file="lostfound/internal/ArchiveJob.java (planned, LF-6)"><code><span class="k">@Component</span>
+class ArchiveJob {
+    private static final int CHUNK = 500;
+    private final JdbcClient jdbc;
+    private final TransactionTemplate tx;
+    private final Clock clock;
+
+    ArchiveJob(JdbcClient jdbc, TransactionTemplate tx, Clock clock) {
+        this.jdbc = jdbc;
+        this.tx = tx;
+        this.clock = clock;
+    }
+
+    <span class="k">@Scheduled</span>(cron = "0 0 2 * * *", zone = "Asia/Ho_Chi_Minh")
+    void archiveOldItems() {
+        Instant cutoff = clock.instant().minus(Duration.ofDays(60));
+        int changed;
+        do {
+            changed = tx.execute(status -&gt; jdbc.sql("""
+                    UPDATE lostfound.lost_found_items SET status = 'ARCHIVED'
+                    WHERE id IN (SELECT id FROM lostfound.lost_found_items
+                                 WHERE status = 'OPEN' AND created_at &lt; :cutoff
+                                 LIMIT :chunk FOR UPDATE SKIP LOCKED)
+                    """)
+                    .param("cutoff", Timestamp.from(cutoff))
+                    .param("chunk", CHUNK)
+                    .update());
+        } while (changed == CHUNK);      <span class="c">// a smaller chunk means we are done</span>
+    }
+}</code></pre>
+<p>If the <code>search</code> module must hide archived items, the job also publishes an event per
+item (for example <code>ItemArchived</code>) through the outbox, in the same transaction. That is a
+decision for <code>SPEC-lostfound.md</code>.</p>
+
+<h2 id="publish">5. Scheduled publish (ANN-5)</h2>
+<p>A post can be saved now and go live later. Store the wish, and let a job make it happen:</p>
+<pre data-file="announcement/V…__announcements.sql (planned sketch)"><code>CREATE TABLE announcement.announcements (
+    id           UUID PRIMARY KEY,
+    author_id    UUID NOT NULL,                   <span class="c">-- bare UUID, no FK to identity (C4)</span>
+    title        TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    urgent       BOOLEAN NOT NULL DEFAULT false,  <span class="c">-- ANN-4: push it</span>
+    target_type  TEXT NOT NULL,                   <span class="c">-- ALL, FACULTY, COHORT, SECTION</span>
+    target_key   TEXT,                            <span class="c">-- faculty id, cohort code or section id; NULL for ALL</span>
+    status       TEXT NOT NULL,                   <span class="c">-- DRAFT, SCHEDULED, PUBLISHED</span>
+    publish_at   TIMESTAMPTZ,                     <span class="c">-- when it should go live</span>
+    published_at TIMESTAMPTZ,                     <span class="c">-- when it really went live</span>
+    created_at   TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX ON announcement.announcements (publish_at) WHERE status = 'SCHEDULED';</code></pre>
+<p>The last line is a <strong>partial index</strong>: it only contains scheduled rows, so it stays
+tiny and the job's query is fast.</p>
+
+<pre data-file="announcement/internal/PublishDueJob.java (planned)"><code><span class="k">@Scheduled</span>(fixedDelay = 30, timeUnit = TimeUnit.SECONDS)
+void publishDue() {
+    boolean more;
+    do {
+        more = tx.execute(status -&gt; {
+            Instant now = clock.instant();
+            List&lt;Announcement&gt; due = repository.lockDue(now, 100);   <span class="c">// FOR UPDATE SKIP LOCKED</span>
+            for (Announcement a : due) {
+                repository.markPublished(a.id(), now);             <span class="c">// WHERE status = 'SCHEDULED'</span>
+                events.publishEvent(AnnouncementEvents.published(a, now));  <span class="c">// outbox row, same tx</span>
+            }
+            return due.size() == 100;
+        });
+    } while (more);
+}</code></pre>
+<p>Why this is safe: the status change and the outbox row commit together, so the event goes out
+<strong>if and only if</strong> the post became <code>PUBLISHED</code>. If two replicas run at the
+same second, <code>SKIP LOCKED</code> gives them different rows. A post may go live up to 30 seconds
+late; that is acceptable for announcements.</p>
+<div class="callout tip">
+  <span class="title">Why not a timer per post?</span>
+  You could schedule one in-memory timer for each post. But timers vanish when the app restarts, and
+  every replica would have its own. A row in the database survives restarts and is shared.
+</div>
+
+<h2 id="audience">6. Audience targeting (ANN-1, ANN-2)</h2>
+<p>The Plan stores one target per post: <code>target_type</code> (ALL / FACULTY / COHORT / SECTION)
+and a <code>target_id</code>. A cohort is a code like "K2024", not a UUID, so the sketch above uses
+a text <code>target_key</code>. The feed needs to know, for the current user:</p>
+<ul>
+  <li>their <strong>faculty</strong> and <strong>cohort</strong>: from the user's profile
+      (the <code>identity</code> module's public API, or claims in the JWT; decided in
+      <code>SPEC-identity.md</code>),</li>
+  <li>their <strong>sections</strong>: the announcement module may not read
+      <code>registration</code>'s tables (no cross-schema access, D3). So it keeps a small local
+      copy, built from <code>EnrollmentConfirmed</code> / <code>EnrollmentDropped</code> events on
+      Kafka: a read model (<a href="22-read-models-cqrs.html">lesson 22</a>).</li>
+</ul>
+<p>There are two classic ways to build a feed:</p>
+<div class="compare">
+  <div class="good"><h4>Fan-out on read</h4>
+    <p>Store each post once. When a student opens the feed, ask "posts whose target matches me".
+    Cheap to post, a bit more work per read. Good for our size.</p></div>
+  <div class="poor"><h4>Fan-out on write</h4>
+    <p>When a post goes live, insert one row per recipient into a <code>feed_items</code> table.
+    Very fast reads, but posting to "all" writes tens of thousands of rows, and new students do not
+    see old posts. Usually used by very large social networks.</p></div>
+</div>
+<pre data-file="the feed query, fan-out on read (planned sketch)"><code>SELECT a.id, a.title, a.urgent, a.published_at, a.target_type
+FROM announcement.announcements a
+WHERE a.status = 'PUBLISHED'
+  AND (   a.target_type = 'ALL'
+       OR (a.target_type = 'FACULTY' AND a.target_key = :facultyId)
+       OR (a.target_type = 'COHORT'  AND a.target_key = :cohort)
+       OR (a.target_type = 'SECTION' AND a.target_key = ANY(:mySectionIds)))
+ORDER BY …                                         <span class="c">-- next section</span>
+LIMIT 20;</code></pre>
+<p>An index on <code>(target_type, target_key, published_at DESC)</code> helps each branch. For
+ANN-2, the server must also check that the lecturer <em>teaches</em> that section before saving.
+Never trust the section id from the form alone.</p>
+
+<h2 id="feed">7. Feed order and keyset pagination (ANN-3)</h2>
+<h3>Ordering by relevance</h3>
+<p>"Relevant to me" can be a simple, explainable rule. For example: urgent first; then the more
+specific the target, the higher (my section &gt; my cohort &gt; my faculty &gt; everyone); then
+newest first. Turn it into a number in SQL:</p>
+<pre><code>ORDER BY a.urgent DESC,
+         CASE a.target_type WHEN 'SECTION' THEN 3 WHEN 'COHORT' THEN 2
+                            WHEN 'FACULTY' THEN 1 ELSE 0 END DESC,
+         a.published_at DESC,
+         a.id DESC                                  <span class="c">-- tie-breaker: makes the order total</span></code></pre>
+<p>The last column matters: two posts can have the same time. Without a unique tie-breaker, the
+order between them can change between two requests, and pages repeat or skip rows.</p>
+<p>A purely "rank by score" feed can bury new posts under old urgent ones. Many feeds only keep
+"urgent" on top for a few days. Decide the exact rule in the spec, and write a test for it.</p>
+
+<h3>Offset vs keyset pagination</h3>
+<div class="compare">
+  <div class="poor"><h4>Offset (<code>?page=3&amp;size=20</code>)</h4>
+    <p><code>LIMIT 20 OFFSET 60</code>. Easy, and you can jump to page 50. But the database still
+    reads and throws away the first 60 rows, so deep pages are slow. And when a new post arrives
+    while you scroll, every row moves down one place: you see one post twice.</p></div>
+  <div class="good"><h4>Keyset, also called cursor (<code>?after=…</code>)</h4>
+    <p>Remember the sort values of the last row you showed, and ask for rows "after" it. The index
+    jumps straight there, so page 50 is as fast as page 1. New posts at the top do not shift
+    anything. But you cannot jump to "page 50".</p></div>
+</div>
+<p>For a simple newest-first feed, keyset looks like this. PostgreSQL compares the two values
+together (a <strong>row comparison</strong>):</p>
+<pre><code>WHERE (a.published_at, a.id) &lt; (:lastPublishedAt, :lastId)
+ORDER BY a.published_at DESC, a.id DESC
+LIMIT 20</code></pre>
+<p>The client gets an opaque <strong>cursor</strong> (for example Base64 of those two values) and
+sends it back as <code>?after=…</code>. With the relevance order above, the cursor holds all four
+sort values. Because <code>urgent</code> and the rank are sorted the same direction (DESC) as the
+rest, one row comparison still works.</p>
+<div class="callout warn">
+  <span class="title">Project rule</span>
+  The Architecture's API conventions use <code>?page=0&amp;size=20</code> with
+  <code>content</code>, <code>page</code> and <code>totalElements</code>. A feed with a cursor is a
+  deliberate exception. Write it down in <code>SPEC-announcement.md</code> and ask before using it.
+</div>
+
+<h2 id="reads">8. Read counts (ANN-6)</h2>
+<p>Resolution <strong>C10</strong> lists "announcement reads (ANN-6)" as a table the module spec
+must design. The usual shape is one row per (announcement, user):</p>
+<pre data-file="announcement/V…__reads.sql (planned sketch)"><code>CREATE TABLE announcement.announcement_reads (
+    announcement_id UUID NOT NULL REFERENCES announcement.announcements(id),  <span class="c">-- same schema: FK allowed</span>
+    user_id         UUID NOT NULL,
+    read_at         TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (announcement_id, user_id)          <span class="c">-- one read per person, ever</span>
+);</code></pre>
+<pre data-file="marking as read (idempotent)"><code>INSERT INTO announcement.announcement_reads (announcement_id, user_id, read_at)
+VALUES (:announcementId, :userId, :now)
+ON CONFLICT DO NOTHING;</code></pre>
+<p>The browser can call this many times (every time the post scrolls into view). The primary key
+makes repeats harmless.</p>
+<p>Counting:</p>
+<ul>
+  <li><code>SELECT count(*) … WHERE announcement_id = ?</code> uses the primary key index, because
+      <code>announcement_id</code> is its first column. Fine for a few thousand rows.</li>
+  <li>For very popular posts, keep a <code>read_count</code> column on the announcement and add 1
+      <strong>only when the insert really inserted a row</strong> (the insert returns
+      "1 row"; a conflict returns "0"), in the same transaction. Then the counter never counts one
+      person twice.</li>
+  <li>"312 of 450 students read it" also needs the <strong>audience size</strong>. For a section
+      that comes from the local enrollment copy; for a faculty or cohort, from identity data.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td><code>@EnableScheduling</code> + a real <code>@Scheduled</code> job</td><td><code>backend/platform-starter/.../starter/outbox/OutboxAutoConfiguration.java</code>, <code>OutboxRetryJob.java</code></td><td>Exists (T8)</td></tr>
+<tr><td>The one <code>Clock</code> (UTC)</td><td><code>backend/core-app/.../platform/ClockConfiguration.java</code></td><td>Exists</td></tr>
+<tr><td>Schemas <code>announcement</code>, <code>lostfound</code></td><td><code>infra/postgres/init/01-schemas-and-users.sh</code></td><td>Exists</td></tr>
+<tr><td>Announcements, targeting, scheduled publish, reads</td><td><code>core-app/.../announcement/</code>, <code>SPEC-announcement.md</code></td><td>Planned (module 9)</td></tr>
+<tr><td><code>AnnouncementPublished</code> on <code>campus.events</code></td><td><code>Topics.CAMPUS_EVENTS</code> in shared-kernel</td><td>Topic exists, event planned</td></tr>
+<tr><td>60-day archive job (LF-6)</td><td><code>core-app/.../lostfound/</code></td><td>Planned (module 13)</td></tr>
+<tr><td>Job lock strategy (ShedLock or SKIP LOCKED)</td><td>Each module's spec</td><td>Planned</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>A cron with no zone.</strong> The job runs at the wrong hour in a UTC container.</li>
+  <li><strong>Forgetting that every replica runs <code>@Scheduled</code>.</strong> Use a lock or
+      <code>SKIP LOCKED</code>.</li>
+  <li><strong>Calling <code>Instant.now()</code></strong> in jobs. Tests cannot move time. Use the
+      injected <code>Clock</code>.</li>
+  <li><strong>Publishing the event outside the status-change transaction.</strong> Then an event
+      can go out for a post that is not published, or the other way round.</li>
+  <li><strong>One giant transaction</strong> for the whole archive. Work in chunks.</li>
+  <li><strong>No tie-breaker in <code>ORDER BY</code></strong>. Pages repeat or skip rows.</li>
+  <li><strong>Counting reads with <code>read_count = read_count + 1</code> on every view.</strong>
+      One student scrolling twice counts twice.</li>
+  <li><strong>Trusting the target from the form.</strong> Check that a lecturer owns the section.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Read <code>OutboxRetryJob.java</code> and <code>OutboxAutoConfiguration.java</code> in
+      <code>backend/platform-starter</code>. Is it <code>fixedDelay</code> or
+      <code>fixedRate</code>? Why is that the right choice for a retry job?</p></li>
+  <li><p>Write these as Spring cron strings (6 fields): every day 07:30; every Monday 08:00;
+      every 15 minutes. Then check them against the Spring reference.</p></li>
+  <li><p>In <code>psql</code>, open two terminals. In both, run <code>BEGIN;</code> and the same
+      <code>SELECT … LIMIT 2 FOR UPDATE SKIP LOCKED</code> on a small test table you create in your
+      own scratch database. See that the second terminal gets <em>different</em> rows.</p></li>
+  <li><p>In the same scratch database, create 100 000 fake posts. Compare
+      <code>EXPLAIN ANALYZE</code> for <code>OFFSET 90000 LIMIT 20</code> and for the keyset
+      query. Which one reads fewer rows?</p></li>
+  <li><p>On paper: design the cursor for the relevance feed. Which four values go in it? What
+      happens if a new urgent post arrives while a student is on page 3?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Cron expression</td><td>A short text that says at which clock times to run, like <code>0 0 2 * * *</code>.</td></tr>
+<tr><td>fixedDelay / fixedRate</td><td>Wait after the end of the last run / start at a steady beat.</td></tr>
+<tr><td>Replica</td><td>One running copy of the same app. Production has several.</td></tr>
+<tr><td>ShedLock</td><td>A library that lets only one replica run a scheduled job at a time.</td></tr>
+<tr><td><code>FOR UPDATE SKIP LOCKED</code></td><td>Lock the rows I pick; skip rows that someone else already locked.</td></tr>
+<tr><td>Chunk</td><td>A small batch of rows handled in one transaction.</td></tr>
+<tr><td>Partial index</td><td>An index that only contains rows matching a condition.</td></tr>
+<tr><td>Fan-out on read / write</td><td>Work out recipients when reading the feed / when posting.</td></tr>
+<tr><td>Offset pagination</td><td>"Skip N rows, then give me 20."</td></tr>
+<tr><td>Keyset (cursor) pagination</td><td>"Give me 20 rows that come after this one."</td></tr>
+<tr><td>Tie-breaker</td><td>A unique last sort column so the order is always the same.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why must the publish job write the status change and the event in one transaction?</summary>
+    <p>So that both happen or neither happens. If they were separate, a crash could leave a
+    published post with no event (notification never pushes it) or an event for a post that is
+    still scheduled.</p></details>
+  <details><summary>2. Three replicas run the 02:00 archive job. Why is it still correct with <code>SKIP LOCKED</code> and <code>WHERE status = 'OPEN'</code>?</summary>
+    <p><code>SKIP LOCKED</code> gives each replica different rows, and the status condition means a
+    row archived once is never picked again. The work is shared and nothing is done twice.</p></details>
+  <details><summary>3. Why does the cron need <code>zone = "Asia/Ho_Chi_Minh"</code>?</summary>
+    <p>Without it, Spring uses the server's zone. Containers often use UTC, which is 7 hours
+    behind Vietnam, so "02:00" would run at 09:00 local time.</p></details>
+  <details><summary>4. Why is keyset pagination better than offset for a live feed?</summary>
+    <p>It does not read and throw away earlier rows, so deep pages stay fast. And new posts at the
+    top do not shift the rows, so the student does not see duplicates while scrolling.</p></details>
+  <details><summary>5. Why does the feed keep its own copy of "my sections" instead of asking registration's tables?</summary>
+    <p>Modules may not read another schema (D3, ADR-6). The local copy is built from Kafka events,
+    can be rebuilt by replay, and keeps the feed working even if registration is busy.</p></details>
+  <details><summary>6. How does the reads table stop one student from being counted twice?</summary>
+    <p>Its primary key is (announcement_id, user_id). A second insert for the same pair is ignored
+    by <code>ON CONFLICT DO NOTHING</code>, and a counter is only increased when a row was really
+    inserted.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html">Spring Framework reference: Task execution and scheduling</a>: <code>@Scheduled</code>, cron format, zones.</li>
+  <li><a href="https://github.com/lukas-krecan/ShedLock">ShedLock on GitHub</a>: the official README.</li>
+  <li><a href="https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE">PostgreSQL docs: The locking clause</a>: <code>FOR UPDATE</code> and <code>SKIP LOCKED</code>.</li>
+  <li><a href="https://www.postgresql.org/docs/current/functions-comparisons.html#ROW-WISE-COMPARISON">PostgreSQL docs: Row constructor comparison</a>: the keyset trick.</li>
+  <li><a href="https://www.postgresql.org/docs/current/indexes-partial.html">PostgreSQL docs: Partial indexes</a>.</li>
+  <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/Clock.html">Java 21 API: <code>Clock</code></a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

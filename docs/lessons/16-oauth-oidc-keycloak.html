@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OAuth and Keycloak</title>
+<meta name="description" content="Smart Campus lesson 16: OAuth 2, OpenID Connect, the Authorization Code + PKCE flow, JWTs and Keycloak for the identity module.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="16">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 16 · Part 2: Feature modules</div>
+<h1>OAuth 2, OpenID Connect and Keycloak</h1>
+<p class="lede">One login for every Smart Campus module. How does the browser get a token from
+Keycloak, what is inside that token, and how can a service trust it without asking Keycloak every
+time? This lesson gives you the words and the flow you need for the <code>identity</code> module.</p>
+
+<div class="meta">
+  <span class="badge module">identity</span>
+  <span class="badge task">AUTH-1</span>
+  <span class="badge task">AUTH-2</span>
+  <span class="badge task">AUTH-3</span>
+  <span class="badge task">AUTH-4</span>
+  <span class="badge task">AUTH-6</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="09-rest-problem-openapi.html">09 (REST and problem JSON)</a> and
+  <a href="11-gateway-rate-limit.html">11 (the API gateway)</a>. You should know what an HTTP header
+  is and what a redirect (status 302) does.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  The <code>identity</code> module has no spec yet (<code>SPEC-identity.md</code> comes after
+  platform's Checkpoint E). Names like the realm <code>campus</code>, the client
+  <code>campus-web</code> and the audience <code>campus-api</code> are <strong>examples</strong>.
+  The spec will fix the real names.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Who are you, and what may you do?</a></li>
+    <li><a href="#oauth-oidc">OAuth 2 roles and what OIDC adds</a></li>
+    <li><a href="#pkce">Authorization Code + PKCE, step by step</a></li>
+    <li><a href="#tokens">Three tokens and the JWT inside</a></li>
+    <li><a href="#jwks">Checking a signature with JWKS</a></li>
+    <li><a href="#keycloak">Keycloak: realm, clients, roles</a></li>
+    <li><a href="#sis">Accounts from the SIS (AUTH-3, AUTH-4)</a></li>
+    <li><a href="#logout">Global logout (AUTH-6)</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Who are you, and what may you do?</h2>
+<p>Story <strong>AUTH-1</strong> says: "As a student, I want to log in once with my university
+account, so that I use every module without logging in again." Smart Campus has many modules
+(timetable, registration, grades, clubs, marketplace…) and 4 backend apps. We do not want each one
+to have its own password page. So we use one <strong>identity provider</strong>: a separate server
+whose only job is to check who people are. In Smart Campus this is <strong>Keycloak 26</strong>
+(Arch ADR-2). It already runs in Compose at <code>http://localhost:8180</code>, still empty.</p>
+
+<p>Two questions are always asked, and they are different:</p>
+<div class="compare">
+  <div class="good"><h4>Authentication (AuthN)</h4>
+    <p><strong>"Who are you?"</strong> Like the hotel reception checking your passport. Keycloak
+    does this: it checks the password (or another factor) and says "this is student
+    SV2026001".</p></div>
+  <div class="good"><h4>Authorization (AuthZ)</h4>
+    <p><strong>"What may you do?"</strong> Like the key card that opens only your room. Our
+    services do this: "a STUDENT may read <em>their own</em> grades, a LECTURER may enter grades
+    for <em>their own</em> sections".</p></div>
+</div>
+<p>Keycloak answers the first question and gives us <strong>facts</strong> for the second (the
+roles). The final "yes or no" is always made in our own code (<a href="17-spring-security.html">lesson 17</a>).</p>
+
+<h2 id="oauth-oidc">2. OAuth 2 roles and what OIDC adds</h2>
+<p><strong>OAuth 2</strong> (RFC 6749) is a standard for one thing: letting an app get a
+<strong>token</strong> (a digital pass) so it can call an API for a user, without ever seeing the
+user's password. OAuth 2 names four roles. Here they are in Smart Campus:</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>OAuth 2 role</th><th>Meaning</th><th>In Smart Campus</th></tr></thead>
+<tbody>
+<tr><td>Resource owner</td><td>The person who owns the data</td><td>The student or lecturer</td></tr>
+<tr><td>Client</td><td>The app that wants to call the API</td><td>The React web app in <code>frontend/web</code> (planned client <code>campus-web</code>)</td></tr>
+<tr><td>Authorization server</td><td>Checks the user and gives out tokens</td><td>Keycloak (<code>:8180</code>)</td></tr>
+<tr><td>Resource server</td><td>The API that accepts tokens</td><td>The gateway, <code>core-app</code>, <code>registration-service</code>, <code>notification-service</code></td></tr>
+</tbody></table></div>
+
+<p>OAuth 2 alone is about <em>access</em>. It does not say how the client learns
+<em>who</em> logged in. <strong>OpenID Connect (OIDC)</strong> is a thin layer on top of OAuth 2
+that adds exactly this. It adds three things:</p>
+<ul>
+  <li><strong>ID token</strong>: a token <em>for the client</em> that says who logged in, when,
+      and how. The web app reads it to show "Hello, An".</li>
+  <li><strong>UserInfo endpoint</strong>: a URL where the client can ask for more profile facts
+      (name, email) with the access token.</li>
+  <li><strong>Discovery</strong>: one well-known URL that lists every other URL and setting. A
+      library only needs the <em>issuer</em> URL and finds the rest itself.</li>
+</ul>
+<p>You turn OIDC on by asking for the scope <code>openid</code>. A <strong>scope</strong> is a
+word the client sends to say what it wants (<code>openid profile email</code>).</p>
+
+<pre data-file="Discovery: ask Keycloak for its settings (try it once the realm exists)"><code>curl -s http://localhost:8180/realms/campus/.well-known/openid-configuration
+
+{
+  "issuer": "http://localhost:8180/realms/campus",
+  "authorization_endpoint": "http://localhost:8180/realms/campus/protocol/openid-connect/auth",
+  "token_endpoint":         "http://localhost:8180/realms/campus/protocol/openid-connect/token",
+  "jwks_uri":               "http://localhost:8180/realms/campus/protocol/openid-connect/certs",
+  "end_session_endpoint":   "http://localhost:8180/realms/campus/protocol/openid-connect/logout",
+  "code_challenge_methods_supported": ["plain", "S256"],
+  …
+}</code></pre>
+
+<h2 id="pkce">3. Authorization Code + PKCE, step by step</h2>
+<p>A <strong>flow</strong> (OAuth calls it a <em>grant</em>) is the dance of redirects and
+requests that ends with a token. The Arch (§5, "SSO login") uses the <strong>Authorization Code
+flow with PKCE</strong>. PKCE (say "pixie", RFC 7636) means "Proof Key for Code Exchange".</p>
+
+<div class="flow">
+  <div class="box project"><b>1. Web app</b>Makes a secret <code>code_verifier</code> and its hash, the <code>code_challenge</code></div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>2. Redirect to Keycloak</b>Sends the challenge, never the verifier</div>
+  <div class="arrow">→</div>
+  <div class="box accent"><b>3. Student logs in</b>On Keycloak's page, not ours</div>
+  <div class="arrow">→</div>
+  <div class="box project"><b>4. Back with a code</b>A one-time code in the URL</div>
+  <div class="arrow">→</div>
+  <div class="box ok"><b>5. Code + verifier → tokens</b>Keycloak hashes the verifier and compares</div>
+</div>
+
+<h3>Step 1: the verifier and the challenge</h3>
+<p>The <code>code_verifier</code> is a long random string (43 to 128 characters). The
+<code>code_challenge</code> is its SHA-256 hash, written in base64url. The method name for
+this is <code>S256</code>. A hash works in one direction only: from the challenge, nobody can
+compute the verifier. Your library does this for you. This code only shows the idea:</p>
+<pre data-file="The idea in TypeScript (a real OIDC library does this for you)"><code>function base64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));   <span class="c">// 43 random chars, kept in memory</span>
+const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+const challenge = base64url(new Uint8Array(hash));                          <span class="c">// sent to Keycloak</span></code></pre>
+
+<h3>Step 2: the redirect</h3>
+<pre data-file="The browser is sent to Keycloak (one line in reality)"><code>GET http://localhost:8180/realms/campus/protocol/openid-connect/auth
+    ?client_id=campus-web
+    &amp;response_type=code                         <span class="c">// "give me a code", not a token</span>
+    &amp;scope=openid profile email
+    &amp;redirect_uri=http://localhost:5173/auth/callback
+    &amp;state=Zk3q…                                <span class="c">// random; checked on return (stops fake callbacks)</span>
+    &amp;code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+    &amp;code_challenge_method=S256</code></pre>
+
+<h3>Steps 3 to 5: login, code, exchange</h3>
+<p>The student types the password <strong>on Keycloak's page</strong>. Our web app never sees
+it. Keycloak redirects back to <code>/auth/callback?code=…&amp;state=…</code>. The app checks
+that <code>state</code> is the value it sent, then swaps the code for tokens:</p>
+<pre data-file="Token request (made by the library with fetch)"><code>POST http://localhost:8180/realms/campus/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&amp;code=6c1b…                                     <span class="c">// one-time, valid for a short time</span>
+&amp;redirect_uri=http://localhost:5173/auth/callback
+&amp;client_id=campus-web
+&amp;code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk   <span class="c">// the secret from step 1</span>
+
+→ 200 { "access_token": "eyJ…", "id_token": "eyJ…", "refresh_token": "eyJ…", "expires_in": 300 }</code></pre>
+<p>Keycloak hashes the verifier and compares it with the challenge from step 2. Only the app that
+started the login knows the verifier. So if an attacker steals the code (from browser history,
+a log, or a bad browser extension), the code is useless to them.</p>
+
+<h3>Why the implicit flow is gone</h3>
+<p>Old single-page apps used the <strong>implicit flow</strong>: Keycloak put the access token
+directly in the redirect URL (<code>#access_token=…</code>). Tokens in URLs leak into history,
+logs and <code>Referer</code> headers, and nothing proves who receives them. The OAuth security
+best practice (RFC 9700) says: do not use the implicit flow; use the code flow with PKCE, also for
+browser apps. The Resource Owner Password flow (the app collects the password itself) is also
+not allowed. In Keycloak we switch both off for <code>campus-web</code>.</p>
+
+<h3>Public vs confidential clients</h3>
+<div class="compare">
+  <div class="poor"><h4>Public client</h4>
+    <p>Runs where it <strong>cannot keep a secret</strong>: in the browser, anyone can read the
+    JavaScript. It has no client secret. PKCE protects it. <strong>Smart Campus:</strong>
+    <code>campus-web</code> (planned).</p></div>
+  <div class="good"><h4>Confidential client</h4>
+    <p>Runs on a server and <strong>can keep a secret</strong> (from a Kubernetes Secret or
+    <code>.env</code>). <strong>Smart Campus:</strong> a planned client for the SIS import job,
+    which calls Keycloak's admin API with its own service account (section 7).</p></div>
+</div>
+<p>The backend apps are <strong>not clients</strong> for user login. They are resource servers: they
+only <em>check</em> tokens. Because Smart Campus is web only (map assumption 3), the user login
+needs just one client: the web app.</p>
+
+<h2 id="tokens">4. Three tokens and the JWT inside</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Token</th><th>Who reads it</th><th>Purpose</th><th>Lifetime in Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><strong>Access token</strong></td><td>Our APIs (gateway and services)</td><td>"The bearer may call the API as this user." Sent as <code>Authorization: Bearer …</code></td><td>5 minutes (Arch §5)</td></tr>
+<tr><td><strong>Refresh token</strong></td><td>Only Keycloak</td><td>Get a new access token without logging in again</td><td>Tied to the Keycloak session (realm settings)</td></tr>
+<tr><td><strong>ID token</strong></td><td>Only the web app</td><td>"Who logged in": name, login time. Also used as a hint at logout</td><td>Short</td></tr>
+</tbody></table></div>
+<div class="callout warn">
+  <span class="title">Never send the ID token to the API</span>
+  The ID token is made <em>for the client</em> (its <code>aud</code> is <code>campus-web</code>).
+  APIs must accept only access tokens that are made for them.
+</div>
+
+<h3>What a JWT looks like</h3>
+<p>Keycloak's tokens are <strong>JWTs</strong> (JSON Web Tokens, RFC 7519, say "jot"). A JWT is
+three base64url parts joined by dots: <code>header.payload.signature</code>.</p>
+<pre class="diagram">eyJhbGciOiJSUzI1NiIsImtpZCI6IjNmY…  .  eyJpc3MiOiJodHRwOi8vbG9jYWxob3N0…  .  Qm9xL2tZ…
+└──────────── header ────────────┘     └──────────── payload ───────────┘     └ signature ┘
+ {"alg":"RS256","kid":"3fc…"}            the claims (JSON, NOT secret!)         made with
+ which algorithm, which key              anyone can decode and read them        Keycloak's private key</pre>
+<p>The payload is only <em>encoded</em>, not encrypted. Anyone can read it (try
+<code>jwt.io</code> with a dev token only). The signature makes it <strong>tamper-proof</strong>:
+if a student changes <code>STUDENT</code> to <code>SYSTEM_ADMIN</code>, the signature no longer
+matches. So: never put secrets or private data (grades, phone numbers) in a token.</p>
+
+<pre data-file="A decoded access token payload (example)"><code>{
+  "iss": "http://localhost:8180/realms/campus",    <span class="c">// issuer: who made it</span>
+  "sub": "8d0c6a6e-3f0b-4b7e-9a51-2c4e0f6b1a90",   <span class="c">// subject: the user's stable Keycloak id</span>
+  "aud": "campus-api",                             <span class="c">// audience: who it is made for</span>
+  "azp": "campus-web",                             <span class="c">// authorized party: the client that asked</span>
+  "exp": 1795000300,                               <span class="c">// expires at (seconds since 1970)</span>
+  "iat": 1795000000,                               <span class="c">// issued at</span>
+  "scope": "openid profile email",
+  "preferred_username": "sv2026001",
+  "realm_access": {
+    "roles": ["STUDENT", "default-roles-campus"]   <span class="c">// Arch §7: roles are read from here</span>
+  }
+}</code></pre>
+<div class="table-wrap"><table>
+<thead><tr><th>Claim</th><th>What our services check</th></tr></thead>
+<tbody>
+<tr><td><code>iss</code></td><td>Must be exactly our realm URL. A token from another realm is rejected.</td></tr>
+<tr><td><code>aud</code></td><td>Must contain our API name. Keycloak adds it with an <em>audience mapper</em> (section 6).</td></tr>
+<tr><td><code>exp</code></td><td>Must be in the future (with a small clock skew allowance).</td></tr>
+<tr><td><code>sub</code></td><td>The user id. Our tables store this as a UUID, never the username, because a username can change.</td></tr>
+<tr><td><code>realm_access.roles</code></td><td>Turned into Spring authorities like <code>ROLE_STUDENT</code> (<a href="17-spring-security.html">lesson 17</a>).</td></tr>
+</tbody></table></div>
+
+<h2 id="jwks">5. Checking a signature with JWKS</h2>
+<p>Keycloak signs tokens with a <strong>private key</strong> that only it has. Anyone can check
+the signature with the matching <strong>public key</strong>. Keycloak publishes its public keys at
+the <code>jwks_uri</code> as a <strong>JWKS</strong> (JSON Web Key Set, RFC 7517). Think of a
+wax seal: only the king has the stamp, but everyone knows what the seal looks like.</p>
+<pre class="diagram">  gateway / service                                    Keycloak
+  ─────────────────                                    ────────
+  1. token arrives, header says kid = "3fc…"
+  2. key "3fc…" in my cache?  ── no ──► GET /realms/campus/protocol/openid-connect/certs
+                                       ◄── {"keys":[{"kid":"3fc…","kty":"RSA","n":"…","e":"AQAB"}]}
+  3. verify signature with that public key        (cached: NOT one call per request)
+  4. check iss, aud, exp
+  5. OK → continue  |  any check fails → 401</pre>
+<p>This is why the Arch says "the gateway verifies the signature with Keycloak's public keys
+(JWKS, cached)". Our services <strong>do not call Keycloak for each request</strong>. During the
+registration rush (5,000 students in one minute, NFR-1) this matters a lot.</p>
+<p>The <code>kid</code> (key id) allows <strong>key rotation</strong>: Keycloak can add a new key,
+sign new tokens with it, and keep the old key in the JWKS until old tokens have expired. When a
+service sees an unknown <code>kid</code>, Spring Security fetches the JWKS again.</p>
+<div class="callout project">
+  <span class="title">Smart Campus trap: the issuer URL inside Docker</span>
+  The browser reaches Keycloak at <code>localhost:8180</code>, so tokens say
+  <code>"iss": "http://localhost:8180/realms/campus"</code>. A backend app running <em>inside</em>
+  Compose (the <code>apps</code> profile) reaches Keycloak as <code>keycloak:8080</code>. If the
+  service expects the issuer <code>keycloak:8080</code>, every token fails. The usual fix: give
+  Keycloak one fixed public hostname (its hostname settings), and in Spring set the expected
+  <code>issuer-uri</code> to the public URL and the <code>jwk-set-uri</code> to the internal URL.
+  The identity spec will decide this.
+</div>
+
+<h2 id="keycloak">6. Keycloak: realm, clients, roles</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Keycloak word</th><th>Meaning</th><th>Smart Campus (planned)</th></tr></thead>
+<tbody>
+<tr><td><strong>Realm</strong></td><td>A separate world of users, clients and roles. Like one school's own building.</td><td>One realm, e.g. <code>campus</code>. Never use the <code>master</code> realm for apps: it is for Keycloak admins.</td></tr>
+<tr><td><strong>Client</strong></td><td>An app that is allowed to ask for tokens</td><td><code>campus-web</code> (public, PKCE), a confidential client for the SIS import</td></tr>
+<tr><td><strong>Realm role</strong></td><td>A name for a job, given to users</td><td>The 7 roles below (map C3)</td></tr>
+<tr><td><strong>User</strong></td><td>A person with a login</td><td>Students and staff, imported from the SIS (C11)</td></tr>
+<tr><td><strong>Group</strong></td><td>A set of users; roles given to a group apply to all members</td><td>Optional, e.g. a group that gives LECTURER to all teaching staff</td></tr>
+<tr><td><strong>Mapper</strong></td><td>A rule that puts extra data into tokens</td><td>Audience mapper: adds <code>campus-api</code> to <code>aud</code></td></tr>
+<tr><td><strong>Realm import JSON</strong></td><td>A file that describes a whole realm; Keycloak can load it at start</td><td><code>infra/keycloak/realm-export.json</code> (path from the Arch §9 repo tree)</td></tr>
+</tbody></table></div>
+
+<h3>The 7 realm roles (map C3)</h3>
+<p>The Implementation Plan named only 4 roles, but its stories use 7 kinds of people. Decision
+<strong>C3</strong> created 7 realm roles. Decision <strong>C9</strong>: roles live
+<strong>only in Keycloak</strong>. Our <code>identity</code> profile table stores phone, avatar,
+faculty and so on (AUTH-2), but never the roles. One source of truth means no "two copies that
+disagree".</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th>Who</th><th>Typical rights</th></tr></thead>
+<tbody>
+<tr><td><code>STUDENT</code></td><td>Students</td><td>Register, see own timetable and grades, buy and sell, report lost items</td></tr>
+<tr><td><code>LECTURER</code></td><td>Teaching staff</td><td>See own sections and rosters, enter grades, cancel or move own classes</td></tr>
+<tr><td><code>FACULTY_STAFF</code></td><td>Faculty or department office</td><td>Post announcements to their faculty and cohorts</td></tr>
+<tr><td><code>ACADEMIC_ADMIN</code></td><td>Academic affairs office</td><td>Courses, sections, rooms, registration windows, account import (AUTH-3)</td></tr>
+<tr><td><code>SECURITY_STAFF</code></td><td>Campus security or reception</td><td>Log handed-in lost items and return them</td></tr>
+<tr><td><code>SYSTEM_ADMIN</code></td><td>IT / DevOps</td><td>Assign roles (AUTH-4), toggle modules (AUTH-5), moderation</td></tr>
+<tr><td><code>CLUB_MANAGER</code></td><td>Students who lead a club</td><td>Create events, sell and scan tickets. Rights <em>per club</em> stay in <code>club_members.role</code> (C3)</td></tr>
+</tbody></table></div>
+
+<h3>A realm import file for dev</h3>
+<p>Clicking in the admin console is not repeatable. In dev, we keep the realm as JSON in git, and
+Keycloak imports it at start. Then every developer gets the same realm with one
+<code>docker compose up</code>.</p>
+<pre data-file="infra/keycloak/realm-export.json (planned, shortened)"><code>{
+  "realm": "campus",
+  "enabled": true,
+  "roles": {
+    "realm": [
+      { "name": "STUDENT" }, { "name": "LECTURER" }, { "name": "FACULTY_STAFF" },
+      { "name": "ACADEMIC_ADMIN" }, { "name": "SECURITY_STAFF" },
+      { "name": "SYSTEM_ADMIN" }, { "name": "CLUB_MANAGER" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "campus-web",
+      "publicClient": true,                    <span class="c">// browser app: no secret</span>
+      "standardFlowEnabled": true,             <span class="c">// Authorization Code flow</span>
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,      <span class="c">// no password flow</span>
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",  <span class="c">// PKCE is required</span>
+        "post.logout.redirect.uris": "http://localhost:5173/*"
+      }
+    }
+  ]
+}</code></pre>
+<pre data-file="infra/docker-compose.yml, keycloak service (planned change)"><code>  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm"]     <span class="c"># loads every JSON file in the import folder</span>
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro</code></pre>
+<p>If the realm already exists, the import skips it. To load a changed file in dev, wipe the
+Keycloak data (for example <code>down -v</code>). The JSON in comments above is only for this
+lesson: real JSON has no comments. Production does not use <code>start-dev</code> (lesson 30).</p>
+
+<h2 id="sis">7. Accounts from the SIS (AUTH-3, AUTH-4)</h2>
+<p><strong>AUTH-3</strong>: the academic office wants "student and lecturer accounts to exist
+before the semester starts". The Arch asks an open question: can Keycloak <em>federate</em> (read
+live) from a university LDAP/AD, or do we import accounts once from the SIS (Student Information
+System)? Decision <strong>C11</strong>: until someone answers, we import a <strong>CSV</strong> file.
+Map assumption 4: the SIS is a CSV fixture in dev.</p>
+<pre data-file="A possible SIS CSV (columns are planned)"><code>student_code,full_name,email,faculty_code,cohort,role
+SV2026001,Nguyễn Văn An,an.nv@student.campus.edu.vn,CNTT,K2026,STUDENT
+SV2026002,Lê Thị Hoa,hoa.lt@student.campus.edu.vn,KT,K2026,STUDENT
+GV0042,Trần Thị Bình,binh.tt@campus.edu.vn,CNTT,,LECTURER</code></pre>
+<p>The import job is a <strong>confidential client with a service account</strong>: it logs in as
+itself (not as a person) and has only the Keycloak admin rights it needs to manage users. For each
+row it:</p>
+<ol>
+  <li>finds the user by username, or creates it with the Keycloak Admin REST API;</li>
+  <li>gives the realm role from the CSV (only roles from the list of 7 are accepted);</li>
+  <li>saves the profile row in the <code>identity</code> schema, keyed by the Keycloak
+      <code>sub</code>, without roles (C9);</li>
+  <li>sets a "required action" so the person chooses a password at first login.</li>
+</ol>
+<pre data-file="edu.campus.identity.internal.SisImportService (sketch, planned)"><code><span class="k">@Service</span>
+class SisImportService {
+
+    private final KeycloakAdmin keycloak;      <span class="c">// our small wrapper around the Admin REST API</span>
+    private final ProfileRepository profiles;
+
+    ImportReport importCsv(Reader csv) {
+        var report = new ImportReport();
+        for (SisRow row : SisCsv.parse(csv)) {                       <span class="c">// bad rows are reported, not skipped silently</span>
+            String userId = keycloak.findByUsername(row.studentCode())
+                    .orElseGet(() -&gt; keycloak.createUser(row));       <span class="c">// run it twice: no duplicate users</span>
+            keycloak.grantRealmRole(userId, row.role());
+            profiles.upsert(UUID.fromString(userId), row);           <span class="c">// profile only, no roles (C9)</span>
+            report.ok(row.studentCode());
+        }
+        return report;
+    }
+}</code></pre>
+<p>Note the word <strong>idempotent</strong> again (<a href="08-outbox-idempotency.html">lesson 08</a>):
+running the same CSV twice must give the same result. Admins will re-run imports.</p>
+<p><strong>AUTH-4</strong> ("assign and revoke roles") is the same Admin API call, made from a
+small admin screen that only <code>SYSTEM_ADMIN</code> can use. Remember: a role change shows up
+only in the <em>next</em> access token, so within up to 5 minutes the old roles still work.</p>
+
+<h2 id="logout">8. Global logout (AUTH-6)</h2>
+<p><strong>AUTH-6</strong>: "log out from all devices, so a lost phone can't access my account".
+To understand logout, remember that there are <strong>two kinds of session</strong>:</p>
+<ul>
+  <li>the <strong>Keycloak session</strong> (a cookie on Keycloak's domain), which lets the user
+      log in to other apps without typing the password again (that is SSO, single sign-on);</li>
+  <li>the <strong>tokens</strong> held by the web app.</li>
+</ul>
+<div class="table-wrap"><table>
+<thead><tr><th>Kind of logout</th><th>How it works</th><th>Use in Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><strong>RP-initiated logout</strong> (RP = relying party, the client)</td><td>The web app sends the browser to Keycloak's <code>end_session_endpoint</code> with <code>id_token_hint</code> and <code>post_logout_redirect_uri</code>. Keycloak ends its session and sends the browser back.</td><td>The normal "Log out" button</td></tr>
+<tr><td><strong>Back-channel logout</strong></td><td>Keycloak calls each client's back-channel URL <em>server to server</em> with a signed <code>logout_token</code>. The client then ends its own session for that user.</td><td>Only for clients with a server side (for example a BFF, lesson 17). A pure browser app has no URL Keycloak can call.</td></tr>
+<tr><td><strong>Log out all sessions</strong></td><td>Keycloak removes every session of one user (Admin API or the account console). Refresh tokens stop working everywhere.</td><td>AUTH-6 "log out from all devices"</td></tr>
+</tbody></table></div>
+<pre data-file="RP-initiated logout (the library builds this URL)"><code>GET http://localhost:8180/realms/campus/protocol/openid-connect/logout
+    ?id_token_hint=eyJ…
+    &amp;post_logout_redirect_uri=http://localhost:5173/</code></pre>
+<div class="callout warn">
+  <span class="title">The 5-minute gap</span>
+  An access token is a self-contained JWT. Our services check it <em>without</em> asking Keycloak,
+  so they cannot know it was "logged out". After "log out everywhere", a stolen access token still
+  works until <code>exp</code>. This is why access tokens are short (5 minutes): logout stops the
+  <em>refresh</em>, and the access token dies soon after. If a module ever needs instant
+  revocation, that is a design question for its spec (token introspection costs a call per request).
+</div>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Keycloak container (empty, port 8180)</td><td><code>infra/docker-compose.yml</code>, service <code>keycloak</code></td><td>Done (platform T3)</td></tr>
+<tr><td>Keycloak admin user and DB password</td><td><code>infra/.env</code> (gitignored), template in <code>infra/.env.example</code></td><td>Done (T3)</td></tr>
+<tr><td>Realm, 7 roles, <code>campus-web</code> client</td><td><code>infra/keycloak/realm-export.json</code></td><td>Planned (identity)</td></tr>
+<tr><td>Login flow with PKCE in the web app</td><td><code>frontend/web/src/shell/</code></td><td>Planned (identity + shell)</td></tr>
+<tr><td>JWT check at gateway and services</td><td><code>backend/gateway</code>, each app (lesson 17)</td><td>Planned (identity)</td></tr>
+<tr><td>Profile table (AUTH-2), keyed by <code>sub</code></td><td>schema <code>identity</code> in <code>core-app</code> (the schema already exists)</td><td>Planned</td></tr>
+<tr><td>SIS CSV import (AUTH-3), role admin (AUTH-4)</td><td><code>edu.campus.identity</code> in <code>core-app</code></td><td>Planned</td></tr>
+<tr><td>Global logout (AUTH-6)</td><td>Keycloak + a button in the shell</td><td>Planned</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Using the implicit flow or the password flow.</strong> Use Authorization Code +
+      PKCE (S256) only. Turn the others off in the client settings.</li>
+  <li><strong>Accepting any valid Keycloak token.</strong> Check <code>iss</code>,
+      <code>exp</code> <em>and</em> <code>aud</code>. Without the audience check, a token made
+      for some other app in the realm would work on our API.</li>
+  <li><strong>Sending the ID token to the API.</strong> APIs take access tokens only.</li>
+  <li><strong>Storing roles in our own table.</strong> Breaks C9: two copies will disagree.</li>
+  <li><strong>Putting private data in tokens.</strong> Anyone can decode the payload.</li>
+  <li><strong>Building our own login page.</strong> The password must only ever be typed into
+      Keycloak.</li>
+  <li><strong>Using the <code>master</code> realm for the app.</strong> It is Keycloak's own admin realm.</li>
+  <li><strong>Wildcard redirect URIs in production</strong> (like <code>*</code>). An attacker
+      could get the code sent to their site. List exact URLs.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infrastructure and open the Keycloak admin console at
+      <code>http://localhost:8180</code>. Log in with the admin user from your
+      <code>infra/.env</code>.</p>
+<pre><code>docker compose -f infra/docker-compose.yml up -d --wait</code></pre></li>
+  <li><p>Create a test realm <code>practice</code> by hand (it is thrown away later). Add realm roles
+      <code>STUDENT</code> and <code>LECTURER</code>, a user <code>sv1</code> with role STUDENT and a
+      password, and a public client <code>practice-web</code> with redirect URI
+      <code>http://localhost:5173/*</code>. Find where to require PKCE with S256.</p></li>
+  <li><p>Open the discovery document and find the 5 URLs from section 2:</p>
+<pre><code>curl -s http://localhost:8180/realms/practice/.well-known/openid-configuration</code></pre></li>
+  <li><p>In the client's "Client scopes" → "Evaluate" tab, generate an example access token for
+      <code>sv1</code>. Find <code>iss</code>, <code>sub</code>, <code>aud</code>, <code>exp</code>
+      and <code>realm_access.roles</code>. Is <code>aud</code> what our API would need? Which
+      mapper would fix it?</p></li>
+  <li><p>Export the realm from the admin console (Realm settings → Action → Partial export) and
+      compare the JSON with the file in section 6. Then delete the practice realm.</p></li>
+  <li><p>On paper: draw the PKCE flow from memory. Mark which values are secret
+      (verifier, tokens) and which may be seen (challenge, state).</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Authentication</td><td>Checking who someone is.</td></tr>
+<tr><td>Authorization</td><td>Deciding what someone may do.</td></tr>
+<tr><td>OAuth 2</td><td>A standard for apps to get tokens to call APIs for a user.</td></tr>
+<tr><td>OIDC</td><td>OpenID Connect: OAuth 2 plus "who logged in" (ID token, userinfo, discovery).</td></tr>
+<tr><td>Identity provider</td><td>The server that checks people and gives out tokens (Keycloak).</td></tr>
+<tr><td>PKCE</td><td>A one-time secret (verifier) and its hash (challenge) that tie the code to the app that asked for it.</td></tr>
+<tr><td>Public client</td><td>An app that cannot keep a secret, like a browser app.</td></tr>
+<tr><td>Confidential client</td><td>A server app that has its own secret.</td></tr>
+<tr><td>JWT</td><td>A signed token in three parts: header, payload (claims), signature.</td></tr>
+<tr><td>Claim</td><td>One fact inside a token, like <code>sub</code> or <code>exp</code>.</td></tr>
+<tr><td>JWKS</td><td>The list of public keys used to check token signatures.</td></tr>
+<tr><td>Realm</td><td>A separate set of users, roles and clients in Keycloak.</td></tr>
+<tr><td>SSO</td><td>Single sign-on: log in once, use many apps.</td></tr>
+<tr><td>Federation</td><td>Keycloak reading users live from another system (LDAP/AD).</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why can't an attacker who steals the authorization code get tokens?</summary>
+    <p>The token request needs the <code>code_verifier</code>. Only the hash (the challenge)
+    travelled through the browser. The verifier stayed in the app's memory, and a hash cannot be
+    reversed. Without it, Keycloak refuses the exchange.</p></details>
+  <details><summary>2. Why is the web app a public client, and why is that OK?</summary>
+    <p>All browser code can be read by anyone, so any "secret" in it is not secret. PKCE replaces
+    the client secret with a fresh one-time secret for every login, which gives the same protection
+    for the code exchange.</p></details>
+  <details><summary>3. Why can our services check tokens without calling Keycloak?</summary>
+    <p>The token is signed. With Keycloak's public key (cached from the JWKS) a service can prove
+    the token is real and unchanged, then read the claims. That keeps Keycloak off the hot path
+    during the registration rush.</p></details>
+  <details><summary>4. Why do roles live only in Keycloak (C9)?</summary>
+    <p>With one source of truth, the token always reflects the current roles (after the next
+    refresh). A copy in our database could get out of sync, and then two parts of the system would
+    disagree about what a person may do.</p></details>
+  <details><summary>5. After "log out from all devices", why can a stolen access token still work for a short time?</summary>
+    <p>Services check access tokens offline, so they do not hear about the logout. Logout stops
+    refresh, so the token dies at <code>exp</code>. Short lifetimes (5 minutes) keep this window
+    small.</p></details>
+  <details><summary>6. Why must the API check <code>aud</code> and not only the signature?</summary>
+    <p>Every client in the realm gets tokens signed with the same key. Without the audience check,
+    a token issued for a different app would be accepted by our API, which was never the plan.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc6749">RFC 6749: The OAuth 2.0 Authorization Framework</a>: roles and grants.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc7636">RFC 7636: PKCE</a>: the verifier and the S256 challenge.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700: Best Current Practice for OAuth 2.0 Security</a>: why implicit and password flows are out.</li>
+  <li><a href="https://openid.net/specs/openid-connect-core-1_0.html">OpenID Connect Core 1.0</a>: the ID token and claims.</li>
+  <li><a href="https://www.rfc-editor.org/rfc/rfc7519">RFC 7519: JSON Web Token</a> and <a href="https://www.rfc-editor.org/rfc/rfc7517">RFC 7517: JSON Web Key</a>.</li>
+  <li><a href="https://openid.net/specs/openid-connect-rpinitiated-1_0.html">OIDC RP-Initiated Logout</a> and <a href="https://openid.net/specs/openid-connect-backchannel-1_0.html">OIDC Back-Channel Logout</a>.</li>
+  <li><a href="https://www.keycloak.org/docs/latest/server_admin/">Keycloak Server Administration Guide</a>: realms, clients, roles, mappers, sessions.</li>
+  <li><a href="https://www.keycloak.org/server/importExport">Keycloak: Importing and exporting realms</a>.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

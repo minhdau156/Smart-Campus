@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The App Shell</title>
+<meta name="description" content="Smart Campus lesson 18: module manifests, per-university toggles, React Router layouts, lazy-loaded modules, vi/en i18n with Intl, responsive layout, accessibility and error boundaries.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="18">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 18 · Part 2: Feature modules</div>
+<h1>App shell: routing, lazy modules, i18n</h1>
+<p class="lede">Smart Campus is a "super-app": one website that holds many small apps (timetable,
+registration, clubs, marketplace…). The <strong>shell</strong> is the frame around them: the
+menu, the routes, the language and the layout. Modules plug in; admins switch them on and off.</p>
+
+<div class="meta">
+  <span class="badge module">shell</span>
+  <span class="badge task">AUTH-5</span>
+  <span class="badge task">NFR-7</span>
+  <span class="badge task">NFR-8</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Core idea</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="13-typescript-react.html">13 (TypeScript, React, Vite)</a>,
+  <a href="14-frontend-api-testing.html">14 (TanStack Query, generated types)</a>,
+  <a href="11-gateway-rate-limit.html">11 (gateway filters)</a> and
+  <a href="17-spring-security.html">17 (roles)</a>.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  The <code>shell</code> module (map row 3) comes after <code>identity</code>. The folder
+  <code>frontend/web</code> is created in platform T19. File names below are suggestions that
+  follow the Arch §9 layout <code>src/{shell, modules/&lt;id&gt;, shared}</code>. Java package:
+  <code>edu.campus.shell</code> (the Arch called it <code>modules/</code>; the map renamed it so
+  the module id equals the package name).
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">What a shell is</a></li>
+    <li><a href="#manifest">The module manifest</a></li>
+    <li><a href="#toggles">Toggles and the gateway 404 filter</a></li>
+    <li><a href="#router">React Router: nested routes and layouts</a></li>
+    <li><a href="#lazy">Lazy modules and a menu from the manifest</a></li>
+    <li><a href="#i18n">Vietnamese and English (NFR-8)</a></li>
+    <li><a href="#layout">Phone-first layout and accessibility (NFR-7)</a></li>
+    <li><a href="#errors">Error boundaries</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. What a shell is</h2>
+<p>Think of a shopping mall. The mall gives the doors, the corridors, the signs and the lights.
+Each shop is its own business. A shop can close without closing the mall. In Smart Campus:</p>
+<ul>
+  <li>the <strong>mall</strong> is the shell: login, header, menu, language switch, layout, error pages;</li>
+  <li>each <strong>shop</strong> is a feature module: <code>timetable</code>, <code>registration</code>,
+      <code>marketplace</code>…;</li>
+  <li>the <strong>sign at the entrance</strong> is the module manifest list: which shops are open,
+      and for whom.</li>
+</ul>
+<p>Arch ADR-8 chose "plugin manifest + lazy-loaded frontend modules" for three reasons: modules can
+be toggled per university (<strong>AUTH-5</strong>), the first download stays small, and a module's
+code loads only when someone opens it. The accepted trade-off: "manifest and routes must stay in
+sync". You will see below how to make that safe.</p>
+
+<h2 id="manifest">2. The module manifest</h2>
+<p>A <strong>manifest</strong> is a small description of a module: its id, name, icon, route, API
+prefix, who may see it, and its order in the menu. This is the example from the Arch (§7):</p>
+<pre data-file="One manifest, as JSON"><code>{
+  "id": "marketplace",
+  "name": "Book Market",
+  "icon": "book",
+  "route": "/marketplace",
+  "apiPrefix": "/api/v1/marketplace",
+  "requiredRoles": ["STUDENT"],
+  "enabled": true,
+  "order": 60
+}</code></pre>
+<p>On the backend, every module implements one small interface. The shell collects all of them
+(Spring gives you every bean of a type as a <code>List</code>) into a <strong>registry</strong>.</p>
+<pre data-file="edu.campus.shell (planned)"><code>public record ModuleManifest(String id, String name, String icon, String route,
+                             String apiPrefix, Set&lt;String&gt; requiredRoles, int order) {}
+
+public interface CampusModule {
+    ModuleManifest manifest();
+}</code></pre>
+<pre data-file="edu.campus.marketplace.MarketplaceModule (planned)"><code><span class="k">@Component</span>
+class MarketplaceModule implements CampusModule {
+    <span class="k">@Override</span>
+    public ModuleManifest manifest() {
+        return new ModuleManifest("marketplace", "Book Market", "book", "/marketplace",
+                "/api/v1/marketplace", Set.of("STUDENT"), 60);
+    }
+}</code></pre>
+<p>Feature modules depend on <code>shell</code> (it comes before them in the build order), so they
+may use its public interface. Spring Modulith's <code>verify()</code> checks this
+(<a href="06-spring-modulith.html">lesson 06</a>).</p>
+
+<h3><code>GET /api/v1/modules</code></h3>
+<p>Map decision <strong>C1</strong> fixed the path to <code>/api/v1/modules</code> (the Plan said
+<code>/api/modules</code>). It returns the modules that are <em>enabled</em> and that the
+<em>caller's roles allow</em> (Arch §5, step 5):</p>
+<pre data-file="edu.campus.shell.ModulesController (planned sketch)"><code><span class="k">@GetMapping</span>("/api/v1/modules")
+List&lt;ModuleManifest&gt; modules(Authentication auth) {
+    Set&lt;String&gt; roles = auth.getAuthorities().stream()
+            .map(GrantedAuthority::getAuthority)
+            .filter(a -&gt; a.startsWith("ROLE_"))
+            .map(a -&gt; a.substring("ROLE_".length()))
+            .collect(Collectors.toSet());
+    return registry.all().stream()
+            .filter(m -&gt; toggles.isEnabled(m.id()))                         <span class="c">// AUTH-5</span>
+            .filter(m -&gt; m.requiredRoles().isEmpty()
+                      || !Collections.disjoint(m.requiredRoles(), roles))  <span class="c">// any one role is enough</span>
+            .sorted(Comparator.comparingInt(ModuleManifest::order))
+            .toList();
+}</code></pre>
+<div class="callout warn">
+  <span class="title">A hidden menu item is not security</span>
+  The list only decides what the menu <em>shows</em>. A student can still type
+  <code>/api/v1/grade/sections/…</code> by hand. The real protection is
+  <code>@PreAuthorize</code> and ownership checks in each module (lesson 17).
+</div>
+
+<h2 id="toggles">3. Toggles and the gateway 404 filter</h2>
+<p><strong>AUTH-5</strong>: "As a system admin, I want to enable or disable modules per
+university, so that features roll out gradually." A <strong>feature toggle</strong> is an on/off
+switch stored as data, so changing it needs no redeploy. A likely design (the shell spec will
+decide): a table in the <code>shell</code> schema with one row per module id and an
+<code>enabled</code> flag, and an admin screen for <code>SYSTEM_ADMIN</code>.</p>
+<p>When a module is off, its API must also be off. The Arch says: "a disabled module's endpoints
+return 404 via a gateway filter". A <strong>global filter</strong> in Spring Cloud Gateway runs for
+every request, before routing (<a href="11-gateway-rate-limit.html">lesson 11</a>):</p>
+<pre data-file="edu.campus.gateway.DisabledModuleFilter (planned, simplified)"><code><span class="k">@Component</span>
+class DisabledModuleFilter implements GlobalFilter, Ordered {
+
+    private final ModuleToggles toggles;        <span class="c">// a cached copy of "which ids are on"</span>
+
+    <span class="k">@Override</span>
+    public Mono&lt;Void&gt; filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String path = exchange.getRequest().getPath().value();     <span class="c">// /api/v1/marketplace/listings</span>
+        String moduleId = ModulePaths.moduleIdOf(path);            <span class="c">// "marketplace", or null</span>
+        if (moduleId != null &amp;&amp; !toggles.isEnabled(moduleId)) {
+            return problems.write(exchange, ProblemCode.NOT_FOUND); <span class="c">// 404 problem JSON, same as an unknown route</span>
+        }
+        return chain.filter(exchange);
+    }
+
+    <span class="k">@Override</span>
+    public int getOrder() { return -10; }                           <span class="c">// early, before routing</span>
+}</code></pre>
+<ul>
+  <li><strong>Why 404 and not 403?</strong> For the caller, a disabled module should look exactly
+      like a module that does not exist.</li>
+  <li><strong>How does the gateway know the toggles?</strong> It must not ask the database on every
+      request. Options: poll an internal shell endpoint every few seconds and cache the answer, or
+      listen to a <code>ModuleToggled</code> event on <code>campus.events</code>. A few seconds of
+      delay after a toggle is fine.</li>
+  <li><strong>Some ids can never be turned off</strong>: <code>platform</code>,
+      <code>identity</code>, <code>shell</code> itself (<code>/api/v1/modules</code>).</li>
+</ul>
+
+<h2 id="router">4. React Router: nested routes and layouts</h2>
+<p>A <strong>router</strong> maps the URL in the address bar to a screen, without reloading the
+page. React Router lets routes be <strong>nested</strong>: a parent route draws the frame, and
+puts the child screen into an <code>&lt;Outlet /&gt;</code> (a hole in the frame). A parent that only
+draws a frame is called a <strong>layout</strong>.</p>
+<pre class="diagram">URL: /registration/windows/42
+
+  "/"  → &lt;ShellLayout&gt;            header, menu, language switch
+           └── &lt;Outlet&gt;
+                 ":moduleId/*" → &lt;ModuleOutlet&gt;     finds "registration" in the manifest list
+                                   └── registration's own routes:  "windows/:id" → &lt;WindowPage&gt;</pre>
+<pre data-file="frontend/web/src/shell/router.tsx (planned)"><code>import { createBrowserRouter } from "react-router";
+
+export const router = createBrowserRouter([
+  {
+    path: "/",
+    element: &lt;ShellLayout /&gt;,              <span class="c">// the frame: header + menu + &lt;Outlet /&gt;</span>
+    errorElement: &lt;ShellErrorPage /&gt;,       <span class="c">// if the frame itself fails</span>
+    children: [
+      { index: true, element: &lt;HomePage /&gt; },
+      { path: "auth/callback", element: &lt;LoginCallback /&gt; },   <span class="c">// lesson 16, step 4</span>
+      { path: ":moduleId/*", element: &lt;ModuleOutlet /&gt; },      <span class="c">// every feature module</span>
+      { path: "*", element: &lt;NotFoundPage /&gt; },
+    ],
+  },
+]);</code></pre>
+<p>Notice: the shell does <strong>not</strong> list <code>timetable</code>,
+<code>grade</code>… as routes. One route, <code>:moduleId/*</code>, serves them all. The
+<code>/*</code> at the end lets the module keep its own child routes. This keeps the shell small
+and makes "add a module" a change inside the module's folder.</p>
+
+<h2 id="lazy">5. Lazy modules and a menu from the manifest</h2>
+<p><strong>Code splitting</strong> means Vite cuts the app into several JavaScript files
+(<em>chunks</em>). <code>React.lazy</code> loads a chunk only when the component is first drawn.
+<code>Suspense</code> shows a fallback (a spinner) while the chunk downloads. A student who never
+opens the marketplace never downloads its code.</p>
+<pre data-file="frontend/web/src/shell/module-registry.ts (planned)"><code>import { lazy, type ComponentType, type LazyExoticComponent } from "react";
+
+<span class="c">// The ONE place that links a manifest id to code. Each import() becomes its own chunk.</span>
+<span class="c">// React.lazy needs a default export; our rule is named exports, so we adapt it here.</span>
+export const moduleScreens: Record&lt;string, LazyExoticComponent&lt;ComponentType&gt;&gt; = {
+  timetable: lazy(() =&gt;
+    import("../modules/timetable/routes").then((m) =&gt; ({ default: m.TimetableRoutes }))),
+  registration: lazy(() =&gt;
+    import("../modules/registration/routes").then((m) =&gt; ({ default: m.RegistrationRoutes }))),
+  marketplace: lazy(() =&gt;
+    import("../modules/marketplace/routes").then((m) =&gt; ({ default: m.MarketplaceRoutes }))),
+};</code></pre>
+<pre data-file="frontend/web/src/shell/module-outlet.tsx (planned)"><code>export function ModuleOutlet() {
+  const { moduleId } = useParams();
+  const { data: modules, isPending } = useModules();     <span class="c">// TanStack Query: GET /api/v1/modules</span>
+  if (isPending) return &lt;PageSpinner /&gt;;
+
+  const allowed = modules?.some((m) =&gt; m.id === moduleId) ?? false;
+  const Screen = moduleId ? moduleScreens[moduleId] : undefined;
+  if (!allowed || !Screen) return &lt;NotFoundPage /&gt;;      <span class="c">// disabled, not allowed, or unknown</span>
+
+  return (
+    &lt;ModuleErrorBoundary moduleId={moduleId!}&gt;              <span class="c">// section 8</span>
+      &lt;Suspense fallback={&lt;PageSpinner /&gt;}&gt;
+        &lt;Screen /&gt;
+      &lt;/Suspense&gt;
+    &lt;/ModuleErrorBoundary&gt;
+  );
+}</code></pre>
+<p>The manifest type comes from the generated OpenAPI types (platform T19, lesson 14), so the
+frontend and backend cannot drift apart silently. The menu is just a list drawn from the same data:</p>
+<pre data-file="frontend/web/src/shell/main-menu.tsx (planned)"><code>type ModuleManifest = components["schemas"]["ModuleManifest"];   <span class="c">// generated, do not edit</span>
+
+export function MainMenu({ modules }: { modules: ModuleManifest[] }) {
+  const { t } = useTranslation();
+  return (
+    &lt;nav aria-label={t("shell.menu")}&gt;
+      &lt;ul&gt;
+        {modules.map((m) =&gt; (
+          &lt;li key={m.id}&gt;
+            &lt;NavLink to={m.route}&gt;
+              &lt;ModuleIcon name={m.icon} aria-hidden="true" /&gt;
+              {t(`modules.${m.id}`, { defaultValue: m.name })}
+            &lt;/NavLink&gt;
+          &lt;/li&gt;
+        ))}
+      &lt;/ul&gt;
+    &lt;/nav&gt;
+  );
+}</code></pre>
+<div class="callout tip">
+  <span class="title">Keeping the manifest and the routes in sync (ADR-8's trade-off)</span>
+  Write one small Vitest test: every id that the backend can return (a list exported from the
+  OpenAPI file or a fixture) must have a key in <code>moduleScreens</code>, and every key must be
+  a known id. Then a forgotten module fails CI instead of showing a blank page.
+</div>
+
+<h2 id="i18n">6. Vietnamese and English (NFR-8)</h2>
+<p><strong>NFR-8</strong>: "use the app in Vietnamese or English, so international students can
+use it too". <strong>i18n</strong> (internationalization: "i", 18 letters, "n") means building the
+app so the language can change. Two different jobs:</p>
+<div class="compare">
+  <div class="good"><h4>Words: translation files</h4>
+    <p>Every sentence the user sees lives in a JSON file per language, under a key. A library such
+    as <code>react-i18next</code> picks the right one. No text is hard-coded in components.</p></div>
+  <div class="good"><h4>Numbers, dates, money: <code>Intl</code></h4>
+    <p>The browser's built-in <code>Intl</code> API knows that Vietnamese writes
+    <code>1.500.000 ₫</code> and English writes <code>₫1,500,000</code>. Never format these by hand.</p></div>
+</div>
+<pre data-file="frontend/web/src/shared/i18n/i18n.ts (planned)"><code>import i18n from "i18next";
+import { initReactI18next } from "react-i18next";
+import vi from "./locales/vi.json";
+import en from "./locales/en.json";
+
+void i18n.use(initReactI18next).init({
+  resources: { vi: { translation: vi }, en: { translation: en } },
+  lng: "vi",                       <span class="c">// default for a Vietnamese university</span>
+  fallbackLng: "en",               <span class="c">// a missing Vietnamese key shows English, not the raw key</span>
+  interpolation: { escapeValue: false },   <span class="c">// React already escapes text</span>
+});</code></pre>
+<pre data-file="locales/vi.json and locales/en.json (parts)"><code>{ "shell": { "menu": "Danh mục chính", "logout": "Đăng xuất" },
+  "registration": { "seatsLeft": "Còn {{count}} chỗ" } }
+
+{ "shell": { "menu": "Main menu", "logout": "Log out" },
+  "registration": { "seatsLeft_one": "{{count}} seat left", "seatsLeft_other": "{{count}} seats left" } }</code></pre>
+<p>English needs plural forms (<code>_one</code>, <code>_other</code>); Vietnamese does not change
+the noun. i18next uses the language's plural rules to choose.</p>
+<pre data-file="frontend/web/src/shared/i18n/format.ts (planned)"><code>export function formatVnd(amount: string, locale: string): string {
+  <span class="c">// The API sends money as a decimal string + currency (never a float). VND has 0 decimals.</span>
+  return new Intl.NumberFormat(locale, { style: "currency", currency: "VND" }).format(Number(amount));
+}
+formatVnd("150000", "vi-VN");   <span class="c">// "150.000 ₫"</span>
+formatVnd("150000", "en");      <span class="c">// "₫150,000"</span>
+
+export function formatClassTime(isoUtc: string, locale: string): string {
+  <span class="c">// The API sends UTC (spec rule). Show campus time, whatever the phone's own time zone is.</span>
+  return new Intl.DateTimeFormat(locale, {
+    weekday: "long", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Ho_Chi_Minh",
+  }).format(new Date(isoUtc));
+}</code></pre>
+<ul>
+  <li>When the language changes, also set <code>&lt;html lang="vi"&gt;</code> or
+      <code>"en"</code>. Screen readers use it to choose a voice.</li>
+  <li>Error messages: show a translated text chosen by the problem JSON <code>code</code>
+      (<code>SECTION_FULL</code> → <code>errors.SECTION_FULL</code>), not the English
+      <code>detail</code> (lesson 09: clients switch on the code).</li>
+  <li>Keycloak's login page has its own language setting. The OIDC request can pass
+      <code>ui_locales=vi</code> so the login page matches.</li>
+</ul>
+
+<h2 id="layout">7. Phone-first layout and accessibility (NFR-7)</h2>
+<p><strong>NFR-7</strong>: "use the app on my phone screen". There is <strong>no mobile app</strong>
+(map assumption 3). The website itself must work well on a phone. Most students will open it on a
+phone, often in a hurry between classes or during the registration rush.</p>
+<p><strong>Mobile-first</strong> means you write the CSS for the small screen first, then add
+rules for wider screens with <strong>media queries</strong> (<code>@media (min-width: …)</code>).</p>
+<pre data-file="frontend/web/src/shell/shell-layout.css (planned)"><code>.shell {
+  display: grid;
+  grid-template-rows: auto 1fr auto;      /* header / content / bottom menu */
+  min-height: 100dvh;                      /* dvh: the real visible height on phones */
+}
+.shell-menu {                              /* phone: a bar at the bottom, easy for thumbs */
+  position: sticky; bottom: 0;
+  display: flex; justify-content: space-around;
+}
+.shell-menu a { min-width: 48px; min-height: 48px; }   /* big enough to tap */
+
+@media (min-width: 768px) {                /* tablet and desktop: menu on the left */
+  .shell {
+    grid-template-columns: 240px 1fr;
+    grid-template-rows: auto 1fr;
+  }
+  .shell-menu { position: static; flex-direction: column; grid-row: 2; }
+}</code></pre>
+<ul>
+  <li>Use <strong>flex</strong> for a row or column of things, <strong>grid</strong> for two-way
+      layouts like the shell or a week timetable.</li>
+  <li>The page must never scroll sideways. Wide tables (rosters) scroll inside their own box.</li>
+  <li>Test at 360 px width in the browser's device mode, not only on your large screen.</li>
+</ul>
+<h3>Accessibility basics</h3>
+<p><strong>Accessibility (a11y)</strong> means people with different abilities can use the app:
+with a screen reader, only a keyboard, low vision, or a shaking hand. WCAG 2.2 is the standard.
+The basics cost little if you do them from the start:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Rule</th><th>In the shell</th></tr></thead>
+<tbody>
+<tr><td>Use the right HTML element</td><td><code>&lt;nav&gt;</code> for the menu, <code>&lt;button&gt;</code> for actions (not a clickable <code>&lt;div&gt;</code>), <code>&lt;table&gt;</code> for the timetable grid</td></tr>
+<tr><td>Every input has a label</td><td><code>&lt;label htmlFor&gt;</code>; icons-only buttons get <code>aria-label</code></td></tr>
+<tr><td>Keyboard works everywhere</td><td>Tab through the menu; focus is visible; after a route change, move focus to the page heading</td></tr>
+<tr><td>Enough colour contrast</td><td>Do not show "section full" with colour only; add text or an icon</td></tr>
+<tr><td>Announce changes</td><td>Registration result "pending → confirmed" in an <code>aria-live="polite"</code> region</td></tr>
+<tr><td>Language set</td><td><code>&lt;html lang&gt;</code> matches the chosen language</td></tr>
+</tbody></table></div>
+
+<h2 id="errors">8. Error boundaries</h2>
+<p>If a React component throws while drawing, React removes the <em>whole</em> page by default. One
+broken module must not take the shell down. An <strong>error boundary</strong> is a component that
+catches drawing errors in its children and shows a fallback instead. It is like a fuse in a house:
+one room goes dark, not the whole building.</p>
+<pre data-file="frontend/web/src/shell/module-error-boundary.tsx (planned)"><code>import { Component, type ErrorInfo, type ReactNode } from "react";
+
+type Props = { moduleId: string; children: ReactNode };
+
+<span class="c">// Error boundaries must still be class components in React.</span>
+export class ModuleErrorBoundary extends Component&lt;Props, { failed: boolean }&gt; {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(`module ${this.props.moduleId} crashed`, error, info.componentStack);
+  }
+
+  render() {
+    return this.state.failed ? &lt;ModuleCrashed id={this.props.moduleId} /&gt; : this.props.children;
+  }
+}</code></pre>
+<ul>
+  <li><strong>Where:</strong> one around each module (in <code>ModuleOutlet</code>), plus the
+      router's <code>errorElement</code> for the shell itself.</li>
+  <li><strong>What they do not catch:</strong> errors in event handlers and in async code (like a
+      failed <code>fetch</code>). Those are handled where they happen; API errors arrive as problem
+      JSON through TanStack Query.</li>
+  <li><strong>A real case for lazy modules:</strong> after a new deploy, old chunk file names are
+      gone. A user with the old page open clicks "Marketplace" and the <code>import()</code> fails.
+      The boundary should offer a "Reload" button, which loads the new version.</li>
+</ul>
+
+<h2 id="in-project">9. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where (planned)</th><th>Story</th></tr></thead>
+<tbody>
+<tr><td><code>CampusModule</code>, <code>ModuleManifest</code>, registry</td><td><code>edu.campus.shell</code> in <code>core-app</code></td><td>AUTH-5</td></tr>
+<tr><td><code>GET /api/v1/modules</code></td><td><code>edu.campus.shell</code> (map C1)</td><td>AUTH-5</td></tr>
+<tr><td>Toggle table + admin screen</td><td>schema <code>shell</code> (not in platform's schema list yet: the shell spec adds it)</td><td>AUTH-5</td></tr>
+<tr><td>Disabled-module 404 filter</td><td><code>backend/gateway</code></td><td>AUTH-5</td></tr>
+<tr><td>Router, layout, menu, module registry</td><td><code>frontend/web/src/shell/</code></td><td>AUTH-5</td></tr>
+<tr><td>Each module's screens</td><td><code>frontend/web/src/modules/&lt;id&gt;/</code></td><td>modules 4–14</td></tr>
+<tr><td>i18n setup, formatters, vi/en files</td><td><code>frontend/web/src/shared/i18n/</code></td><td>NFR-8</td></tr>
+<tr><td>Responsive layout</td><td>shell CSS + each module</td><td>NFR-7</td></tr>
+</tbody></table></div>
+<p>Dev proxy and the problem-JSON API client come first, in platform T19.</p>
+
+<h2 id="mistakes">10. Common mistakes</h2>
+<ul>
+  <li><strong>Treating the menu as security.</strong> Hiding a link protects nothing; the API must check.</li>
+  <li><strong>Importing a module statically</strong> (<code>import { MarketplaceRoutes } from …</code>)
+      in the shell. That puts it back in the main bundle and kills lazy loading.</li>
+  <li><strong>Hard-coded text</strong> like <code>"Đăng xuất"</code> inside a component. Every string goes in the translation files.</li>
+  <li><strong>Formatting money with string tricks</strong> or using JavaScript floats for
+      amounts. Use <code>Intl.NumberFormat</code> and decimal strings.</li>
+  <li><strong>Showing times in the phone's time zone.</strong> A student abroad still needs campus
+      time for classes.</li>
+  <li><strong>Desktop-first CSS</strong> that is "fixed later" for phones. Start at 360 px.</li>
+  <li><strong>No error boundary per module.</strong> One crash then blanks the whole app.</li>
+  <li><strong>The gateway asking the database for toggles on every request.</strong> Cache them.</li>
+</ul>
+
+<h2 id="practice">11. Practice</h2>
+<ol class="steps">
+  <li><p>In any scratch Vite + React app (not the project), make two routes with a shared layout
+      and an <code>&lt;Outlet /&gt;</code>. Then load the second page with <code>React.lazy</code>.
+      Run <code>npm run build</code> and find the extra chunk file in <code>dist/assets/</code>.</p></li>
+  <li><p>In the browser console, try:</p>
+<pre><code>new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(1500000)
+new Intl.DateTimeFormat("en", { dateStyle: "full", timeStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date())</code></pre>
+      <p>Change the locale to <code>"en"</code> and <code>"vi"</code> and compare.</p></li>
+  <li><p>On paper: write the manifest JSON for <code>timetable</code>, <code>grade</code> and
+      <code>lostfound</code>. Which <code>requiredRoles</code> does each need? Use the 7 roles from
+      lesson 16.</p></li>
+  <li><p>Open any website you use on your phone in your desktop browser's device mode at 360 px.
+      Find one thing that breaks, and one thing they did well.</p></li>
+  <li><p>Tab through this lesson page with the keyboard only. Can you always see where the focus is?</p></li>
+</ol>
+
+<h2 id="words">12. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Shell</td><td>The frame of the app that holds all modules.</td></tr>
+<tr><td>Manifest</td><td>A small description of a module: id, name, route, roles, order.</td></tr>
+<tr><td>Registry</td><td>The list of all modules the app knows.</td></tr>
+<tr><td>Feature toggle</td><td>An on/off switch stored as data, changed without a redeploy.</td></tr>
+<tr><td>Global filter</td><td>Gateway code that runs for every request.</td></tr>
+<tr><td>Layout route</td><td>A parent route that draws a frame and an <code>&lt;Outlet /&gt;</code>.</td></tr>
+<tr><td>Code splitting</td><td>Cutting the JavaScript into chunks that load when needed.</td></tr>
+<tr><td>Suspense</td><td>Shows a fallback while lazy code or data loads.</td></tr>
+<tr><td>i18n</td><td>Building the app so the language can change.</td></tr>
+<tr><td>Locale</td><td>Language plus regional format, like <code>vi-VN</code>.</td></tr>
+<tr><td>Media query</td><td>A CSS rule that applies only at some screen sizes.</td></tr>
+<tr><td>Accessibility (a11y)</td><td>Making the app usable for everyone, including with screen readers or keyboards.</td></tr>
+<tr><td>Error boundary</td><td>A component that catches drawing errors in its children.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">13. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. If the menu already hides a disabled module, why do we also need the gateway 404 filter?</summary>
+    <p>The menu is only what the browser shows. Anyone can call the API directly. The filter makes
+    the module's API truly unavailable, and 404 makes it look like it does not exist.</p></details>
+  <details><summary>2. Why does the shell have one <code>:moduleId/*</code> route instead of one route per module?</summary>
+    <p>Then adding a module means adding its folder and one registry line, not editing the shell's
+    router. The manifest list from the server decides what is reachable.</p></details>
+  <details><summary>3. Why use <code>React.lazy</code> per module?</summary>
+    <p>Each module becomes its own chunk, so the first page is small and fast on a phone, and code
+    for modules a student never opens is never downloaded (ADR-8).</p></details>
+  <details><summary>4. Why use <code>Intl</code> instead of writing our own money and date formatting?</summary>
+    <p>Each locale has different separators, symbol positions and date orders. <code>Intl</code>
+    already knows them, and it also converts UTC times to campus time with <code>timeZone</code>.</p></details>
+  <details><summary>5. Why design for the phone first in Smart Campus?</summary>
+    <p>There is no mobile app (assumption 3), and most students use phones, especially during the
+    registration rush. Adding space for big screens is easier than squeezing a desktop layout.</p></details>
+  <details><summary>6. Why put an error boundary around each module and not only one around the app?</summary>
+    <p>With one boundary at the top, any module crash replaces the whole app with an error page.
+    Per-module boundaries keep the menu and other modules working.</p></details>
+</div>
+
+<h2 id="more">14. Learn more</h2>
+<ul>
+  <li><a href="https://reactrouter.com/">React Router documentation</a>: routes, nested layouts, <code>Outlet</code>.</li>
+  <li><a href="https://react.dev/reference/react/lazy">React: lazy</a> and <a href="https://react.dev/reference/react/Suspense">React: Suspense</a>.</li>
+  <li><a href="https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary">React: catching rendering errors with an error boundary</a>.</li>
+  <li><a href="https://react.i18next.com/">react-i18next documentation</a> and <a href="https://www.i18next.com/translation-function/plurals">i18next: plurals</a>.</li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl">MDN: Intl</a>: <code>NumberFormat</code>, <code>DateTimeFormat</code>.</li>
+  <li><a href="https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_media_queries/Using_media_queries">MDN: Using media queries</a>.</li>
+  <li><a href="https://www.w3.org/TR/WCAG22/">W3C: WCAG 2.2</a>: the accessibility standard.</li>
+  <li><a href="https://docs.spring.io/spring-cloud-gateway/reference/">Spring Cloud Gateway reference</a>: global filters.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>

@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load Testing Lesson</title>
+<meta name="description" content="Smart Campus lesson 21: load testing the registration rush with k6, arrival-rate executors, thresholds, and a correctness check after the test.">
+<link rel="stylesheet" href="assets/lesson.css">
+<script src="assets/lesson.js"></script>
+</head>
+<body data-lesson="21">
+
+<header class="topbar">
+  <a href="index.html">← Smart Campus lessons</a>
+  <span class="spacer"></span>
+  <button id="theme-btn" type="button">Theme</button>
+</header>
+
+<main>
+<div class="eyebrow">Lesson 21 · Part 2: Feature modules</div>
+<h1>Load testing with k6</h1>
+<p class="lede">"It works on my machine with one user" says nothing about 08:00 on registration
+day. A load test sends thousands of fake students at the system and measures what happens. In
+this lesson you learn to write, run and read the Smart Campus registration rush test, and to
+check afterwards that no seat was given away twice.</p>
+
+<div class="meta">
+  <span class="badge module">registration</span>
+  <span class="badge task">NFR-1</span>
+  <span class="badge task">NFR-2</span>
+  <span class="badge task">NFR-5</span>
+  <span class="badge time">~75 min</span>
+  <span class="badge level">Practical</span>
+</div>
+
+<div class="callout">
+  <span class="title">Before this lesson</span>
+  Read <a href="05-docker-compose.html">05 (Docker Compose)</a>,
+  <a href="12-observability.html">12 (metrics and Grafana)</a> and
+  <a href="20-redis-concurrency.html">20 (the registration design you are testing)</a>.
+  Basic JavaScript is enough for k6 scripts.
+</div>
+
+<div class="callout warn">
+  <span class="title">Planned, not built yet</span>
+  The rush test belongs to module 5 (<code>registration</code>). The Arch §9 repo layout already
+  names the file: <code>load-tests/k6/registration-rush.js</code>. That folder does not exist yet.
+  Endpoint paths, test-data files and numbers below are <strong>proposals</strong>, except the
+  NFR targets, which come from the Plan.
+</div>
+
+<nav class="toc">
+  <strong>In this lesson</strong>
+  <ol>
+    <li><a href="#why">Why you need this</a></li>
+    <li><a href="#kinds">Kinds of performance tests</a></li>
+    <li><a href="#basics">A first k6 script</a></li>
+    <li><a href="#model">VUs vs arrival rate</a></li>
+    <li><a href="#rush">The registration rush script</a></li>
+    <li><a href="#running">Running it and watching Grafana</a></li>
+    <li><a href="#results">Reading results and checking correctness</a></li>
+    <li><a href="#in-project">Where it is in Smart Campus</a></li>
+    <li><a href="#mistakes">Common mistakes</a></li>
+    <li><a href="#practice">Practice</a></li>
+    <li><a href="#words">Words to know</a></li>
+    <li><a href="#quiz">Test yourself</a></li>
+    <li><a href="#more">Learn more</a></li>
+  </ol>
+</nav>
+
+<h2 id="why">1. Why you need this in Smart Campus</h2>
+<p>Three Plan requirements point straight at load testing:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Id</th><th>Requirement</th><th>How the test proves it</th></tr></thead>
+<tbody>
+<tr><td><strong>NFR-1</strong></td><td>Registration stays up with <strong>5,000 students at once, p95 under 500 ms</strong></td><td>A threshold on the 95th percentile of response time, under a 5,000-student rush</td></tr>
+<tr><td><strong>NFR-2</strong></td><td>Never overbook a section or double-enroll a student</td><td>SQL checks on the database after the test</td></tr>
+<tr><td><strong>NFR-5</strong></td><td>Run a load test before every registration window</td><td>The script is repeatable: one command, a clear pass or fail</td></tr>
+</tbody></table></div>
+<p>The Arch adds: "A k6 load test against staging (5,000 virtual users on one section set)
+gates every release that touches registration." <strong>k6</strong> is an open-source load
+testing tool from Grafana Labs. You write the test in JavaScript; k6 itself is a Go program,
+so one machine can simulate thousands of users.</p>
+<p>A <strong>percentile</strong> needs a short explanation. "p95 = 480 ms" means: sort all
+response times; 95% of them are 480 ms or faster, 5% are slower. We use p95, not the average,
+because an average hides the slow students. If 90 answers take 100 ms and 10 take 4 s, the
+average looks fine (490 ms) while 1 in 10 students waits four seconds.</p>
+
+<h2 id="kinds">2. Kinds of performance tests</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Kind</th><th>Question it answers</th><th>Shape</th><th>In Smart Campus</th></tr></thead>
+<tbody>
+<tr><td><strong>Smoke</strong></td><td>Does the script work at all?</td><td>1–2 users, under a minute</td><td>Run after every change to the script or the API</td></tr>
+<tr><td><strong>Load</strong></td><td>Do we meet targets at the expected traffic?</td><td>Ramp up to normal peak, hold, ramp down</td><td>Normal registration day traffic</td></tr>
+<tr><td><strong>Stress</strong></td><td>Where does it break, and how?</td><td>Keep raising the load past the target</td><td>Finds the safe admission rate for the waiting room (lesson 20)</td></tr>
+<tr><td><strong>Spike</strong> (our "rush")</td><td>Do we survive a sudden jump?</td><td>From almost 0 to very high in seconds</td><td>08:00, window opens: this is NFR-1</td></tr>
+<tr><td><strong>Soak</strong></td><td>Does it slowly get worse?</td><td>Medium load for hours</td><td>Memory leaks, growing Redis keys without TTL</td></tr>
+</tbody></table></div>
+<p>Always start with a smoke test. A load test on a broken script only produces a big report of
+errors.</p>
+
+<h2 id="basics">3. A first k6 script</h2>
+<p>A k6 script has three parts: <code>options</code> (how much load, and the pass/fail rules),
+an <code>export default function</code> (what one user does once: one
+<strong>iteration</strong>), and optional <code>setup</code>/<code>teardown</code> functions.</p>
+<pre data-file="A smoke test against the platform ping (works today once the apps run)"><code>import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+const BASE = __ENV.BASE_URL || 'http://localhost:8080';   <span class="c">// the gateway</span>
+
+export const options = {
+  vus: 2,                    <span class="c">// 2 virtual users</span>
+  duration: '30s',
+  thresholds: {
+    http_req_failed: ['rate&lt;0.01'],     <span class="c">// under 1% errors</span>
+    http_req_duration: ['p(95)&lt;500'],   <span class="c">// p95 under 500 ms: NFR-1's number</span>
+  },
+};
+
+export default function () {
+  const res = http.get(`${BASE}/api/v1/platform/ping`);
+  check(res, {
+    'status is 200': (r) =&gt; r.status === 200,
+  });
+  sleep(1);                  <span class="c">// "think time": a real user pauses</span>
+}</code></pre>
+<div class="compare">
+  <div class="good"><h4><code>check</code></h4>
+    <p>Looks at one response and records pass/fail. A failed check does <em>not</em> stop the
+    test or fail it. It shows up as a percentage at the end ("checks: 99.8%").</p></div>
+  <div class="good"><h4><code>threshold</code></h4>
+    <p>A pass/fail rule on a whole metric. If any threshold fails, k6 exits with a non-zero exit
+    code, so a script or CI job can stop the release.</p></div>
+</div>
+<p>You can also put a threshold on the check rate: <code>checks: ['rate&gt;0.99']</code>. That
+turns "99% of checks passed" into a real gate.</p>
+
+<h2 id="model">4. VUs vs arrival rate (and coordinated omission)</h2>
+<p>A <strong>virtual user (VU)</strong> is like one simulated person running your function in a
+loop. There are two ways to describe load:</p>
+<div class="compare">
+  <div class="poor"><h4>Closed model: "N users"</h4>
+    <p>Executors <code>constant-vus</code>, <code>ramping-vus</code>,
+    <code>per-vu-iterations</code>. Each VU sends a request, <strong>waits for the answer</strong>,
+    then continues. If the server slows down, the VUs send fewer requests. The load drops just
+    when the system is in trouble.</p></div>
+  <div class="good"><h4>Open model: "N arrivals per second"</h4>
+    <p>Executors <code>constant-arrival-rate</code>, <code>ramping-arrival-rate</code>. k6
+    starts new iterations at a fixed rate, <strong>no matter how slow</strong> the server is,
+    using free VUs from a pool. This is how real students behave: at 08:00 they arrive whether
+    or not the server is fast.</p></div>
+</div>
+<p>The closed model has a hidden trap called <strong>coordinated omission</strong>. Imagine
+the server freezes for 5 seconds. In the closed model, every VU is stuck waiting, so
+<em>nobody sends new requests</em> during the freeze. Those 5 seconds produce only a few slow
+samples instead of hundreds. The p95 looks better than what real students would feel. The
+open model keeps sending; if no VU is free, k6 counts a <code>dropped_iterations</code> metric,
+which tells you the test itself could not keep up.</p>
+<div class="callout tip">
+  <span class="title">Rule for Smart Campus</span>
+  Use an arrival-rate executor for the rush. Use VU-based executors only for smoke tests or for
+  "everyone presses at exactly 08:00:00" bursts, and read their latencies with care.
+</div>
+
+<h2 id="rush">5. The registration rush script</h2>
+<h3>Shape of the rush</h3>
+<p>NFR-1 says 5,000 students "at once"; the Arch says "at the same minute". A useful shape for
+5,000 students, each arriving once:</p>
+<pre class="diagram">arrivals per second
+ 250 │      ┌───────────────────┐
+     │     /                     \
+     │    /                       \
+   0 └───/─────────────────────────\────►  time
+        0s  5s                 20s  25s
+
+ ramp up   0 → 250/s in 5 s   ≈   625 students
+ hold      250/s for 15 s     ≈ 3,750 students
+ ramp down 250 → 0/s in 5 s   ≈   625 students
+                               = 5,000 students, front-loaded like a real opening</pre>
+<p>Each iteration is one student: register for one section, then poll the result (202 +
+polling, decision C8). Because of polling, one student makes several HTTP requests, so the
+server sees more than 250 requests per second.</p>
+
+<h3>Test data: students, tokens and sections</h3>
+<ul>
+  <li><strong>Students and tokens.</strong> Every request needs a JWT from Keycloak
+      (<a href="16-oauth-oidc-keycloak.html">lesson 16</a>). Getting 5,000 tokens during the
+      test would load-test Keycloak, not registration. So a seed script fetches them
+      <em>before</em> the test and writes <code>data/students.json</code>. Two traps: access
+      tokens live only 5 minutes in our design (Arch §5), so the test realm needs a longer
+      lifetime or the seed must run right before the test; and the client used to get tokens
+      without a browser must exist only in the test realm, never in production.</li>
+  <li><strong>Sections.</strong> Seed a known set, for example 20 sections × 100 seats = 2,000
+      seats for 5,000 students. Many students <em>must</em> get <code>SECTION_FULL</code>.
+      That tests the fast "no" path, which is most traffic on a real rush day.</li>
+  <li><strong>A clean start.</strong> Reset the registration tables and Redis keys before each
+      run, so results are comparable.</li>
+</ul>
+<p><code>SharedArray</code> loads a JSON file once and shares it between all VUs, so 5,000 VUs
+do not each keep their own copy in memory.</p>
+
+<pre data-file="Planned: load-tests/k6/registration-rush.js"><code>import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { SharedArray } from 'k6/data';
+import exec from 'k6/execution';
+
+const BASE = __ENV.BASE_URL || 'http://localhost:8080';
+const students = new SharedArray('students', () =&gt; JSON.parse(open('./data/students.json')));
+const sections = new SharedArray('sections', () =&gt; JSON.parse(open('./data/sections.json')));
+
+<span class="c">// 409 SECTION_FULL and 429 are expected answers, not failures.</span>
+http.setResponseCallback(http.expectedStatuses(200, 202, 409, 429));
+
+export const options = {
+  scenarios: {
+    rush: {
+      executor: 'ramping-arrival-rate',
+      startRate: 0,
+      timeUnit: '1s',
+      preAllocatedVUs: 500,
+      maxVUs: 3000,
+      stages: [
+        { target: 250, duration: '5s' },
+        { target: 250, duration: '15s' },
+        { target: 0, duration: '5s' },
+      ],
+    },
+  },
+  thresholds: {
+    'http_req_duration{name:register}': ['p(95)&lt;500'],   <span class="c">// NFR-1</span>
+    'http_req_duration{name:status}': ['p(95)&lt;500'],
+    http_req_failed: ['rate&lt;0.001'],                     <span class="c">// 5xx and other unexpected codes</span>
+    checks: ['rate&gt;0.999'],
+    dropped_iterations: ['count==0'],                     <span class="c">// k6 kept the planned rate</span>
+  },
+};
+
+export default function () {
+  const i = exec.scenario.iterationInTest;               <span class="c">// 0, 1, 2 … unique per student</span>
+  const student = students[i % students.length];
+  const section = sections[i % sections.length];
+  const headers = {
+    Authorization: `Bearer ${student.token}`,
+    'Content-Type': 'application/json',
+    'Idempotency-Key': `${student.id}-${section.id}`,
+  };
+
+  const res = http.post(`${BASE}/api/v1/registration/requests`,
+      JSON.stringify({ sectionId: section.id }),
+      { headers, tags: { name: 'register' } });
+
+  check(res, { 'register answered 202 or 409': (r) =&gt; r.status === 202 || r.status === 409 });
+  if (res.status !== 202) return;
+
+  const url = `${BASE}/api/v1/registration/requests/${res.json('requestId')}`;
+  for (let attempt = 0; attempt &lt; 30; attempt++) {        <span class="c">// at most ~30 s of polling</span>
+    sleep(1);
+    const s = http.get(url, { headers, tags: { name: 'status' } });
+    if (s.json('status') !== 'PENDING') {
+      check(s, { 'final status known': (r) =&gt; ['CONFIRMED', 'REJECTED'].includes(r.json('status')) });
+      return;
+    }
+  }
+  check(null, { 'final status known': () =&gt; false });   <span class="c">// still PENDING: counts as a failure</span>
+}</code></pre>
+<p>Things to notice:</p>
+<ul>
+  <li><strong><code>tags: { name: … }</code></strong> group requests, so thresholds can target
+      one endpoint (<code>http_req_duration{name:register}</code>). Without a name tag, every
+      status URL (each with a different id) would be its own group.</li>
+  <li><strong><code>http.expectedStatuses</code></strong>: by default k6 counts every status
+      ≥ 400 as "failed". In a rush, <code>409 SECTION_FULL</code> is a correct answer.</li>
+  <li><strong>The Idempotency-Key</strong> is the same if the same student retries the same
+      section, as a real client would do (Arch §7).</li>
+  <li><strong>"Every request answered"</strong>: the last check fails if a request stays
+      <code>PENDING</code> too long. Fast 202s with lost results would be a hidden failure.</li>
+</ul>
+<p>For an "everyone at exactly 08:00:00" burst, add a second scenario with the
+<code>per-vu-iterations</code> executor (<code>vus: 5000, iterations: 1</code>). It is closer to
+the Arch's words "5,000 virtual users", but remember the coordinated-omission caveat.</p>
+
+<h2 id="running">6. Running it and watching Grafana</h2>
+<h3>k6 in Docker against the Compose stack</h3>
+<p>You do not need to install k6. Run the official <code>grafana/k6</code> image with a
+<strong>pinned tag</strong> (platform rule: no <code>latest</code>). Attach it to the Compose
+network, so it can reach the gateway by its service name. Our Compose project is named
+<code>smart-campus</code>, so the default network is <code>smart-campus_default</code>.</p>
+<pre data-file="Planned (PowerShell, from the repo root; apps profile from T15 running)"><code>docker run --rm -i `
+  --network smart-campus_default `
+  -v "${PWD}/load-tests/k6:/scripts" `
+  -e BASE_URL=http://gateway:8080 `
+  grafana/k6:&lt;pinned-tag&gt; run /scripts/registration-rush.js</code></pre>
+<div class="callout bad">
+  <span class="title">Trap: the per-IP rate limit</span>
+  All k6 traffic comes from <strong>one IP address</strong>. The gateway's per-IP limit (platform
+  R1: 20 requests/s, burst 40) would answer almost everything with 429, and you would be testing
+  the limiter, not registration. The limit is set in config, so the test environment needs a
+  load-test setting (higher limit, or k6 sending traffic past it in a controlled way). Never
+  switch it off in production.
+</div>
+<h3>Laptop numbers are not production numbers</h3>
+<p>On your laptop, k6, Kafka, PostgreSQL, Redis and four Java apps share the same CPU. The Arch
+runs production on Kubernetes with up to 20 registration replicas. So:</p>
+<ul>
+  <li>On Compose (map assumption 2: "the k6 rush test runs against Compose first"), the test
+      proves <strong>correctness</strong> (NFR-2) and finds obvious slowness. Use a smaller
+      shape if needed.</li>
+  <li>The real NFR-1 pass/fail number comes from a production-like staging environment, which
+      is part of the later shipping phase.</li>
+</ul>
+<h3>Watch Grafana during the test</h3>
+<p>k6 tells you what the <em>users</em> felt. Grafana (<code>http://localhost:3000</code>,
+observability profile) tells you <em>why</em>. Keep it open during the run:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Panel</th><th>What a problem looks like</th></tr></thead>
+<tbody>
+<tr><td>Request rate and p95 per route ("Platform overview", T18)</td><td>p95 climbs while the rate stays flat: something is queueing</td></tr>
+<tr><td>5xx rate and 429 rate</td><td>Any 5xx is a bug; many 429s may mean the limiter is in the way</td></tr>
+<tr><td>Kafka consumer lag (<code>registration-worker</code>)</td><td>Lag grows and does not come down: the worker is too slow, results stay PENDING</td></tr>
+<tr><td>JVM heap and GC</td><td>Heap near the limit: long pauses, timeouts</td></tr>
+<tr><td>Seat reservations vs <code>SECTION_FULL</code> (planned registration dashboard, Arch §8)</td><td>Reservations stop while seats are left: a leak in the seat gate</td></tr>
+<tr><td>Seat drift (planned, lesson 20)</td><td>Not 0 two minutes after the test: Redis and DB disagree</td></tr>
+</tbody></table></div>
+<p>k6 can also send its own metrics to Prometheus (with a Prometheus remote-write output), so
+k6 latency and server metrics appear on one Grafana time line. Check the k6 docs for the
+current option name before you set it up.</p>
+
+<h2 id="results">7. Reading results and checking correctness</h2>
+<h3>The end-of-test summary</h3>
+<pre class="diagram">  ✓ register answered 202 or 409
+  ✓ final status known
+
+  checks.........................: 100.00% ✓ 7012   ✗ 0
+✓ dropped_iterations.............: 0
+✓ http_req_duration{name:register}: avg=61ms  med=38ms  p(90)=142ms p(95)=231ms max=1.2s
+✓ http_req_duration{name:status}..: avg=12ms  med=9ms   p(90)=21ms  p(95)=30ms  max=410ms
+✓ http_req_failed................: 0.00%
+  http_reqs......................: 9871   375/s
+  iterations.....................: 5000
+  vus_max........................: 620
+
+(example numbers for illustration only)</pre>
+<p>Read it in this order: (1) Did every threshold pass (the ✓ marks)? (2) Is
+<code>dropped_iterations</code> 0, so the load was really applied? (3) Look at p95
+<em>and</em> max: a max of many seconds with a good p95 still deserves a look in Grafana.
+(4) Are <code>iterations</code> = 5,000? Save the summary (k6's <code>handleSummary</code>
+function can write it as JSON) so you can compare runs before every window (NFR-5).</p>
+
+<h3>The correctness check: the part most teams forget</h3>
+<p>A fast test that oversold a section is a <strong>failed</strong> test. After the run, wait
+until the worker's Kafka lag is 0, then run SQL checks (table names from lesson 20, planned):</p>
+<pre data-file="Planned: load-tests/k6/verify-rush.sql (every query must return 0 rows)"><code><span class="c">-- 1. NFR-2: no section has more normal enrollments than seats</span>
+SELECT s.section_id, s.capacity, count(e.id) AS enrolled
+  FROM registration.section_seats s
+  JOIN registration.enrollments e
+    ON e.section_id = s.section_id AND e.status = 'ENROLLED'
+ GROUP BY s.section_id, s.capacity
+HAVING count(e.id) &gt; s.capacity;
+
+<span class="c">-- 2. NFR-2: no student is enrolled twice in one section</span>
+SELECT student_id, section_id, count(*)
+  FROM registration.enrollments
+ WHERE status = 'ENROLLED'
+ GROUP BY student_id, section_id
+HAVING count(*) &gt; 1;
+
+<span class="c">-- 3. The counter matches the real rows (no lost update)</span>
+SELECT s.section_id, s.enrolled, count(e.id) AS real_count
+  FROM registration.section_seats s
+  LEFT JOIN registration.enrollments e
+    ON e.section_id = s.section_id AND e.status = 'ENROLLED'
+ GROUP BY s.section_id, s.enrolled
+HAVING s.enrolled &lt;&gt; count(e.id);</code></pre>
+<p>Two more checks, done by a small script that also reads Redis and the k6 JSON summary:</p>
+<ul>
+  <li><strong>No lost seats:</strong> with 5,000 students and 2,000 seats, every section must
+      end <strong>full</strong>. A section with free seats while students were told
+      <code>SECTION_FULL</code> means seats leaked in Redis (under-selling is a bug too).</li>
+  <li><strong>Every request answered:</strong> number of 202 answers in k6 = number of
+      <code>CONFIRMED</code> + <code>REJECTED</code> results. Redis <code>seats:</code> for each
+      section = capacity − enrolled (drift 0).</li>
+</ul>
+<pre data-file="Run the SQL checks against Compose (PowerShell has no &lt; redirect, so pipe the file)"><code>Get-Content load-tests/k6/verify-rush.sql | docker compose -f infra/docker-compose.yml exec -T postgres `
+  psql -U postgres -d campus -v ON_ERROR_STOP=1</code></pre>
+<p>(User and database names come from your <code>infra/.env</code>.)</p>
+
+<h2 id="in-project">8. Where it is in Smart Campus</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Idea</th><th>Where</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>NFR-1, NFR-2, NFR-5</td><td>Plan, "Platform &amp; Non-functional" stories</td><td>defined</td></tr>
+<tr><td>Rush script</td><td><code>load-tests/k6/registration-rush.js</code> (name from Arch §9)</td><td>planned (module 5)</td></tr>
+<tr><td>Test data seed + SQL checks</td><td><code>load-tests/k6/data/</code>, <code>verify-rush.sql</code></td><td>planned</td></tr>
+<tr><td>Compose network and apps profile</td><td><code>infra/docker-compose.yml</code> (<code>name: smart-campus</code>); apps profile in T15</td><td>exists / planned</td></tr>
+<tr><td>Per-IP limit to adjust for tests</td><td>gateway config (platform R1, T13)</td><td>planned</td></tr>
+<tr><td>Grafana dashboards and alerts</td><td><code>infra/grafana/dashboards/</code>, <code>infra/prometheus/alerts.yml</code> (T16–T18)</td><td>planned</td></tr>
+<tr><td>Release gate in CI</td><td>k6 against staging (Arch §8)</td><td>shipping phase</td></tr>
+</tbody></table></div>
+
+<h2 id="mistakes">9. Common mistakes</h2>
+<ul>
+  <li><strong>Only looking at the average.</strong> Use p95 (and look at max).</li>
+  <li><strong>Using VUs for a rush.</strong> Closed-model tests hide slowness (coordinated
+      omission). Use arrival rates.</li>
+  <li><strong>Counting 409 as an error, or counting 500 as fine.</strong> Set
+      <code>expectedStatuses</code> carefully.</li>
+  <li><strong>Skipping the correctness check.</strong> Speed without NFR-2 is worthless.</li>
+  <li><strong>Getting tokens inside the test.</strong> You end up testing Keycloak.</li>
+  <li><strong>Forgetting the per-IP limiter</strong> and "proving" that everything returns 429.</li>
+  <li><strong>Running k6 on the same small machine and trusting the absolute numbers.</strong>
+      Compare runs with each other; get the real number on staging.</li>
+  <li><strong>No name tags on URLs with ids.</strong> Thousands of tiny metric groups, and
+      thresholds that match nothing.</li>
+  <li><strong>Not resetting data.</strong> The second run finds every section already full and
+      looks amazingly fast.</li>
+</ul>
+
+<h2 id="practice">10. Practice</h2>
+<ol class="steps">
+  <li><p>Start the infra and core-app (lesson 08 shows how), then save the smoke script from
+      section 3 as <code>smoke.js</code> in a scratch folder and run it with Docker:</p>
+<pre><code>Get-Content smoke.js | docker run --rm -i -e BASE_URL=http://host.docker.internal:8081 grafana/k6:&lt;pinned-tag&gt; run -</code></pre>
+      <p>(Before the gateway exists, call core-app directly on port 8081.)</p></li>
+  <li><p>Change the threshold to <code>p(95)&lt;1</code> and run again. Watch the ✗ and the
+      non-zero exit code (<code>echo $LASTEXITCODE</code> in PowerShell).</p></li>
+  <li><p>Change the smoke test to <code>constant-arrival-rate</code> with
+      <code>rate: 50, timeUnit: '1s', duration: '30s', preAllocatedVUs: 10</code>. Read
+      <code>vus_max</code> and <code>dropped_iterations</code> in the summary.</p></li>
+  <li><p>On paper: calculate how many students arrive with stages
+      <code>0→400/s in 10 s</code>, <code>400/s for 10 s</code>, <code>400→0 in 10 s</code>.
+      Is that more or less than 5,000?</p></li>
+  <li><p>On paper: write one more SQL check that finds students who were enrolled in two
+      sections with overlapping times (REG-3). Which module's data would you need?</p></li>
+</ol>
+
+<h2 id="words">11. Words to know</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Word</th><th>Meaning in simple words</th></tr></thead>
+<tbody>
+<tr><td>Load test</td><td>A test that sends many fake users to measure speed and errors.</td></tr>
+<tr><td>VU (virtual user)</td><td>One simulated user running the script's function in a loop.</td></tr>
+<tr><td>Iteration</td><td>One run of the default function (here: one student).</td></tr>
+<tr><td>Executor</td><td>The k6 strategy that decides how VUs and iterations are scheduled.</td></tr>
+<tr><td>Arrival rate</td><td>How many new iterations start per time unit, no matter how slow the server is.</td></tr>
+<tr><td>p95</td><td>95% of the values are at or below this number.</td></tr>
+<tr><td>Check</td><td>A pass/fail test on one response; it does not stop the run.</td></tr>
+<tr><td>Threshold</td><td>A pass/fail rule on a metric; failing it fails the whole run.</td></tr>
+<tr><td>Coordinated omission</td><td>Missing slow samples because the test waited instead of sending.</td></tr>
+<tr><td>dropped_iterations</td><td>Iterations k6 wanted to start but could not (no free VU).</td></tr>
+<tr><td>Spike / rush test</td><td>A sudden jump from low to very high load.</td></tr>
+<tr><td>Think time</td><td>A pause (<code>sleep</code>) that imitates a real user.</td></tr>
+</tbody></table></div>
+
+<h2 id="quiz">12. Test yourself</h2>
+<div class="quiz">
+  <details><summary>1. Why do we measure p95 and not the average response time?</summary>
+    <p>The average hides the slow tail. A few students waiting many seconds barely move the
+    average, but they are exactly the people NFR-1 protects. p95 tells you what almost
+    everyone experiences.</p></details>
+  <details><summary>2. Why is an arrival-rate executor better than a fixed number of VUs for the rush?</summary>
+    <p>Real students arrive whether the server is fast or slow. With fixed VUs, a slow server
+    makes VUs wait and send less, so the test reduces the load exactly when it matters and
+    under-reports latency (coordinated omission).</p></details>
+  <details><summary>3. All thresholds passed. Why is the test still not finished?</summary>
+    <p>Thresholds measure speed and HTTP errors. NFR-2 is about correctness: you must still
+    check the database for oversold sections, double enrollments and counters that do not match,
+    and check that every accepted request got a final result.</p></details>
+  <details><summary>4. Why should tokens be prepared before the test instead of during it?</summary>
+    <p>Logging in 5,000 users during the test puts the load on Keycloak and mixes its latency
+    into our numbers. We want to measure registration. Preparing tokens also keeps the test
+    repeatable.</p></details>
+  <details><summary>5. Why must <code>409 SECTION_FULL</code> be an "expected" status?</summary>
+    <p>With more students than seats, many correct answers are 409. If k6 counted them as
+    failures, <code>http_req_failed</code> would be huge and hide the real problems (5xx,
+    timeouts).</p></details>
+  <details><summary>6. Why can a laptop run not prove NFR-1 for production?</summary>
+    <p>On a laptop, k6 and every service share one CPU, and there is one replica of each app.
+    Production has separate machines and up to 20 registration replicas. The laptop run proves
+    correctness and catches big regressions; the official number comes from a production-like
+    environment.</p></details>
+</div>
+
+<h2 id="more">13. Learn more</h2>
+<ul>
+  <li><a href="https://grafana.com/docs/k6/latest/">Grafana k6 documentation</a>: start with "Get started" and "Using k6".</li>
+  <li><a href="https://grafana.com/docs/k6/latest/using-k6/scenarios/executors/">k6 docs: Executors</a>: every executor and its options.</li>
+  <li><a href="https://grafana.com/docs/k6/latest/using-k6/scenarios/concepts/open-vs-closed/">k6 docs: Open and closed models</a>: coordinated omission explained.</li>
+  <li><a href="https://grafana.com/docs/k6/latest/using-k6/thresholds/">k6 docs: Thresholds</a> and <a href="https://grafana.com/docs/k6/latest/using-k6/checks/">Checks</a>.</li>
+  <li><a href="https://grafana.com/docs/k6/latest/testing-guides/test-types/">k6 docs: Test types</a>: smoke, load, stress, spike, soak.</li>
+  <li><a href="https://grafana.com/docs/k6/latest/javascript-api/k6-data/sharedarray/">k6 docs: SharedArray</a>: test data for many VUs.</li>
+</ul>
+
+<div id="lesson-end"></div>
+</main>
+</body>
+</html>
