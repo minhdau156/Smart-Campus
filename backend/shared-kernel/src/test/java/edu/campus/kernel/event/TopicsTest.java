@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 import edu.campus.kernel.id.TypedId;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -106,6 +107,32 @@ class TopicsTest {
 
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> Topics.REGISTRATION_EVENTS.keyOf(e))
+                .withMessageContaining("studentId");
+    }
+
+    // --- A resent event: Modulith reads it back from its registry JSON, so the payload is a Map ---
+
+    @Test
+    void aMapPayloadGivesTheSameKeyAsTheRecord() {
+        var e = event("section-1234", Map.of("studentId", "student-42", "sectionId", "x"));
+
+        assertThat(Topics.REGISTRATION_EVENTS.keyOf(e)).isEqualTo("student-42");
+    }
+
+    @Test
+    void aTypedIdInAMapPayloadUsesItsUuidValue() {
+        // A typed id record is written as {"value": "<uuid>"} in JSON.
+        var e = event("section-1234", Map.of("sectionId", Map.of("value", "7c1e2a40-0000-4000-8000-000000000001")));
+
+        assertThat(Topics.COURSE_EVENTS.keyOf(e)).isEqualTo("7c1e2a40-0000-4000-8000-000000000001");
+    }
+
+    @Test
+    void aMapPayloadWithoutTheKeyFails() {
+        var e = event("section-1234", Map.of("something", "x"));
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> Topics.GRADE_EVENTS.keyOf(e))
                 .withMessageContaining("studentId");
     }
 

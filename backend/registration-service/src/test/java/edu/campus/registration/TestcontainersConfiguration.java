@@ -2,13 +2,15 @@ package edu.campus.registration;
 
 import java.nio.file.Path;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.DynamicPropertyRegistrar;
+import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.MountableFile;
 
 /**
- * A real PostgreSQL in Docker, set up exactly like the Compose one: it runs the same init script
+ * A real PostgreSQL and Kafka in Docker. PostgreSQL is set up exactly like the Compose one: it runs the same init script
  * ({@code infra/postgres/init/01-schemas-and-users.sh}), so it has the same schemas, DB users and
  * privileges.
  *
@@ -41,6 +43,17 @@ public class TestcontainersConfiguration {
                 .withEnv("REGISTRATION_SVC_DB_PASSWORD", REGISTRATION_SVC_PASSWORD)
                 .withEnv("NOTIFICATION_SVC_DB_PASSWORD", "notification-svc-test")
                 .withEnv("KEYCLOAK_DB_PASSWORD", "keycloak-test");
+    }
+
+    /**
+     * Kafka, like Compose: the broker does not create topics, the app does (spec O5). Unlike
+     * Postgres, the default connection is right here, so {@code @ServiceConnection} gives Spring
+     * its address.
+     */
+    @Bean
+    @ServiceConnection
+    KafkaContainer kafka() {
+        return new KafkaContainer("apache/kafka:4.4.0").withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false");
     }
 
     /** The app's datasource: the container's address, but the registration_svc login. */

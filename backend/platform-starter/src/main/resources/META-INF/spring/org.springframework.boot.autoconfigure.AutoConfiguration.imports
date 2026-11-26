@@ -1,3 +1,4 @@
 edu.campus.starter.problem.ProblemHandlingAutoConfiguration
 edu.campus.starter.outbox.OutboxAutoConfiguration
 edu.campus.starter.openapi.OpenApiAutoConfiguration
+edu.campus.starter.events.EventRoutingAutoConfiguration

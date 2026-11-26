@@ -59,6 +59,12 @@
             <artifactId>spring-modulith-events-api</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- TopicBuilder / NewTopic, used by EventTopics (topic declarations, spec O5). -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+            <optional>true</optional>
+        </dependency>
         <!-- ApplicationModuleDetectionStrategy, used by CampusModuleDetection. -->
         <dependency>
             <groupId>org.springframework.modulith</groupId>

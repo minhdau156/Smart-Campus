@@ -23,6 +23,8 @@ public class TestcontainersConfiguration {
     @Bean
     @ServiceConnection
     KafkaContainer kafka() {
-        return new KafkaContainer("apache/kafka:4.4.0");
+        return new KafkaContainer("apache/kafka:4.4.0")
+                // Like Compose: only the apps create topics (spec O5), so TopicsIT proves they do.
+                .withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false");
     }
 }

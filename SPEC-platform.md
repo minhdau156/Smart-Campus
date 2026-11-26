@@ -149,7 +149,7 @@ smart-campus/                          (repo root = C:\Smart Campus)
 │   ├── docker/spring-app.Dockerfile    one image recipe for all 4 apps
 │   ├── postgres/init/                  creates schemas + per-service DB users
 │   ├── otel/  prometheus/  grafana/{provisioning,dashboards}/
-│   ├── smoke.sh  replay.sh
+│   ├── smoke.sh  replay.sh  consumer-registry.txt (replayable or not, per consumer)
 ├── docs/                               source PDFs
 │   ├── api/                            exported OpenAPI JSON per app/group (committed)
 │   └── adr/                            ADR-0001… (Arch decisions 1–8 copied in + D1–D6 + Boot 4)
@@ -253,6 +253,12 @@ Modulith registry, fall back to the hand-written outbox and update D1 before goi
   JSON as `DomainEvent` with an untyped payload (a `Map`), so the key must come from envelope fields
   (as the probe does with `aggregateId`), or T12 must register a `DomainEvent` deserializer that
   uses `EventTypes` to restore the payload class before `Topics.keyOf` reads a payload field.
+  *(Settled in T12, 2026-11-26: a third, smaller way. `Topics.keyOf` also reads the key field from
+  a `Map` payload (a typed id comes back as `{"value": …}`), so no deserializer is needed. Each app
+  declares one `EventRoute` bean per event type (platform-starter `edu.campus.starter.events`); the
+  starter builds the `EventExternalizationConfiguration` from them, and its `EventKeyCheck` listener
+  computes the key inside `publishEvent`, so a missing key throws and rolls the business
+  transaction back instead of failing after commit.)*
 - *Observed:* O1 one record, full envelope, key = probe id, then COMPLETED. O2 rollback: no row in
   `outbox_probe` or `event_publication`, no record after 2× the interval. O3 broker paused
   (`docker pause`): the commit succeeds, the publication stays incomplete (PROCESSING, then FAILED
@@ -324,13 +330,17 @@ quarantined with an issue link. They are never silently deleted.
   resends after a timeout; decided by minhdau156 at Checkpoint B.)*
 - [x] O4. Delivering the same event twice to a consumer causes the side effect exactly once (D2).
   *(T11, 2026-11-24: `IdempotentConsumerIT` and `ProbeListenerIT` in notification-service.)*
-- [ ] O5. The topics from Arch §6 (`registration.requests` 12 partitions, `registration.events` 6,
+- [x] O5. The topics from Arch §6 (`registration.requests` 12 partitions, `registration.events` 6,
   `course.events` 3, `grade.events` 3, `campus.events` 3) are declared in code by their producing
   app and exist after startup with `retention.ms=-1`. The broker does not auto-create topics.
   Publishing to a topic without the key required by D6 fails.
-- [ ] O6. Replay: after 10 probe events, running `infra/replay.sh` on the probe consumer rebuilds
+  *(T12, 2026-11-26: `TopicsIT` and `EventKeysIT` in core-app and in registration-service.)*
+- [x] O6. Replay: after 10 probe events, running `infra/replay.sh` on the probe consumer rebuilds
   exactly the same 10 rows. A `core-app` class with an in-process listener on another module's
   event fails `./mvnw test` (D5).
+  *(T12, 2026-11-26: replay observed by hand, the same probe ids came back with no duplicates;
+  `KafkaOnlyCrossModuleRuleTest` with the `fixture.listener` fixture. Consumers are listed in
+  `infra/consumer-registry.txt`.)*
 
 **API docs**
 - [ ] A1. Each app serves `/v3/api-docs`. `core-app` has one OpenAPI group per Modulith module.

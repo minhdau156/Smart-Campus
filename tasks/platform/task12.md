@@ -9,31 +9,31 @@
 Kafka; read models can be rebuilt.
 
 **Subtasks**
-- [ ] **12.1** Declare the topics as `NewTopic` beans built from `Topics`, with `retention.ms=-1`:
+- [x] **12.1** Declare the topics as `NewTopic` beans built from `Topics`, with `retention.ms=-1`:
   - `core-app`: `course.events`, `grade.events`, `campus.events`;
   - `registration-service`: `registration.requests`, `registration.events`.
-- [ ] **12.2** Externalized events take their key from `Topics` (using the approach recorded in
+- [x] **12.2** Externalized events take their key from `Topics` (using the approach recorded in
   7.3), and publishing without a key throws. Add an IT per topic checking the record key.
-- [ ] **12.3** Add an ArchUnit rule (D5): in `core-app`, an in-process listener may only accept
+- [x] **12.3** Add an ArchUnit rule (D5): in `core-app`, an in-process listener may only accept
   event types from its own module. Add a violation fixture and a test that proves it fails.
-- [ ] **12.4** Add a consumer registry that marks each consumer as replayable or not (the probe consumer is replayable).
-- [ ] **12.5** Write `infra/replay.sh <group> <tables>`. It:
+- [x] **12.4** Add a consumer registry that marks each consumer as replayable or not (the probe consumer is replayable).
+- [x] **12.5** Write `infra/replay.sh <group> <tables>`. It:
   - refuses non-replayable consumers;
   - requires the consumer to be stopped;
   - truncates the listed tables and that consumer's `processed_events` rows;
   - resets the group to earliest with `kafka-consumer-groups`;
   - prints "restart the app".
-- [ ] **12.6** Write `TopicsIT`: describe all 5 topics and assert partitions and `retention.ms=-1`.
-- [ ] **12.7** Manual replay: emit 10 probes → stop the consumer → `replay.sh` → restart → still exactly 10 rows.
+- [x] **12.6** Write `TopicsIT`: describe all 5 topics and assert partitions and `retention.ms=-1`.
+- [x] **12.7** Manual replay: emit 10 probes → stop the consumer → `replay.sh` → restart → still exactly 10 rows.
 
 **Done when**
-- [ ] The 5 topics exist with the right partitions and unlimited retention (O5)
-- [ ] Every record key matches D6, and a missing key fails publication
-- [ ] Replay rebuilds the same 10 rows, and the D5 fixture fails the build (O6)
+- [x] The 5 topics exist with the right partitions and unlimited retention (O5)
+- [x] Every record key matches D6, and a missing key fails publication
+- [x] Replay rebuilds the same 10 rows, and the D5 fixture fails the build (O6)
 
 **Verify**
-- [ ] `./mvnw verify` passes
-- [ ] Step 12.7 was observed
+- [x] `./mvnw verify` passes
+- [x] Step 12.7 was observed
 
 **Files:** `core-app/…/platform/TopicConfig.java`, `registration-service/…/TopicConfig.java`, `core-app/…/KafkaOnlyCrossModuleRuleTest.java`, `TopicsIT.java`, `infra/replay.sh`
 

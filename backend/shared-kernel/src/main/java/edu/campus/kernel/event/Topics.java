@@ -4,6 +4,7 @@ import edu.campus.kernel.id.TypedId;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.RecordComponent;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -74,7 +75,14 @@ public enum Topics {
             throw new IllegalArgumentException(
                     "Topic %s needs a key, but payload field '%s' is null".formatted(topicName, keyField));
         }
-        return value instanceof TypedId id ? id.value().toString() : value.toString();
+        if (value instanceof TypedId id) {
+            return id.value().toString();
+        }
+        // A typed id read back from JSON: {"value": "<uuid>"}.
+        if (value instanceof Map<?, ?> map && map.size() == 1 && map.get("value") != null) {
+            return map.get("value").toString();
+        }
+        return value.toString();
     }
 
     /** Finds a topic by its Kafka name. */
@@ -85,7 +93,19 @@ public enum Topics {
                 .orElseThrow(() -> new IllegalArgumentException("Unknown topic '%s'".formatted(topicName)));
     }
 
+    /**
+     * Reads the key field from the payload. The payload is a record when the event is first
+     * published, but a {@code Map} when Modulith resends it: it reads the event back from its
+     * registry JSON and does not know the payload class (spec, "How the key is set").
+     */
     private Object readPayloadField(Object payload) {
+        if (payload instanceof Map<?, ?> map) {
+            if (!map.containsKey(keyField)) {
+                throw new IllegalArgumentException("Topic %s needs key field '%s', but the payload has no such field"
+                        .formatted(topicName, keyField));
+            }
+            return map.get(keyField);
+        }
         RecordComponent[] components = payload.getClass().getRecordComponents();
         if (components == null) {
             throw new IllegalArgumentException(

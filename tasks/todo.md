@@ -42,7 +42,7 @@ ids that the task closes are ticked.
 - [x] [T9](platform/task9.md): OpenAPI docs, backend part (5) · closes A1 (backend)
 - [x] [T10](platform/task10.md): `registration-service` skeleton (6) · closes I2 (D3 part)
 - [x] [T11](platform/task11.md): `notification-service` + idempotent consumer (6) · closes O4
-- [ ] [T12](platform/task12.md): Topics, keys, retention, Kafka-only rule, replay (7) · closes O5, O6
+- [x] [T12](platform/task12.md): Topics, keys, retention, Kafka-only rule, replay (7) · closes O5, O6
 - [ ] [T13](platform/task13.md): Gateway routes + smoke script (6) · closes I3
 - [ ] [T14](platform/task14.md): Gateway per-IP rate limiting (5) · closes R1
 - [ ] [T15](platform/task15.md): App container images + `apps` profile (6) · closes K1

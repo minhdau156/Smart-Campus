@@ -1,10 +1,11 @@
 package edu.campus.platform.internal;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import edu.campus.kernel.event.DomainEvent;
+import edu.campus.starter.events.EventRouting;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -16,9 +17,11 @@ class ProbeTopicTest {
         return new DomainEvent<>(UUID.randomUUID(), type, 1, Instant.EPOCH, "probe-7", payload);
     }
 
+    private final EventRouting routing = new EventRouting(List.of(new OutboxProbeConfiguration().probeRoute()));
+
     @Test
     void routesProbeEventsToTheProbeTopicKeyedByAggregateId() {
-        RoutingTarget target = ProbeTopic.route(event(OutboxProbeService.EVENT_TYPE, Map.of()));
+        RoutingTarget target = routing.target(event(OutboxProbeService.EVENT_TYPE, Map.of()));
 
         assertThat(target.getTarget()).isEqualTo("platform.probe");
         assertThat(target.getKey()).isEqualTo("probe-7");
@@ -37,16 +40,8 @@ class ProbeTopicTest {
 
     @Test
     void selectsOnlyProbeEvents() {
-        assertThat(ProbeTopic.isProbeEvent(event(OutboxProbeService.EVENT_TYPE, Map.of())))
+        assertThat(routing.isRouted(event(OutboxProbeService.EVENT_TYPE, Map.of())))
                 .isTrue();
-        assertThat(ProbeTopic.isProbeEvent(event("SomethingElse", Map.of()))).isFalse();
-        assertThat(ProbeTopic.isProbeEvent("not an envelope")).isFalse();
-    }
-
-    @Test
-    void refusesToRouteOtherEvents() {
-        assertThatThrownBy(() -> ProbeTopic.route(event("SomethingElse", Map.of())))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("SomethingElse");
+        assertThat(routing.isRouted(event("SomethingElse", Map.of()))).isFalse();
     }
 }

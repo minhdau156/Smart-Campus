@@ -1,32 +1,26 @@
 package edu.campus.platform.internal;
 
-import edu.campus.kernel.event.DomainEvent;
+import edu.campus.starter.events.EventRoute;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.kafka.config.TopicBuilder;
-import org.springframework.modulith.events.EventExternalizationConfiguration;
 
 /**
  * Dev/test only (T7 outbox spike): which events go to Kafka, and where.
  *
- * <p>T12 replaces this with the real table for all topics (shared-kernel {@code Topics}).
+ * <p>Since T12 the probe uses the same routing as every real event: an {@link EventRoute} bean,
+ * collected by platform-starter's {@code EventRoutingAutoConfiguration}.
  */
 @Configuration(proxyBeanMethods = false)
 @Profile({"dev", "test"})
 class OutboxProbeConfiguration {
 
-    /**
-     * Tells Modulith: externalize probe envelopes (and nothing else) to {@link ProbeTopic#NAME},
-     * with the key computed by {@link ProbeTopic#route}.
-     */
+    /** Probe envelopes go to {@link ProbeTopic#NAME}, keyed by {@link ProbeTopic#keyOf}. */
     @Bean
-    EventExternalizationConfiguration eventExternalization() {
-        return EventExternalizationConfiguration.externalizing()
-                .select(ProbeTopic::isProbeEvent)
-                .route(DomainEvent.class, ProbeTopic::route)
-                .build();
+    EventRoute probeRoute() {
+        return EventRoute.custom(OutboxProbeService.EVENT_TYPE, ProbeTopic.NAME, ProbeTopic::keyOf);
     }
 
     /**

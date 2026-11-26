@@ -1,0 +1,16 @@
+# Consumer registry (spec D5): every Kafka consumer of Smart Campus, and whether it may be replayed.
+# infra/replay.sh reads this file and refuses any consumer that is missing or non-replayable.
+#
+# One line per consumer:   <consumer-group>   <schema>   <replayable | non-replayable>
+#   consumer-group  the @KafkaListener groupId. It is also the `consumer` name the listener uses in
+#                   <schema>.processed_events (IdempotentConsumer), so replay can clear those rows.
+#   schema          the DB schema that holds the consumer's tables and its processed_events.
+#   replayable      the consumer only builds a read model: dropping it and reading the topic again
+#                   gives the same rows.
+#   non-replayable  the consumer has side effects outside the database (email, push). Reading the
+#                   topic again would repeat them, so it must never be replayed.
+#
+# Each service has a test that fails when one of its @KafkaListeners is not listed here
+# (notification-service: ConsumerRegistryTest).
+
+notification.probe    notification    replayable    # dev/test only: probe_read_model (T11)
